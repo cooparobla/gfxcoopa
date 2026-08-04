@@ -52,17 +52,22 @@ public:
     /**
      * @brief Creates the offscreen target at the given resolution.
      *
-     * @param device    Vulkan logical device.
-     * @param allocator VMA allocator.
-     * @param width     Render width in pixels.
-     * @param height    Render height in pixels.
+     * @param device       Vulkan logical device.
+     * @param allocator    VMA allocator.
+     * @param width        Render width in pixels.
+     * @param height       Render height in pixels.
+     * @param color_format Color attachment pixel format.
+     * @param samples      MSAA sample count.
      */
-    OffscreenTarget(core::Device&      device,
-                    memory::Allocator& allocator,
-                    uint32_t           width,
-                    uint32_t           height)
+    OffscreenTarget(core::Device&         device,
+                    memory::Allocator&    allocator,
+                    uint32_t              width,
+                    uint32_t              height,
+                    VkFormat              color_format = VK_FORMAT_R8G8B8A8_UNORM,
+                    VkSampleCountFlagBits samples      = VK_SAMPLE_COUNT_1_BIT)
         : device_(device), allocator_(allocator),
-          width_(width), height_(height)
+          width_(width), height_(height),
+          color_format_(color_format), samples_(samples)
     {
         create_resources_();
     }
@@ -125,6 +130,7 @@ public:
         height_ = height;
         destroy_framebuffer_();
         color_image_.reset();
+        resolve_image_.reset();
         depth_image_.reset();
         render_pass_.reset();
         create_resources_();
@@ -138,7 +144,11 @@ public:
     uint32_t height() const { return height_; }
 
     /** @brief Returns the color image view for sampling in subsequent passes. */
-    VkImageView color_view() const { return color_image_->view(); }
+    VkImageView color_view() const {
+        return (samples_ > VK_SAMPLE_COUNT_1_BIT && resolve_image_)
+            ? resolve_image_->view()
+            : color_image_->view();
+    }
     /** @brief Returns the depth image view (for edge detection shaders). */
     VkImageView depth_view() const { return depth_image_->view(); }
 
@@ -150,35 +160,58 @@ public:
 
 private:
     /**
-     * @brief Creates all resources: color image, depth image, render pass, framebuffer.
+     * @brief Creates all resources: color image, resolve image (if MSAA), depth image, render pass, framebuffer.
      */
     void create_resources_() {
-        // Color attachment: RGBA8, used as color attachment + sampled texture.
+        bool is_msaa = samples_ > VK_SAMPLE_COUNT_1_BIT;
+
+        // Color attachment: used as color attachment (+ sampled if not MSAA).
+        VkImageUsageFlags color_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (!is_msaa) {
+            color_usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+        }
+
         color_image_ = std::make_unique<memory::Image>(
             device_, allocator_,
             width_, height_,
-            VK_FORMAT_R8G8B8A8_UNORM,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT
+            color_format_,
+            color_usage,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            VMA_MEMORY_USAGE_AUTO,
+            samples_
         );
 
-        // Depth attachment: D32_SFLOAT, used as depth + sampled for edge detection.
+        if (is_msaa) {
+            // Resolve attachment: single-sampled image that receives MSAA resolve output.
+            resolve_image_ = std::make_unique<memory::Image>(
+                device_, allocator_,
+                width_, height_,
+                color_format_,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                VMA_MEMORY_USAGE_AUTO,
+                VK_SAMPLE_COUNT_1_BIT
+            );
+        }
+
+        // Depth attachment: D32_SFLOAT.
         depth_image_ = std::make_unique<memory::Image>(
             device_, allocator_,
             width_, height_,
             VK_FORMAT_D32_SFLOAT,
             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            VK_IMAGE_ASPECT_DEPTH_BIT
+            VK_IMAGE_ASPECT_DEPTH_BIT,
+            VMA_MEMORY_USAGE_AUTO,
+            samples_
         );
 
-        // Render pass: color final layout = SHADER_READ_ONLY_OPTIMAL, depth final layout =
-        // SHADER_READ_ONLY_OPTIMAL so both can be sampled in post-processing passes.
         render_pass_ = std::make_unique<pipeline::RenderPass>(
             device_,
-            VK_FORMAT_R8G8B8A8_UNORM,
+            color_format_,
             VK_FORMAT_D32_SFLOAT,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   // color final
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL    // depth final — enables edge detection
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   // depth final
+            samples_
         );
 
         create_framebuffer_();
@@ -188,16 +221,18 @@ private:
      * @brief Creates the VkFramebuffer from the current images and render pass.
      */
     void create_framebuffer_() {
-        VkImageView attachments[] = {
-            color_image_->view(),
-            depth_image_->view()
-        };
+        std::vector<VkImageView> attachments;
+        attachments.push_back(color_image_->view());
+        attachments.push_back(depth_image_->view());
+        if (samples_ > VK_SAMPLE_COUNT_1_BIT && resolve_image_) {
+            attachments.push_back(resolve_image_->view());
+        }
 
         VkFramebufferCreateInfo fb_info{};
         fb_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         fb_info.renderPass      = render_pass_->handle();
-        fb_info.attachmentCount = 2;
-        fb_info.pAttachments    = attachments;
+        fb_info.attachmentCount = static_cast<uint32_t>(attachments.size());
+        fb_info.pAttachments    = attachments.data();
         fb_info.width           = width_;
         fb_info.height          = height_;
         fb_info.layers          = 1;
@@ -219,10 +254,13 @@ private:
     memory::Allocator& allocator_; /**< VMA allocator (not owned). */
     uint32_t           width_;     /**< Render width in pixels. */
     uint32_t           height_;    /**< Render height in pixels. */
+    VkFormat           color_format_ = VK_FORMAT_R8G8B8A8_UNORM;
+    VkSampleCountFlagBits samples_   = VK_SAMPLE_COUNT_1_BIT;
 
-    std::unique_ptr<memory::Image>          color_image_;  /**< RGBA8 color attachment. */
-    std::unique_ptr<memory::Image>          depth_image_;  /**< D32 depth attachment. */
-    std::unique_ptr<pipeline::RenderPass>   render_pass_;  /**< Offscreen render pass. */
+    std::unique_ptr<memory::Image>          color_image_;   /**< Color attachment. */
+    std::unique_ptr<memory::Image>          resolve_image_; /**< MSAA resolve attachment. */
+    std::unique_ptr<memory::Image>          depth_image_;   /**< Depth attachment. */
+    std::unique_ptr<pipeline::RenderPass>   render_pass_;   /**< Offscreen render pass. */
     VkFramebuffer                           framebuffer_ = VK_NULL_HANDLE; /**< Framebuffer. */
 };
 

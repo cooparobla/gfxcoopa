@@ -54,11 +54,13 @@ public:
                VkFormat color_format,
                VkFormat depth_format = VK_FORMAT_D32_SFLOAT,
                VkImageLayout color_final_layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-               VkImageLayout depth_final_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+               VkImageLayout depth_final_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+               VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT)
         : device_(device)
     {
         bool has_color = color_format != VK_FORMAT_UNDEFINED;
         bool has_depth = depth_format != VK_FORMAT_UNDEFINED;
+        bool has_msaa  = has_color && (samples > VK_SAMPLE_COUNT_1_BIT);
 
         // --- Attachment descriptions ---
         std::vector<VkAttachmentDescription> attachments;
@@ -67,13 +69,13 @@ public:
         if (has_color) {
             VkAttachmentDescription color_attachment{};
             color_attachment.format         = color_format;
-            color_attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+            color_attachment.samples        = samples;
             color_attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            color_attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+            color_attachment.storeOp        = has_msaa ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
             color_attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
             color_attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-            color_attachment.finalLayout    = color_final_layout;
+            color_attachment.finalLayout    = has_msaa ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : color_final_layout;
 
             color_ref.attachment = static_cast<uint32_t>(attachments.size());
             color_ref.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -84,7 +86,7 @@ public:
         if (has_depth) {
             VkAttachmentDescription depth_attachment{};
             depth_attachment.format         = depth_format;
-            depth_attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+            depth_attachment.samples        = samples;
             depth_attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
             depth_attachment.storeOp        = (depth_final_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
                                               ? VK_ATTACHMENT_STORE_OP_STORE
@@ -99,11 +101,29 @@ public:
             attachments.push_back(depth_attachment);
         }
 
+        VkAttachmentReference resolve_ref{};
+        if (has_msaa) {
+            VkAttachmentDescription resolve_attachment{};
+            resolve_attachment.format         = color_format;
+            resolve_attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+            resolve_attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            resolve_attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+            resolve_attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            resolve_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            resolve_attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+            resolve_attachment.finalLayout    = color_final_layout;
+
+            resolve_ref.attachment = static_cast<uint32_t>(attachments.size());
+            resolve_ref.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attachments.push_back(resolve_attachment);
+        }
+
         VkSubpassDescription subpass{};
         subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
         subpass.colorAttachmentCount    = has_color ? 1 : 0;
         subpass.pColorAttachments       = has_color ? &color_ref : nullptr;
         subpass.pDepthStencilAttachment = has_depth ? &depth_ref : nullptr;
+        subpass.pResolveAttachments     = has_msaa ? &resolve_ref : nullptr;
 
         // --- Subpass dependencies ---
         VkSubpassDependency dependency{};

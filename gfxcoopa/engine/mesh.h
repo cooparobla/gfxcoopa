@@ -43,6 +43,7 @@ struct Vertex {
     glm::vec3 position; /**< Object-space vertex position. */
     glm::vec3 normal;   /**< Object-space vertex normal (normalized). */
     glm::vec2 uv;       /**< Texture UV coordinate. */
+    glm::vec4 tangent;  /**< Object-space vertex tangent (xyz) and handedness sign (w). */
 
     /**
      * @brief Returns the VkVertexInputBindingDescription for a Vertex stream.
@@ -56,10 +57,10 @@ struct Vertex {
     }
 
     /**
-     * @brief Returns the VkVertexInputAttributeDescriptions for position, normal, uv.
+     * @brief Returns the VkVertexInputAttributeDescriptions for position, normal, uv, tangent.
      */
-    static std::array<VkVertexInputAttributeDescription, 3> attribute_descriptions() {
-        std::array<VkVertexInputAttributeDescription, 3> attrs{};
+    static std::array<VkVertexInputAttributeDescription, 4> attribute_descriptions() {
+        std::array<VkVertexInputAttributeDescription, 4> attrs{};
 
         // location = 0: position (vec3)
         attrs[0].binding  = 0;
@@ -78,6 +79,12 @@ struct Vertex {
         attrs[2].location = 2;
         attrs[2].format   = VK_FORMAT_R32G32_SFLOAT;
         attrs[2].offset   = offsetof(Vertex, uv);
+
+        // location = 3: tangent (vec4)
+        attrs[3].binding  = 0;
+        attrs[3].location = 3;
+        attrs[3].format   = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attrs[3].offset   = offsetof(Vertex, tangent);
 
         return attrs;
     }
@@ -155,6 +162,20 @@ public:
             }
         }
 
+        // --- Parse tangents ---
+        std::vector<glm::vec4> tangents;
+        if (node.contains("tangents")) {
+            for (const auto& tan : node.at("tangents")) {
+                float w = (tan.size() > 3) ? tan.at(3).get_value<float>() : 1.0f;
+                tangents.push_back({
+                    tan.at(0).get_value<float>(),
+                    tan.at(1).get_value<float>(),
+                    tan.at(2).get_value<float>(),
+                    w
+                });
+            }
+        }
+
         // --- Parse faces and build interleaved vertices + indices ---
         // Faces are quads [i0,i1,i2,i3]; split into two triangles:
         //   tri1: [i0, i1, i2]   tri2: [i0, i2, i3]
@@ -184,6 +205,7 @@ public:
                         vert.position = (vi < positions.size()) ? positions[vi] : glm::vec3(0.0f);
                         vert.normal   = (vi < normals.size())   ? normals[vi]   : glm::vec3(0.0f, 1.0f, 0.0f);
                         vert.uv       = (vi < uvs.size())       ? uvs[vi]       : glm::vec2(0.0f);
+                        vert.tangent  = (vi < tangents.size())  ? tangents[vi]  : glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
 
                         indices.push_back(static_cast<uint32_t>(vertices.size()));
                         vertices.push_back(vert);
@@ -194,6 +216,40 @@ public:
 
         if (vertices.empty()) {
             throw std::runtime_error("[Mesh] No vertices parsed — empty or invalid mesh YAML.");
+        }
+
+        // --- Fallback tangent computation if tangents were absent in YAML ---
+        if (tangents.empty()) {
+            std::vector<glm::vec3> tan_sum(vertices.size(), glm::vec3(0.0f));
+            for (size_t i = 0; i + 2 < vertices.size(); i += 3) {
+                const auto& v0 = vertices[i];
+                const auto& v1 = vertices[i + 1];
+                const auto& v2 = vertices[i + 2];
+
+                glm::vec3 edge1 = v1.position - v0.position;
+                glm::vec3 edge2 = v2.position - v0.position;
+                glm::vec2 deltaUV1 = v1.uv - v0.uv;
+                glm::vec2 deltaUV2 = v2.uv - v0.uv;
+
+                float f = (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y);
+                glm::vec3 t;
+                if (std::abs(f) > 1e-6f) {
+                    float r = 1.0f / f;
+                    t = (edge1 * deltaUV2.y - edge2 * deltaUV1.y) * r;
+                } else {
+                    t = glm::vec3(1.0f, 0.0f, 0.0f);
+                }
+                tan_sum[i]     += t;
+                tan_sum[i + 1] += t;
+                tan_sum[i + 2] += t;
+            }
+
+            for (size_t i = 0; i < vertices.size(); ++i) {
+                glm::vec3 t = glm::length(tan_sum[i]) > 1e-5f ? glm::normalize(tan_sum[i]) : glm::vec3(1.0f, 0.0f, 0.0f);
+                glm::vec3 n = vertices[i].normal;
+                t = glm::normalize(t - n * glm::dot(n, t));
+                vertices[i].tangent = glm::vec4(t, 1.0f);
+            }
         }
 
         // --- Upload to GPU (host-visible buffers, no staging required) ---

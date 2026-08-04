@@ -61,8 +61,16 @@ public:
         dir_frag_ = std::make_unique<pipeline::Shader>(device, dir_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
         auto binding = Vertex::binding_description();
-        auto attrs   = Vertex::attribute_descriptions();
-        std::vector<VkVertexInputAttributeDescription> attr_vec(attrs.begin(), attrs.end());
+
+        // Shadow depth shaders only consume position (location 0).
+        // Providing only that attribute eliminates validation warnings about
+        // unconsumed locations 1/2/3 for normal, uv, and tangent.
+        std::vector<VkVertexInputAttributeDescription> attr_vec = {{
+            .location = 0,
+            .binding  = 0,
+            .format   = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset   = offsetof(Vertex, position)
+        }};
 
         pipeline::PipelineConfig cfg{};
         cfg.cull_mode   = VK_CULL_MODE_BACK_BIT;

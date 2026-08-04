@@ -58,11 +58,12 @@ public:
           VkFormat           format,
           VkImageUsageFlags  usage,
           VkImageAspectFlags aspect_mask  = VK_IMAGE_ASPECT_COLOR_BIT,
-          VmaMemoryUsage     memory_usage = VMA_MEMORY_USAGE_AUTO)
+          VmaMemoryUsage     memory_usage = VMA_MEMORY_USAGE_AUTO,
+          VkSampleCountFlagBits samples   = VK_SAMPLE_COUNT_1_BIT)
         : device_(device), allocator_(allocator.handle()),
           width_(width), height_(height), format_(format)
     {
-        create_image(usage, memory_usage);
+        create_image(usage, memory_usage, samples);
         create_view(aspect_mask);
     }
 
@@ -179,7 +180,7 @@ private:
      * @param usage        Image usage flags.
      * @param memory_usage VMA memory usage hint.
      */
-    void create_image(VkImageUsageFlags usage, VmaMemoryUsage memory_usage) {
+    void create_image(VkImageUsageFlags usage, VmaMemoryUsage memory_usage, VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT) {
         VkImageCreateInfo image_info{};
         image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         image_info.imageType     = VK_IMAGE_TYPE_2D;
@@ -193,7 +194,7 @@ private:
         image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         image_info.usage         = usage;
         image_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
-        image_info.samples       = VK_SAMPLE_COUNT_1_BIT;
+        image_info.samples       = samples;
 
         VmaAllocationCreateInfo alloc_info{};
         alloc_info.usage = memory_usage;

@@ -33,14 +33,15 @@ namespace pipeline {
  * polygons, back-face culling, CCW winding, depth test on, no blending.
  */
 struct PipelineConfig {
-    VkPrimitiveTopology topology       = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; /**< Input primitive topology. */
-    VkPolygonMode       polygon_mode   = VK_POLYGON_MODE_FILL;                /**< Fill, line, or point rendering. */
-    VkCullModeFlags     cull_mode      = VK_CULL_MODE_BACK_BIT;               /**< Face culling mode. */
-    VkFrontFace         front_face     = VK_FRONT_FACE_COUNTER_CLOCKWISE;     /**< CCW winding is front-facing. */
-    bool                depth_test     = true;                                 /**< Enable depth testing. */
-    bool                depth_write    = true;                                 /**< Enable depth writing. */
-    bool                blending       = false;                                /**< Enable alpha blending. */
-    float               line_width     = 1.0f;                                 /**< Rasterized line width. */
+    VkPrimitiveTopology    topology       = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; /**< Input primitive topology. */
+    VkPolygonMode          polygon_mode   = VK_POLYGON_MODE_FILL;                /**< Fill, line, or point rendering. */
+    VkCullModeFlags        cull_mode      = VK_CULL_MODE_BACK_BIT;               /**< Face culling mode. */
+    VkFrontFace            front_face     = VK_FRONT_FACE_COUNTER_CLOCKWISE;     /**< CCW winding is front-facing. */
+    bool                   depth_test     = true;                                 /**< Enable depth testing. */
+    bool                   depth_write    = true;                                 /**< Enable depth writing. */
+    bool                   blending       = false;                                /**< Enable alpha blending. */
+    float                  line_width     = 1.0f;                                 /**< Rasterized line width. */
+    VkSampleCountFlagBits  samples        = VK_SAMPLE_COUNT_1_BIT;               /**< MSAA sample count. */
 };
 
 /**
@@ -226,10 +227,10 @@ private:
         rasterizer.depthBiasEnable         = VK_FALSE;
         rasterizer.lineWidth               = config.line_width;
 
-        // Multisampling (off by default).
+        // Multisampling.
         VkPipelineMultisampleStateCreateInfo multisampling{};
         multisampling.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        multisampling.rasterizationSamples = config.samples;
         multisampling.sampleShadingEnable  = VK_FALSE;
 
         // Depth/stencil.
