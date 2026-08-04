@@ -13,9 +13,10 @@
 // VMA requires Vulkan function pointers — must be included after volk.
 #include <volk/volk.h>
 
-// VMA configuration: use volk's already-loaded function pointers.
+// VMA configuration: let VMA dynamically resolve function pointers using
+// volk's already-loaded vkGetInstanceProcAddr / vkGetDeviceProcAddr.
 #define VMA_STATIC_VULKAN_FUNCTIONS  0
-#define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 
 #include <vma/vk_mem_alloc.h>
 #include <stdexcept>
@@ -32,9 +33,9 @@ namespace memory {
  * @class Allocator
  * @brief RAII owner of a VmaAllocator.
  *
- * Configures VMA to use the function pointers already loaded by volk,
- * so there is no separate dynamic loading path needed. The resulting
- * VmaAllocator handle is passed to Buffer and Image constructors.
+ * Configures VMA to dynamically resolve Vulkan function pointers via the
+ * vkGetInstanceProcAddr / vkGetDeviceProcAddr already loaded by volk.
+ * The resulting VmaAllocator handle is passed to Buffer and Image constructors.
  */
 class Allocator {
 public:
@@ -44,27 +45,11 @@ public:
      * @param device   The logical device.
      */
     Allocator(const core::Instance& instance, const core::Device& device) {
-        // Bind volk's already-loaded global function pointers into VMA.
+        // Provide volk's proc addr functions so VMA can dynamically resolve
+        // all Vulkan 1.0 / 1.1 / 1.3 functions it needs internally.
         VmaVulkanFunctions vma_funcs{};
-        vma_funcs.vkGetInstanceProcAddr               = vkGetInstanceProcAddr;
-        vma_funcs.vkGetDeviceProcAddr                 = vkGetDeviceProcAddr;
-        vma_funcs.vkGetPhysicalDeviceProperties       = vkGetPhysicalDeviceProperties;
-        vma_funcs.vkGetPhysicalDeviceMemoryProperties = vkGetPhysicalDeviceMemoryProperties;
-        vma_funcs.vkAllocateMemory                    = vkAllocateMemory;
-        vma_funcs.vkFreeMemory                        = vkFreeMemory;
-        vma_funcs.vkMapMemory                         = vkMapMemory;
-        vma_funcs.vkUnmapMemory                       = vkUnmapMemory;
-        vma_funcs.vkFlushMappedMemoryRanges           = vkFlushMappedMemoryRanges;
-        vma_funcs.vkInvalidateMappedMemoryRanges      = vkInvalidateMappedMemoryRanges;
-        vma_funcs.vkBindBufferMemory                  = vkBindBufferMemory;
-        vma_funcs.vkBindImageMemory                   = vkBindImageMemory;
-        vma_funcs.vkGetBufferMemoryRequirements       = vkGetBufferMemoryRequirements;
-        vma_funcs.vkGetImageMemoryRequirements        = vkGetImageMemoryRequirements;
-        vma_funcs.vkCreateBuffer                      = vkCreateBuffer;
-        vma_funcs.vkDestroyBuffer                     = vkDestroyBuffer;
-        vma_funcs.vkCreateImage                       = vkCreateImage;
-        vma_funcs.vkDestroyImage                      = vkDestroyImage;
-        vma_funcs.vkCmdCopyBuffer                     = vkCmdCopyBuffer;
+        vma_funcs.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+        vma_funcs.vkGetDeviceProcAddr   = vkGetDeviceProcAddr;
 
         VmaAllocatorCreateInfo info{};
         info.vulkanApiVersion = VK_API_VERSION_1_3;
