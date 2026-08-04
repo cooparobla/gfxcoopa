@@ -1,0 +1,3 @@
+[submodule "includes/volk"]
+	path = includes/volk
+	url = https://github.com/zeux/volk.git

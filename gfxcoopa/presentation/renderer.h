@@ -1,0 +1,306 @@
+/**
+ * @file renderer.h
+ * @brief High-level frame orchestration: acquire → record → submit → present.
+ *
+ * Renderer owns the swapchain framebuffers, per-frame sync objects, and
+ * command buffers. begin_frame() acquires the next swapchain image and
+ * returns a CommandBuffer ready for recording. end_frame() submits and
+ * presents. This mirrors the mental model of:
+ *
+ *   glClear()  →  record commands  →  glfwSwapBuffers()
+ */
+
+#ifndef COOPA_GFX_PRESENTATION_RENDERER_H
+#define COOPA_GFX_PRESENTATION_RENDERER_H
+
+#include <volk/volk.h>
+#include <vector>
+#include <stdexcept>
+#include <functional>
+#include <cstring>
+
+#include <gfxcoopa/core/device.h>
+#include <gfxcoopa/core/swapchain.h>
+#include <gfxcoopa/pipeline/render_pass.h>
+#include <gfxcoopa/command/command_pool.h>
+#include <gfxcoopa/command/command_buffer.h>
+#include <gfxcoopa/command/sync.h>
+#include <gfxcoopa/util/error.h>
+
+namespace coopa {
+namespace gfx {
+namespace presentation {
+
+/**
+ * @brief Maximum number of frames that may be in flight simultaneously.
+ *
+ * 2 means the CPU is at most one frame ahead of the GPU, balancing
+ * throughput and latency similarly to OpenGL's implicit double-buffering.
+ */
+static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
+
+/**
+ * @class Renderer
+ * @brief Orchestrates the acquire → record → submit → present frame loop.
+ *
+ * Manages:
+ * - One VkFramebuffer per swapchain image (bound to the given render pass).
+ * - MAX_FRAMES_IN_FLIGHT sets of sync objects and command buffers.
+ * - Swapchain resize detection and recreation.
+ *
+ * Usage:
+ * @code
+ * while (!window.should_close()) {
+ *     window.poll_events();
+ *     renderer.begin_frame([&](coopa::gfx::command::CommandBuffer& cmd) {
+ *         cmd.bind_pipeline(my_pipeline);
+ *         cmd.draw(3);
+ *     });
+ * }
+ * device.wait_idle();
+ * @endcode
+ */
+class Renderer {
+public:
+    /**
+     * @brief Creates the renderer, framebuffers, and per-frame sync objects.
+     * @param device      The logical device.
+     * @param swapchain   The swapchain providing presentable images.
+     * @param render_pass The render pass the framebuffers are compatible with.
+     * @param cmd_pool    The command pool used to allocate command buffers.
+     */
+    Renderer(core::Device&         device,
+             core::Swapchain&      swapchain,
+             pipeline::RenderPass& render_pass,
+             command::CommandPool& cmd_pool)
+        : device_(device), swapchain_(swapchain),
+          render_pass_(render_pass), cmd_pool_(cmd_pool)
+    {
+        create_framebuffers();
+        create_sync_objects();
+        create_command_buffers();
+    }
+
+    /**
+     * @brief Destroys framebuffers and sync objects.
+     *
+     * The device must be idle (device.wait_idle()) before destruction.
+     */
+    ~Renderer() {
+        destroy_framebuffers();
+        // Sync objects and command buffers are automatically destroyed via their RAII wrappers.
+    }
+
+    /// @brief Non-copyable.
+    Renderer(const Renderer&) = delete;
+    /// @brief Non-copyable.
+    Renderer& operator=(const Renderer&) = delete;
+
+    /**
+     * @brief Returns the index of the current frame-in-flight slot (0 .. MAX_FRAMES_IN_FLIGHT-1).
+     * @return Current frame index.
+     */
+    uint32_t current_frame() const { return current_frame_; }
+
+    /**
+     * @brief Acquires the next swapchain image, executes the record callback, submits and presents.
+     *
+     * This is the primary API. The callback receives a ready CommandBuffer already
+     * inside a begin_render_pass with the swapchain framebuffer and extent set.
+     *
+     * @param record_fn A callable that receives a CommandBuffer& and records draw commands.
+     *                  Called between begin_render_pass and end_render_pass.
+     * @param clear_color RGBA clear color applied at the start of the render pass.
+     * @param on_resize   Optional callback invoked when the swapchain is recreated.
+     * @return True if the frame was presented successfully, false if the window was minimized.
+     */
+    bool begin_frame(std::function<void(command::CommandBuffer&)> record_fn,
+                     VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}},
+                     std::function<void()> on_resize = nullptr)
+    {
+        // Wait for this frame slot to be free.
+        in_flight_fences_[current_frame_]->wait();
+
+        // Acquire the next image.
+        uint32_t image_index = 0;
+        VkResult result = vkAcquireNextImageKHR(
+            device_.handle(), swapchain_.handle(),
+            UINT64_MAX,
+            image_available_semaphores_[current_frame_]->handle(),
+            VK_NULL_HANDLE, &image_index);
+
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            handle_resize(on_resize);
+            return false; // Skip this frame.
+        }
+        if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            throw std::runtime_error("[gfxcoopa] vkAcquireNextImageKHR: " +
+                                     util::vk_result_string(result));
+        }
+
+        // Reset the fence only after we know we are going to submit.
+        in_flight_fences_[current_frame_]->reset();
+
+        // Record commands.
+        VkCommandBuffer raw_cmd = raw_cmd_buffers_[current_frame_];
+        GFX_VK_CHECK(vkResetCommandBuffer(raw_cmd, 0));
+
+        command::CommandBuffer cmd(raw_cmd);
+        cmd.begin();
+        cmd.begin_render_pass(render_pass_.handle(),
+                              framebuffers_[image_index],
+                              swapchain_.extent(), clear_color);
+
+        record_fn(cmd);
+
+        cmd.end_render_pass();
+        cmd.end();
+
+        // Submit.
+        VkSemaphore wait_semaphores[]   = { image_available_semaphores_[current_frame_]->handle() };
+        VkSemaphore signal_semaphores[] = { render_finished_semaphores_[current_frame_]->handle() };
+        VkPipelineStageFlags wait_stages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+
+        VkSubmitInfo submit_info{};
+        submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.waitSemaphoreCount   = 1;
+        submit_info.pWaitSemaphores      = wait_semaphores;
+        submit_info.pWaitDstStageMask    = wait_stages;
+        submit_info.commandBufferCount   = 1;
+        submit_info.pCommandBuffers      = &raw_cmd;
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores    = signal_semaphores;
+
+        GFX_VK_CHECK(vkQueueSubmit(device_.graphics_queue(), 1, &submit_info,
+                                   in_flight_fences_[current_frame_]->handle()));
+
+        // Present.
+        VkSwapchainKHR swapchains[] = { swapchain_.handle() };
+        VkPresentInfoKHR present_info{};
+        present_info.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        present_info.waitSemaphoreCount = 1;
+        present_info.pWaitSemaphores    = signal_semaphores;
+        present_info.swapchainCount     = 1;
+        present_info.pSwapchains        = swapchains;
+        present_info.pImageIndices      = &image_index;
+
+        result = vkQueuePresentKHR(device_.present_queue(), &present_info);
+        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+            handle_resize(on_resize);
+        } else if (result != VK_SUCCESS) {
+            throw std::runtime_error("[gfxcoopa] vkQueuePresentKHR: " +
+                                     util::vk_result_string(result));
+        }
+
+        current_frame_ = (current_frame_ + 1) % MAX_FRAMES_IN_FLIGHT;
+        return true;
+    }
+
+    /**
+     * @brief Recreates framebuffers after a swapchain recreate.
+     *
+     * Must be called if the swapchain is recreated externally (e.g. after
+     * Swapchain::recreate()). Automatically called internally when
+     * VK_ERROR_OUT_OF_DATE_KHR is detected.
+     */
+    void recreate_framebuffers() {
+        device_.wait_idle();
+        destroy_framebuffers();
+        create_framebuffers();
+    }
+
+private:
+    /**
+     * @brief Creates one VkFramebuffer per swapchain image.
+     */
+    void create_framebuffers() {
+        const auto& views = swapchain_.image_views();
+        framebuffers_.resize(views.size());
+        VkExtent2D extent = swapchain_.extent();
+
+        for (size_t i = 0; i < views.size(); ++i) {
+            VkFramebufferCreateInfo fb_info{};
+            fb_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            fb_info.renderPass      = render_pass_.handle();
+            fb_info.attachmentCount = 1;
+            fb_info.pAttachments    = &views[i];
+            fb_info.width           = extent.width;
+            fb_info.height          = extent.height;
+            fb_info.layers          = 1;
+
+            GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb_info, nullptr,
+                                             &framebuffers_[i]));
+        }
+    }
+
+    /**
+     * @brief Destroys all framebuffers.
+     */
+    void destroy_framebuffers() {
+        for (VkFramebuffer fb : framebuffers_) {
+            if (fb != VK_NULL_HANDLE) {
+                vkDestroyFramebuffer(device_.handle(), fb, nullptr);
+            }
+        }
+        framebuffers_.clear();
+    }
+
+    /**
+     * @brief Creates MAX_FRAMES_IN_FLIGHT Fence and Semaphore pairs.
+     */
+    void create_sync_objects() {
+        image_available_semaphores_.reserve(MAX_FRAMES_IN_FLIGHT);
+        render_finished_semaphores_.reserve(MAX_FRAMES_IN_FLIGHT);
+        in_flight_fences_.reserve(MAX_FRAMES_IN_FLIGHT);
+
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            image_available_semaphores_.push_back(
+                std::make_unique<command::Semaphore>(device_));
+            render_finished_semaphores_.push_back(
+                std::make_unique<command::Semaphore>(device_));
+            in_flight_fences_.push_back(
+                std::make_unique<command::Fence>(device_, /*signaled=*/true));
+        }
+    }
+
+    /**
+     * @brief Allocates one command buffer per frame-in-flight slot.
+     */
+    void create_command_buffers() {
+        raw_cmd_buffers_ = cmd_pool_.allocate(MAX_FRAMES_IN_FLIGHT);
+    }
+
+    /**
+     * @brief Handles a swapchain out-of-date or suboptimal condition.
+     *
+     * Queries the current framebuffer size, recreates the swapchain and
+     * framebuffers, then invokes the optional user callback.
+     *
+     * @param on_resize Optional user-supplied callback for post-resize work.
+     */
+    void handle_resize(std::function<void()> on_resize) {
+        device_.wait_idle();
+        // Note: Caller is responsible for querying new size and calling
+        // swapchain_.recreate(w, h) since Renderer does not own the window.
+        recreate_framebuffers();
+        if (on_resize) on_resize();
+    }
+
+    core::Device&         device_;       /**< The logical device (not owned). */
+    core::Swapchain&      swapchain_;    /**< The target swapchain (not owned). */
+    pipeline::RenderPass& render_pass_;  /**< Compatible render pass (not owned). */
+    command::CommandPool& cmd_pool_;     /**< Command pool for buffer allocation (not owned). */
+
+    std::vector<VkFramebuffer>                          framebuffers_;                     /**< One framebuffer per swapchain image. */
+    std::vector<std::unique_ptr<command::Semaphore>>    image_available_semaphores_;       /**< Signaled when a swapchain image is acquired. */
+    std::vector<std::unique_ptr<command::Semaphore>>    render_finished_semaphores_;       /**< Signaled when rendering is complete. */
+    std::vector<std::unique_ptr<command::Fence>>        in_flight_fences_;                 /**< Fences to throttle CPU ahead of GPU. */
+    std::vector<VkCommandBuffer>                        raw_cmd_buffers_;                  /**< Command buffers (allocated from cmd_pool_). */
+    uint32_t                                            current_frame_ = 0;                /**< Current frame-in-flight index. */
+};
+
+} // namespace presentation
+} // namespace gfx
+} // namespace coopa
+
+#endif // COOPA_GFX_PRESENTATION_RENDERER_H
