@@ -93,6 +93,23 @@ public:
     bool should_close() const { return glfwWindowShouldClose(window_); }
 
     /**
+     * @brief Signals the window to close.
+     * @param value Set to true to request the window to close.
+     */
+    void set_should_close(bool value = true) {
+        glfwSetWindowShouldClose(window_, value ? GLFW_TRUE : GLFW_FALSE);
+    }
+
+    /**
+     * @brief Returns true if the given keyboard key is currently pressed.
+     * @param key GLFW key code (e.g., GLFW_KEY_ESCAPE).
+     * @return True if key state is GLFW_PRESS.
+     */
+    bool is_key_pressed(int key) const {
+        return glfwGetKey(window_, key) == GLFW_PRESS;
+    }
+
+    /**
      * @brief Polls pending OS events (keyboard, mouse, resize, close).
      *
      * Must be called once per frame on the main thread.
