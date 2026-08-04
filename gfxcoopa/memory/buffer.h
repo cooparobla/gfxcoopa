@@ -90,6 +90,24 @@ public:
     /// @brief Non-copyable.
     Buffer& operator=(const Buffer&) = delete;
 
+    /**
+     * @brief Move constructor: transfers ownership of the VMA allocation.
+     *
+     * After the move, the source Buffer is in a hollow state (null handles)
+     * and its destructor is a no-op.
+     *
+     * @param other The Buffer to move from.
+     */
+    Buffer(Buffer&& other) noexcept
+        : device_(other.device_), allocator_(other.allocator_),
+          buffer_(other.buffer_), allocation_(other.allocation_), size_(other.size_)
+    {
+        other.buffer_     = VK_NULL_HANDLE;
+        other.allocation_ = VK_NULL_HANDLE;
+        other.size_        = 0;
+    }
+
+
     // --- Data upload ---
 
     /**

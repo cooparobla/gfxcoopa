@@ -178,6 +178,24 @@ public:
                                 pipeline_layout, set_index, 1, &raw, 0, nullptr);
     }
 
+    /**
+     * @brief Records a push constant update (analogous to setting a uniform directly).
+     *
+     * @param pipeline_layout The pipeline layout that declared the push constant range.
+     * @param stages          Shader stages that read this push constant.
+     * @param offset          Byte offset into the push constant block.
+     * @param size            Number of bytes to update.
+     * @param data            Pointer to the data to upload.
+     */
+    void push_constants(VkPipelineLayout   pipeline_layout,
+                        VkShaderStageFlags stages,
+                        uint32_t           offset,
+                        uint32_t           size,
+                        const void*        data)
+    {
+        vkCmdPushConstants(cmd_, pipeline_layout, stages, offset, size, data);
+    }
+
     // --- Draw calls ---
 
     /**

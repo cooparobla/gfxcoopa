@@ -40,71 +40,81 @@ public:
      * @param color_format  The VkFormat of the swapchain/color attachment.
      * @param depth_format  The VkFormat of the depth attachment.
      *                      Pass VK_FORMAT_UNDEFINED to disable depth.
+     * @param color_final_layout The final image layout for the color attachment.
+     *                           Use VK_IMAGE_LAYOUT_PRESENT_SRC_KHR for swapchain passes
+     *                           and VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL for
+     *                           offscreen targets that will be sampled as a texture.
+     * @param depth_final_layout The final image layout for the depth attachment.
+     *                           Default DEPTH_STENCIL_ATTACHMENT_OPTIMAL (normal rendering).
+     *                           Use SHADER_READ_ONLY_OPTIMAL to enable depth sampling
+     *                           in post-processing (e.g. edge detection).
      * @throws std::runtime_error if render pass creation fails.
      */
     RenderPass(core::Device& device,
                VkFormat color_format,
-               VkFormat depth_format = VK_FORMAT_D32_SFLOAT)
+               VkFormat depth_format = VK_FORMAT_D32_SFLOAT,
+               VkImageLayout color_final_layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+               VkImageLayout depth_final_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
         : device_(device)
     {
+        bool has_color = color_format != VK_FORMAT_UNDEFINED;
         bool has_depth = depth_format != VK_FORMAT_UNDEFINED;
 
         // --- Attachment descriptions ---
         std::vector<VkAttachmentDescription> attachments;
 
-        // Color attachment.
-        VkAttachmentDescription color_attachment{};
-        color_attachment.format         = color_format;
-        color_attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
-        color_attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        color_attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-        color_attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        color_attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-        color_attachment.finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        attachments.push_back(color_attachment);
+        VkAttachmentReference color_ref{};
+        if (has_color) {
+            VkAttachmentDescription color_attachment{};
+            color_attachment.format         = color_format;
+            color_attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+            color_attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            color_attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+            color_attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            color_attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+            color_attachment.finalLayout    = color_final_layout;
 
-        // Depth attachment (optional).
+            color_ref.attachment = static_cast<uint32_t>(attachments.size());
+            color_ref.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attachments.push_back(color_attachment);
+        }
+
+        VkAttachmentReference depth_ref{};
         if (has_depth) {
             VkAttachmentDescription depth_attachment{};
             depth_attachment.format         = depth_format;
             depth_attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
             depth_attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            depth_attachment.storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            depth_attachment.storeOp        = (depth_final_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                                              ? VK_ATTACHMENT_STORE_OP_STORE
+                                              : VK_ATTACHMENT_STORE_OP_DONT_CARE;
             depth_attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             depth_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
             depth_attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-            depth_attachment.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            depth_attachment.finalLayout    = depth_final_layout;
+
+            depth_ref.attachment = static_cast<uint32_t>(attachments.size());
+            depth_ref.layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             attachments.push_back(depth_attachment);
         }
 
-        // --- Subpass references ---
-        VkAttachmentReference color_ref{};
-        color_ref.attachment = 0;
-        color_ref.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkAttachmentReference depth_ref{};
-        depth_ref.attachment = 1;
-        depth_ref.layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
         VkSubpassDescription subpass{};
         subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount    = 1;
-        subpass.pColorAttachments       = &color_ref;
+        subpass.colorAttachmentCount    = has_color ? 1 : 0;
+        subpass.pColorAttachments       = has_color ? &color_ref : nullptr;
         subpass.pDepthStencilAttachment = has_depth ? &depth_ref : nullptr;
 
         // --- Subpass dependencies ---
-        // Ensures the render pass waits for the swapchain image to be available
-        // before writing to the color attachment.
         VkSubpassDependency dependency{};
         dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
         dependency.dstSubpass    = 0;
-        dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.srcStageMask  = (has_color ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : 0) |
+                                   (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
         dependency.srcAccessMask = 0;
-        dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+        dependency.dstStageMask  = (has_color ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : 0) |
+                                   (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
+        dependency.dstAccessMask = (has_color ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : 0) |
                                    (has_depth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0);
 
         VkRenderPassCreateInfo create_info{};

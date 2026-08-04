@@ -63,6 +63,7 @@ public:
      * @param vertex_attributes  VkVertexInputAttributeDescription array (per-attribute layout).
      * @param descriptor_layouts Descriptor set layouts used by the shaders.
      * @param config             Rasterization state overrides (defaults are GL-like).
+     * @param push_constants     Push constant ranges (e.g. for per-object model matrices).
      */
     Pipeline(core::Device&                                           device,
              RenderPass&                                             render_pass,
@@ -70,10 +71,11 @@ public:
              const std::vector<VkVertexInputBindingDescription>&    vertex_bindings,
              const std::vector<VkVertexInputAttributeDescription>&  vertex_attributes,
              const std::vector<VkDescriptorSetLayout>&              descriptor_layouts = {},
-             const PipelineConfig&                                  config = {})
+             const PipelineConfig&                                  config = {},
+             const std::vector<VkPushConstantRange>&                push_constants = {})
         : device_(device)
     {
-        create_layout(descriptor_layouts);
+        create_layout(descriptor_layouts, push_constants);
         create_pipeline(render_pass, shaders, vertex_bindings, vertex_attributes, config);
     }
 
@@ -145,17 +147,19 @@ public:
 
 private:
     /**
-     * @brief Creates the VkPipelineLayout from the given descriptor set layouts.
+     * @brief Creates the VkPipelineLayout from the given descriptor set layouts and push constants.
      * @param descriptor_layouts Layouts to include in the pipeline layout.
+     * @param push_constants     Push constant ranges.
      */
-    void create_layout(const std::vector<VkDescriptorSetLayout>& descriptor_layouts) {
+    void create_layout(const std::vector<VkDescriptorSetLayout>& descriptor_layouts,
+                       const std::vector<VkPushConstantRange>&   push_constants = {}) {
         VkPipelineLayoutCreateInfo layout_info{};
         layout_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         layout_info.setLayoutCount         = static_cast<uint32_t>(descriptor_layouts.size());
         layout_info.pSetLayouts            = descriptor_layouts.empty() ? nullptr
                                                                         : descriptor_layouts.data();
-        layout_info.pushConstantRangeCount = 0;
-        layout_info.pPushConstantRanges    = nullptr;
+        layout_info.pushConstantRangeCount = static_cast<uint32_t>(push_constants.size());
+        layout_info.pPushConstantRanges    = push_constants.empty() ? nullptr : push_constants.data();
 
         GFX_VK_CHECK(vkCreatePipelineLayout(device_.handle(), &layout_info, nullptr, &layout_));
     }
