@@ -212,6 +212,29 @@ public:
     }
 
     /**
+     * @brief Binds a storage buffer (SSBO) to the given binding point.
+     * @param binding The binding index within the set.
+     * @param buffer  The Buffer containing storage data.
+     */
+    void bind_storage_buffer(uint32_t binding, const memory::Buffer& buffer) {
+        VkDescriptorBufferInfo buffer_info{};
+        buffer_info.buffer = buffer.handle();
+        buffer_info.offset = 0;
+        buffer_info.range  = buffer.size();
+
+        VkWriteDescriptorSet write{};
+        write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet          = set_;
+        write.dstBinding      = binding;
+        write.dstArrayElement = 0;
+        write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.descriptorCount = 1;
+        write.pBufferInfo     = &buffer_info;
+
+        vkUpdateDescriptorSets(device_.handle(), 1, &write, 0, nullptr);
+    }
+
+    /**
      * @brief Binds a combined image sampler to the given binding point (like glBindTexture).
      * @param binding    The binding index within the set.
      * @param image_view The VkImageView to expose to the shader.
