@@ -73,7 +73,7 @@ public:
         }};
 
         pipeline::PipelineConfig cfg{};
-        cfg.cull_mode   = VK_CULL_MODE_BACK_BIT;
+        cfg.cull_mode   = VK_CULL_MODE_NONE;
         cfg.depth_test  = true;
         cfg.depth_write = true;
 

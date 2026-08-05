@@ -48,12 +48,19 @@ public:
     // --- Directional Shadow Pass ---
 
     void begin_directional_pass(command::CommandBuffer& cmd) const {
-        cmd.begin_render_pass(
-            dir_render_pass_->handle(),
-            dir_framebuffer_,
-            {dir_res_, dir_res_},
-            {}, 1.0f // clear depth 1.0
-        );
+        VkClearValue clear_value{};
+        clear_value.depthStencil = {1.0f, 0};
+
+        VkRenderPassBeginInfo rp_info{};
+        rp_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rp_info.renderPass        = dir_render_pass_->handle();
+        rp_info.framebuffer       = dir_framebuffer_;
+        rp_info.renderArea.offset = {0, 0};
+        rp_info.renderArea.extent = {dir_res_, dir_res_};
+        rp_info.clearValueCount   = 1;
+        rp_info.pClearValues      = &clear_value;
+
+        vkCmdBeginRenderPass(cmd.handle(), &rp_info, VK_SUBPASS_CONTENTS_INLINE);
         cmd.set_viewport(0.0f, 0.0f, static_cast<float>(dir_res_), static_cast<float>(dir_res_));
         cmd.set_scissor(0, 0, dir_res_, dir_res_);
     }
@@ -65,12 +72,19 @@ public:
     // --- Point Light Cubemap Face Pass ---
 
     void begin_cube_face_pass(command::CommandBuffer& cmd, uint32_t face_index) const {
-        cmd.begin_render_pass(
-            cube_render_pass_->handle(),
-            cube_face_framebuffers_[face_index],
-            {cube_res_, cube_res_},
-            {}, 1.0f
-        );
+        VkClearValue clear_value{};
+        clear_value.depthStencil = {1.0f, 0};
+
+        VkRenderPassBeginInfo rp_info{};
+        rp_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rp_info.renderPass        = cube_render_pass_->handle();
+        rp_info.framebuffer       = cube_face_framebuffers_[face_index];
+        rp_info.renderArea.offset = {0, 0};
+        rp_info.renderArea.extent = {cube_res_, cube_res_};
+        rp_info.clearValueCount   = 1;
+        rp_info.pClearValues      = &clear_value;
+
+        vkCmdBeginRenderPass(cmd.handle(), &rp_info, VK_SUBPASS_CONTENTS_INLINE);
         cmd.set_viewport(0.0f, 0.0f, static_cast<float>(cube_res_), static_cast<float>(cube_res_));
         cmd.set_scissor(0, 0, cube_res_, cube_res_);
     }
@@ -111,7 +125,7 @@ public:
     void transition_dir_to_shader_read(command::CommandBuffer& cmd) const {
         VkImageMemoryBarrier barrier{};
         barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.oldLayout                       = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.oldLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.newLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
@@ -121,12 +135,12 @@ public:
         barrier.subresourceRange.levelCount     = 1;
         barrier.subresourceRange.baseArrayLayer = 0;
         barrier.subresourceRange.layerCount     = 1;
-        barrier.srcAccessMask                   = 0;
+        barrier.srcAccessMask                   = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         barrier.dstAccessMask                   = VK_ACCESS_SHADER_READ_BIT;
 
         vkCmdPipelineBarrier(
             cmd.handle(),
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             0,
             0, nullptr,

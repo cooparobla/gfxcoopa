@@ -100,9 +100,11 @@ public:
             {{0.0f, 0.0f, 0.0f, 1.0f}},
             1.0f
         );
-        cmd.set_viewport(0.0f, 0.0f,
+        // Use negative viewport height to flip Y for Vulkan NDC (VK_KHR_maintenance1).
+        // This avoids the projection-matrix Y-flip that would reverse triangle winding.
+        cmd.set_viewport(0.0f, static_cast<float>(height_),
                          static_cast<float>(width_),
-                         static_cast<float>(height_));
+                         -static_cast<float>(height_));
         cmd.set_scissor(0, 0, width_, height_);
     }
 
@@ -149,6 +151,12 @@ public:
             ? resolve_image_->view()
             : color_image_->view();
     }
+    /** @brief Returns the color memory::Image object (resolved if MSAA). */
+    memory::Image* color_image_object() const {
+        return (samples_ > VK_SAMPLE_COUNT_1_BIT && resolve_image_)
+            ? resolve_image_.get()
+            : color_image_.get();
+    }
     /** @brief Returns the depth image view (for edge detection shaders). */
     VkImageView depth_view() const { return depth_image_->view(); }
 
@@ -166,7 +174,7 @@ private:
         bool is_msaa = samples_ > VK_SAMPLE_COUNT_1_BIT;
 
         // Color attachment: used as color attachment (+ sampled if not MSAA).
-        VkImageUsageFlags color_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        VkImageUsageFlags color_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         if (!is_msaa) {
             color_usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
         }
@@ -187,7 +195,7 @@ private:
                 device_, allocator_,
                 width_, height_,
                 color_format_,
-                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                 VK_IMAGE_ASPECT_COLOR_BIT,
                 VMA_MEMORY_USAGE_AUTO,
                 VK_SAMPLE_COUNT_1_BIT
