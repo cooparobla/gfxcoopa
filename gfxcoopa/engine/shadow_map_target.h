@@ -153,7 +153,6 @@ public:
 
     static glm::mat4 get_cube_face_matrix(uint32_t face_index, const glm::vec3& light_pos, float range) {
         glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, range);
-        proj[1][1] *= -1.0f; // Vulkan Y-flip
 
         // 6 cubemap directions: +X, -X, +Y, -Y, +Z, -Z
         glm::vec3 targets[6] = {

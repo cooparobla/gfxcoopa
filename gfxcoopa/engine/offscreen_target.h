@@ -97,7 +97,7 @@ public:
             render_pass_->handle(),
             framebuffer_,
             {width_, height_},
-            {{0.0f, 0.0f, 0.0f, 1.0f}},
+            {{0.05f, 0.05f, 0.05f, 1.0f}},
             1.0f
         );
         // Use negative viewport height to flip Y for Vulkan NDC (VK_KHR_maintenance1).
