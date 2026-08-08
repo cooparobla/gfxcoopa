@@ -45,9 +45,9 @@ public:
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        // Descriptor set layout (Set 4): 3 G-Buffer samplers
+        // Descriptor set layout (Set 4): 3 G-Buffer samplers + 1 SSAO sampler
         std::vector<VkDescriptorSetLayoutBinding> gbuffer_bindings;
-        for (uint32_t i = 0; i < 3; ++i) {
+        for (uint32_t i = 0; i < 4; ++i) {
             VkDescriptorSetLayoutBinding b{};
             b.binding         = i;
             b.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -63,7 +63,7 @@ public:
         gbuffer_desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
             device, 1,
             std::vector<VkDescriptorPoolSize>{
-                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3}
+                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4}
             }
         );
 
@@ -107,6 +107,13 @@ public:
         gbuffer_desc_set_->bind_image(0, g0_view, linear_sampler.handle());
         gbuffer_desc_set_->bind_image(1, g1_view, linear_sampler.handle());
         gbuffer_desc_set_->bind_image(2, g2_view, linear_sampler.handle());
+    }
+
+    /// Binding 3 must be rebound every frame -- callers pass the SSAO pass's blurred output when
+    /// enabled, or its permanent neutral (fully-unoccluded) texture when disabled/absent, so this
+    /// binding is never left pointing at an image still in VK_IMAGE_LAYOUT_UNDEFINED.
+    void set_ssao_image(VkImageView ssao_view, VkSampler ssao_sampler) {
+        gbuffer_desc_set_->bind_image(3, ssao_view, ssao_sampler);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd,
