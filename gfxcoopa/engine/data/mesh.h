@@ -13,8 +13,8 @@
  * already host-accessible (mapped), no staging copy is needed.
  */
 
-#ifndef COOPA_GFX_ENGINE_MESH_H
-#define COOPA_GFX_ENGINE_MESH_H
+#ifndef GFXCOOPA_ENGINE_DATA_MESH_H
+#define GFXCOOPA_ENGINE_DATA_MESH_H
 
 #include <volk/volk.h>
 #include <glm/glm.hpp>
@@ -34,6 +34,7 @@
 namespace coopa {
 namespace gfx {
 namespace engine {
+namespace data {
 
 /**
  * @struct Vertex
@@ -306,6 +307,7 @@ private:
     uint32_t       index_count_;   /**< Total number of indices to draw. */
 };
 
+} // namespace data
 } // namespace engine
 } // namespace gfx
 } // namespace coopa

@@ -1,10 +1,11 @@
+#include <gfxcoopa/engine/util/sh_math.h>
 /**
  * @file gi_data.h
  * @brief GPU buffers for Global Illumination (GI) probe volumes and reflection probes.
  */
 
-#ifndef COOPA_GFX_ENGINE_GI_DATA_H
-#define COOPA_GFX_ENGINE_GI_DATA_H
+#ifndef GFXCOOPA_ENGINE_GI_GI_DATA_H
+#define GFXCOOPA_ENGINE_GI_GI_DATA_H
 
 #include <volk/volk.h>
 #include <glm/glm.hpp>
@@ -19,6 +20,9 @@
 namespace coopa {
 namespace gfx {
 namespace engine {
+namespace gi {
+
+
 
 /// Maximum number of reflection probes blended together per pixel. Matches
 /// this codebase's existing point-shadow-map cap (also 4) -- small enough
@@ -133,6 +137,7 @@ private:
     uint32_t max_probes_;
 };
 
+} // namespace gi
 } // namespace engine
 } // namespace gfx
 } // namespace coopa

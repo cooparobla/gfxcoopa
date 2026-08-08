@@ -1,0 +1,347 @@
+#include <gfxcoopa/engine/util/fullscreen_quad.h>
+/**
+ * @file scene_color_mip_pass.h
+ * @brief Prefiltered mip chain of the deferred-lit HDR scene colour, for SSR cone tracing.
+ */
+
+#ifndef GFXCOOPA_ENGINE_PASSES_SCENE_COLOR_MIP_PASS_H
+#define GFXCOOPA_ENGINE_PASSES_SCENE_COLOR_MIP_PASS_H
+
+#include <volk/volk.h>
+#include <vma/vk_mem_alloc.h>
+#include <memory>
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <string>
+#include <glm/glm.hpp>
+
+#include <gfxcoopa/core/device.h>
+#include <gfxcoopa/memory/allocator.h>
+#include <gfxcoopa/command/command_buffer.h>
+#include <gfxcoopa/pipeline/pipeline.h>
+#include <gfxcoopa/pipeline/render_pass.h>
+#include <gfxcoopa/pipeline/shader.h>
+#include <gfxcoopa/pipeline/descriptor.h>
+#include <gfxcoopa/engine/util/sampler.h>
+#include <gfxcoopa/util/error.h>
+
+namespace coopa {
+namespace gfx {
+namespace engine {
+namespace passes {
+
+
+
+/// Same per-mip render infrastructure as HiZPass (bypasses memory::Image, which hardcodes
+/// mipLevels = 1, and calls vmaCreateImage directly), but for the deferred-lit HDR scene colour
+/// instead of depth: RGBA16F, linear filtering + linear mip blending, 2x2 box-average
+/// downsampling instead of a conservative min reduction. Consumed by ssr.frag's cone trace,
+/// which picks a roughness/distance-driven LOD to approximate a blurred glossy reflection.
+class SceneColorMipPass {
+public:
+    struct PushConstants {
+        glm::ivec2 src_size;
+        int is_first_pass;
+    };
+
+    // Cap the chain. A full pyramid at 1920x1080 is 11 mips, and mip 8+ is a screen-wide
+    // average -- a "reflection" of nothing in particular, at the cost of a render pass each.
+    // 7 mips reaches a 128-texel cone footprint, well past anything a plausible roughness
+    // produces at plausible ray lengths.
+    static constexpr uint32_t kMaxMips = 7;
+
+    SceneColorMipPass(coopa::gfx::core::Device& device,
+                       coopa::gfx::memory::Allocator& allocator,
+                       const std::string& vert_spv,
+                       const std::string& frag_spv)
+        : device_(device), allocator_(allocator)
+    {
+        // 1. Shaders. vert_spv is expected to be hiz_downsample.vert.spv -- it is a
+        // byte-identical fullscreen-triangle generator to every other pass in this pipeline,
+        // so no new vertex shader is needed here.
+        vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
+        frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
+
+        // 2. Sampler. max_lod and mipmap_mode are set in recreate() once mip_levels_ is known --
+        // a sampler with maxLod = 0 silently clamps every explicit-LOD read back to mip 0 (the
+        // exact trap documented in hiz_pass.h), and MIPMAP_MODE_NEAREST would make the cone LOD
+        // quantise to integer mips, showing as visible banding rings on a curved glossy surface.
+        sampler_ = std::make_unique<util::Sampler>(
+            device, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 0.0f, VK_SAMPLER_MIPMAP_MODE_LINEAR
+        );
+
+        // 3. Render Pass for RGBA16F attachments, no depth (same "no depth" form as HiZPass).
+        render_pass_ = std::make_unique<coopa::gfx::pipeline::RenderPass>(
+            device,
+            VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_FORMAT_UNDEFINED,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        );
+
+        // 4. Descriptor Set Layout (Set 0: Binding 0 input colour)
+        std::vector<VkDescriptorSetLayoutBinding> bindings = {
+            {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
+        };
+        desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, bindings);
+
+        // 5. Pipeline Configuration
+        coopa::gfx::pipeline::PipelineConfig cfg{};
+        cfg.cull_mode   = VK_CULL_MODE_NONE;
+        cfg.depth_test  = false;
+        cfg.depth_write = false;
+
+        VkPushConstantRange pc_range{};
+        pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        pc_range.offset     = 0;
+        pc_range.size       = sizeof(PushConstants);
+
+        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
+            device, *render_pass_,
+            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), frag_shader_.get()},
+            std::vector<VkVertexInputBindingDescription>{},
+            std::vector<VkVertexInputAttributeDescription>{},
+            std::vector<VkDescriptorSetLayout>{desc_layout_->handle()},
+            cfg,
+            std::vector<VkPushConstantRange>{pc_range}
+        );
+    }
+
+    ~SceneColorMipPass() {
+        destroy_resources_();
+    }
+
+    SceneColorMipPass(const SceneColorMipPass&) = delete;
+    SceneColorMipPass& operator=(const SceneColorMipPass&) = delete;
+
+    void recreate(uint32_t width, uint32_t height) {
+        destroy_resources_();
+        width_  = width;
+        height_ = height;
+        mip_levels_ = std::min(kMaxMips,
+            static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1);
+
+        // Rebuild the sampler with maxLod = mip_levels_ AND mipmapMode = LINEAR. Both matter --
+        // see the constructor comment.
+        sampler_ = std::make_unique<util::Sampler>(
+            device_, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            static_cast<float>(mip_levels_), VK_SAMPLER_MIPMAP_MODE_LINEAR
+        );
+
+        // Allocate image
+        VkImageCreateInfo img_info{};
+        img_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        img_info.imageType     = VK_IMAGE_TYPE_2D;
+        img_info.format        = VK_FORMAT_R16G16B16A16_SFLOAT;
+        img_info.extent        = {width_, height_, 1};
+        img_info.mipLevels     = mip_levels_;
+        img_info.arrayLayers   = 1;
+        img_info.samples       = VK_SAMPLE_COUNT_1_BIT;
+        img_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        img_info.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        img_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VmaAllocationCreateInfo alloc_info{};
+        alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+
+        GFX_VK_CHECK(vmaCreateImage(allocator_.handle(), &img_info, &alloc_info, &color_image_, &allocation_, nullptr));
+
+        // Create full image view for all mips
+        VkImageViewCreateInfo full_view_info{};
+        full_view_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        full_view_info.image                           = color_image_;
+        full_view_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+        full_view_info.format                          = VK_FORMAT_R16G16B16A16_SFLOAT;
+        full_view_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        full_view_info.subresourceRange.baseMipLevel   = 0;
+        full_view_info.subresourceRange.levelCount     = mip_levels_;
+        full_view_info.subresourceRange.baseArrayLayer = 0;
+        full_view_info.subresourceRange.layerCount     = 1;
+
+        GFX_VK_CHECK(vkCreateImageView(device_.handle(), &full_view_info, nullptr, &full_view_));
+
+        // Create per-mip views & framebuffers
+        mip_views_.resize(mip_levels_);
+        mip_framebuffers_.resize(mip_levels_);
+
+        for (uint32_t m = 0; m < mip_levels_; ++m) {
+            uint32_t mw = std::max(1u, width_ >> m);
+            uint32_t mh = std::max(1u, height_ >> m);
+
+            VkImageViewCreateInfo view_info{};
+            view_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            view_info.image                           = color_image_;
+            view_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+            view_info.format                          = VK_FORMAT_R16G16B16A16_SFLOAT;
+            view_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+            view_info.subresourceRange.baseMipLevel   = m;
+            view_info.subresourceRange.levelCount     = 1;
+            view_info.subresourceRange.baseArrayLayer = 0;
+            view_info.subresourceRange.layerCount     = 1;
+
+            GFX_VK_CHECK(vkCreateImageView(device_.handle(), &view_info, nullptr, &mip_views_[m]));
+
+            VkFramebufferCreateInfo fb_info{};
+            fb_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            fb_info.renderPass      = render_pass_->handle();
+            fb_info.attachmentCount = 1;
+            fb_info.pAttachments    = &mip_views_[m];
+            fb_info.width           = mw;
+            fb_info.height          = mh;
+            fb_info.layers          = 1;
+
+            GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb_info, nullptr, &mip_framebuffers_[m]));
+        }
+
+        // Create Descriptor Pool & Descriptor Sets
+        desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
+            device_, mip_levels_,
+            std::vector<VkDescriptorPoolSize>{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, mip_levels_}}
+        );
+
+        desc_sets_.resize(mip_levels_);
+        for (uint32_t m = 0; m < mip_levels_; ++m) {
+            desc_sets_[m] = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(
+                device_, *desc_pool_, *desc_layout_
+            );
+        }
+    }
+
+    void update_descriptors(VkImageView scene_color_view) {
+        if (mip_levels_ == 0) return;
+        // Level 0 samples the deferred-lit HDR scene colour (post skybox).
+        desc_sets_[0]->bind_image(0, scene_color_view, sampler_->handle());
+
+        // Level m >= 1 samples mip_views_[m-1]
+        for (uint32_t m = 1; m < mip_levels_; ++m) {
+            desc_sets_[m]->bind_image(0, mip_views_[m - 1], sampler_->handle());
+        }
+    }
+
+    void execute(coopa::gfx::command::CommandBuffer& cmd, VkImageView scene_color_view) {
+        update_descriptors(scene_color_view);
+
+        // No pre-loop barrier for the source: the offscreen render pass's finalLayout is
+        // already SHADER_READ_ONLY_OPTIMAL (matching the existing convention -- the SSR pass
+        // already reads offscreen_target_->color_view() right after end() with no barrier).
+
+        cmd.bind_pipeline(*pipeline_);
+
+        for (uint32_t m = 0; m < mip_levels_; ++m) {
+            uint32_t mw = std::max(1u, width_ >> m);
+            uint32_t mh = std::max(1u, height_ >> m);
+
+            PushConstants pc{};
+            pc.src_size      = (m == 0) ? glm::ivec2(width_, height_) : glm::ivec2(std::max(1u, width_ >> (m - 1)), std::max(1u, height_ >> (m - 1)));
+            pc.is_first_pass = (m == 0) ? 1 : 0;
+
+            cmd.push_constants(pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
+
+            VkClearValue clear_val{};
+            clear_val.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+
+            VkRenderPassBeginInfo rp_info{};
+            rp_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            rp_info.renderPass        = render_pass_->handle();
+            rp_info.framebuffer       = mip_framebuffers_[m];
+            rp_info.renderArea.offset = {0, 0};
+            rp_info.renderArea.extent = {mw, mh};
+            rp_info.clearValueCount   = 1;
+            rp_info.pClearValues      = &clear_val;
+
+            vkCmdBeginRenderPass(cmd.handle(), &rp_info, VK_SUBPASS_CONTENTS_INLINE);
+
+            cmd.set_viewport(0.0f, 0.0f, static_cast<float>(mw), static_cast<float>(mh));
+            cmd.set_scissor(0, 0, mw, mh);
+
+            cmd.bind_descriptor_set(pipeline_->layout(), *desc_sets_[m], 0);
+
+            cmd.draw(3);
+
+            cmd.end_render_pass();
+
+            // Per-mip availability/visibility barrier -- not optional. The shared RenderPass's
+            // only subpass dependency has srcAccessMask = 0, which is not sufficient to make
+            // this mip's colour write visible to the next mip's (or SSR's) fragment-shader read
+            // of it (see hiz_pass.h's identical barrier for the full explanation).
+            VkImageMemoryBarrier mip_barrier{};
+            mip_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            mip_barrier.oldLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            mip_barrier.newLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            mip_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+            mip_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+            mip_barrier.image                           = color_image_;
+            mip_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+            mip_barrier.subresourceRange.baseMipLevel   = m;
+            mip_barrier.subresourceRange.levelCount     = 1;
+            mip_barrier.subresourceRange.baseArrayLayer = 0;
+            mip_barrier.subresourceRange.layerCount     = 1;
+            mip_barrier.srcAccessMask                   = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            mip_barrier.dstAccessMask                   = VK_ACCESS_SHADER_READ_BIT;
+
+            vkCmdPipelineBarrier(cmd.handle(),
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &mip_barrier);
+        }
+    }
+
+    VkImageView full_view() const { return full_view_; }
+    uint32_t max_mip_level() const { return mip_levels_ > 0 ? mip_levels_ - 1 : 0; }
+    const util::Sampler& sampler() const { return *sampler_; }
+
+private:
+    void destroy_resources_() {
+        if (full_view_ != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_.handle(), full_view_, nullptr);
+            full_view_ = VK_NULL_HANDLE;
+        }
+        for (auto v : mip_views_) {
+            if (v != VK_NULL_HANDLE) vkDestroyImageView(device_.handle(), v, nullptr);
+        }
+        mip_views_.clear();
+
+        for (auto fb : mip_framebuffers_) {
+            if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device_.handle(), fb, nullptr);
+        }
+        mip_framebuffers_.clear();
+
+        if (color_image_ != VK_NULL_HANDLE) {
+            vmaDestroyImage(allocator_.handle(), color_image_, allocation_);
+            color_image_ = VK_NULL_HANDLE;
+            allocation_ = VK_NULL_HANDLE;
+        }
+        desc_sets_.clear();
+        desc_pool_.reset();
+    }
+
+    coopa::gfx::core::Device&      device_;
+    coopa::gfx::memory::Allocator& allocator_;
+
+    uint32_t width_      = 0;
+    uint32_t height_     = 0;
+    uint32_t mip_levels_ = 0;
+
+    VkImage       color_image_ = VK_NULL_HANDLE;
+    VmaAllocation allocation_  = VK_NULL_HANDLE;
+    VkImageView   full_view_   = VK_NULL_HANDLE;
+
+    std::vector<VkImageView>   mip_views_;
+    std::vector<VkFramebuffer> mip_framebuffers_;
+
+    std::unique_ptr<coopa::gfx::pipeline::RenderPass>          render_pass_;
+    std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
+    std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;
+    std::unique_ptr<util::Sampler>               sampler_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> desc_layout_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      desc_pool_;
+    std::vector<std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> desc_sets_;
+    std::unique_ptr<coopa::gfx::pipeline::Pipeline>           pipeline_;
+};
+
+} // namespace passes
+} // namespace engine
+} // namespace gfx
+} // namespace coopa
+
+#endif // GFXCOOPA_ENGINE_PASSES_SCENE_COLOR_MIP_PASS_H

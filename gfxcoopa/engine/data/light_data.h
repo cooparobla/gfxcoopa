@@ -6,8 +6,8 @@
  * Uploaded as a uniform buffer updated once per frame.
  */
 
-#ifndef COOPA_GFX_ENGINE_LIGHT_DATA_H
-#define COOPA_GFX_ENGINE_LIGHT_DATA_H
+#ifndef GFXCOOPA_ENGINE_DATA_LIGHT_DATA_H
+#define GFXCOOPA_ENGINE_DATA_LIGHT_DATA_H
 
 #include <volk/volk.h>
 #include <glm/glm.hpp>
@@ -21,6 +21,7 @@
 namespace coopa {
 namespace gfx {
 namespace engine {
+namespace data {
 
 static constexpr uint32_t MAX_POINT_LIGHTS = 16;
 
@@ -104,6 +105,7 @@ private:
     memory::Buffer buffer_; /**< GPU-side uniform buffer. */
 };
 
+} // namespace data
 } // namespace engine
 } // namespace gfx
 } // namespace coopa

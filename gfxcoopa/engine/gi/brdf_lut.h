@@ -1,10 +1,11 @@
+#include <gfxcoopa/engine/util/sh_math.h>
 /**
  * @file brdf_lut.h
  * @brief BRDF Integration LUT generation & management for PBR indirect specular split-sum approximation.
  */
 
-#ifndef COOPA_GFX_ENGINE_BRDF_LUT_H
-#define COOPA_GFX_ENGINE_BRDF_LUT_H
+#ifndef GFXCOOPA_ENGINE_GI_BRDF_LUT_H
+#define GFXCOOPA_ENGINE_GI_BRDF_LUT_H
 
 #include <volk/volk.h>
 #include <memory>
@@ -20,12 +21,15 @@
 #include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/command/command_buffer.h>
-#include <gfxcoopa/engine/sampler.h>
+#include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/util/error.h>
 
 namespace coopa {
 namespace gfx {
 namespace engine {
+namespace gi {
+
+
 
 /**
  * @class BRDFLUT
@@ -48,7 +52,7 @@ public:
         );
 
         // 2. Create Linear Clamp-to-Edge Sampler
-        lut_sampler_ = std::make_unique<Sampler>(
+        lut_sampler_ = std::make_unique<util::Sampler>(
             device, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
         );
 
@@ -134,9 +138,10 @@ private:
 
     core::Device& device_;
     std::unique_ptr<memory::Image> lut_image_;
-    std::unique_ptr<Sampler>       lut_sampler_;
+    std::unique_ptr<util::Sampler>       lut_sampler_;
 };
 
+} // namespace gi
 } // namespace engine
 } // namespace gfx
 } // namespace coopa

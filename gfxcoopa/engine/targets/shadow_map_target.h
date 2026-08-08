@@ -1,10 +1,11 @@
+#include <gfxcoopa/engine/util/sampler.h>
 /**
  * @file shadow_map_target.h
  * @brief Depth render targets for Directional Light and Point Light Cubemap shadow maps.
  */
 
-#ifndef COOPA_GFX_ENGINE_SHADOW_MAP_TARGET_H
-#define COOPA_GFX_ENGINE_SHADOW_MAP_TARGET_H
+#ifndef GFXCOOPA_ENGINE_TARGETS_SHADOW_MAP_TARGET_H
+#define GFXCOOPA_ENGINE_TARGETS_SHADOW_MAP_TARGET_H
 
 #include <volk/volk.h>
 #include <vector>
@@ -23,6 +24,9 @@
 namespace coopa {
 namespace gfx {
 namespace engine {
+namespace targets {
+
+
 
 /**
  * @class ShadowMapTarget
@@ -326,6 +330,7 @@ private:
     std::unique_ptr<pipeline::RenderPass> cube_render_pass_;
 };
 
+} // namespace targets
 } // namespace engine
 } // namespace gfx
 } // namespace coopa

@@ -1,3 +1,4 @@
+#include <gfxcoopa/engine/util/sampler.h>
 /**
  * @file offscreen_target.h
  * @brief Low-resolution render target for the retro rendering pipeline.
@@ -11,8 +12,8 @@
  * read it for depth-discontinuity calculations.
  */
 
-#ifndef COOPA_GFX_ENGINE_OFFSCREEN_TARGET_H
-#define COOPA_GFX_ENGINE_OFFSCREEN_TARGET_H
+#ifndef GFXCOOPA_ENGINE_TARGETS_OFFSCREEN_TARGET_H
+#define GFXCOOPA_ENGINE_TARGETS_OFFSCREEN_TARGET_H
 
 #include <volk/volk.h>
 #include <stdexcept>
@@ -27,6 +28,9 @@
 namespace coopa {
 namespace gfx {
 namespace engine {
+namespace targets {
+
+
 
 /**
  * @class OffscreenTarget
@@ -272,6 +276,7 @@ private:
     VkFramebuffer                           framebuffer_ = VK_NULL_HANDLE; /**< Framebuffer. */
 };
 
+} // namespace targets
 } // namespace engine
 } // namespace gfx
 } // namespace coopa

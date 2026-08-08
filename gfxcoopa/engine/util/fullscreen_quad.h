@@ -7,14 +7,15 @@
  * Used by the upscale pass and all post-processing stages.
  */
 
-#ifndef COOPA_GFX_ENGINE_FULLSCREEN_QUAD_H
-#define COOPA_GFX_ENGINE_FULLSCREEN_QUAD_H
+#ifndef GFXCOOPA_ENGINE_UTIL_FULLSCREEN_QUAD_H
+#define GFXCOOPA_ENGINE_UTIL_FULLSCREEN_QUAD_H
 
 #include <gfxcoopa/command/command_buffer.h>
 
 namespace coopa {
 namespace gfx {
 namespace engine {
+namespace util {
 
 /**
  * @class FullscreenQuad
@@ -40,6 +41,7 @@ public:
     }
 };
 
+} // namespace util
 } // namespace engine
 } // namespace gfx
 } // namespace coopa

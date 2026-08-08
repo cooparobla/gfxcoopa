@@ -7,8 +7,8 @@
  * 128-byte minimum push constant budget (two mat4s = 128 bytes exactly).
  */
 
-#ifndef COOPA_GFX_ENGINE_MODEL_UBO_H
-#define COOPA_GFX_ENGINE_MODEL_UBO_H
+#ifndef GFXCOOPA_ENGINE_DATA_MODEL_UBO_H
+#define GFXCOOPA_ENGINE_DATA_MODEL_UBO_H
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
@@ -16,6 +16,7 @@
 namespace coopa {
 namespace gfx {
 namespace engine {
+namespace data {
 
 /**
  * @struct ModelPushConstants
@@ -44,6 +45,7 @@ struct ModelPushConstants {
 static_assert(sizeof(ModelPushConstants) == 128,
     "ModelPushConstants must be exactly 128 bytes (two mat4s).");
 
+} // namespace data
 } // namespace engine
 } // namespace gfx
 } // namespace coopa

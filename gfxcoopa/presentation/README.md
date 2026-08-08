@@ -1,40 +1,49 @@
-# `gfxcoopa::presentation` Submodule
+# Presentation Submodule (`coopa::gfx::presentation`)
 
-The `gfxcoopa::presentation` submodule handles desktop window management via GLFW and double-buffered frame orchestration through the high-level `Renderer` class.
+The `coopa::gfx::presentation` submodule provides GLFW windowing wrappers and multi-buffered frame renderer orchestration (`begin_frame`/`end_frame`).
 
 ---
 
-## Frame Render Loop Lifecycle Graph
+## Presentation Frame Loop Architecture
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────────────────┐
-│                             FRAME RENDER LOOP LIFECYCLE                                  │
+│                           FRAME ORCHESTRATION ARCHITECTURE                               │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
 
-  Application            Window                Renderer              Swapchain / GPU
-      │                    │                      │                        │
-      │── poll_events() ──►│                      │                        │
-      │                    │                      │                        │
-      │── begin_frame() ─────────────────────────►│                        │
-      │                    │                      │── acquire_next_image ─►│
-      │                    │                      │◄─ image_index ─────────│
-      │                    │                      │
-      │                    │                      │── Record Commands
-      │                    │                      │   (Draw calls via lambda)
-      │                    │                      │
-      │                    │                      │── submit(cmd) ────────►│
-      │                    │                      │── present() ──────────►│
-      │◄─ frame complete ─────────────────────────│
+                                ┌───────────────────────┐
+                                │        Window         │  (GLFW Handles & Input)
+                                └───────────┬───────────┘
+                                            │
+                                            ▼
+                                ┌───────────────────────┐
+                                │       Renderer        │
+                                ├───────────────────────┤
+                                │ - Framebuffers        │
+                                │ - Fences & Semaphores │
+                                │ - Command Buffers     │
+                                └───────────┬───────────┘
+                                            │
+       ┌────────────────────────────────────┼────────────────────────────────────┐
+       ▼                                    ▼                                    ▼
+┌───────────────┐                  ┌─────────────────┐                  ┌────────────────┐
+│ Acquire Image │                  │ Record Commands │                  │ Submit/Present │
+└───────────────┘                  └─────────────────┘                  └────────────────┘
 ```
 
 ---
 
-## Header Files
+## File Breakdown
 
-| File | Primary Class / Struct | Description |
-|---|---|---|
-| [`window.h`](window.h) | [`Window`](window.h) | RAII wrapper around GLFW windowing. Handles window creation, title management, event polling (`poll_events()`), framebuffer resize detection (`was_resized()`, `framebuffer_size()`), keyboard/mouse input states, and window close checks (`should_close()`). |
-| [`renderer.h`](renderer.h) | [`Renderer`](renderer.h) | High-level frame engine manager. Handles per-frame double-buffering synchronization (fences and semaphores), swapchain image acquisition (`acquire`), command buffer recording callback dispatch, queue submission (`submit`), swapchain image presentation (`present`), and automatic swapchain recreation on resize. |
+### [renderer.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/presentation/renderer.h)
+- **Role**: High-level double/triple-buffered frame orchestration (`acquire` → `record` → `submit` → `present`).
+- **Key Classes / Structs**: `Renderer`.
+- **Details**: Manages `MAX_FRAMES_IN_FLIGHT` (default 2) sets of fences, semaphores, command buffers, and swapchain framebuffers. Detects out-of-date swapchains and invokes user resize callbacks.
+
+### [window.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/presentation/window.h)
+- **Role**: GLFW window creation, event polling, and input handling wrapper.
+- **Key Classes / Structs**: `Window`.
+- **Details**: Encapsulates GLFW window lifecycle, framebuffer size callbacks, input polling (`should_close()`, `poll_events()`), and window minimization state checking.
 
 ---
 
@@ -45,19 +54,15 @@ The `gfxcoopa::presentation` submodule handles desktop window management via GLF
 #include <gfxcoopa/presentation/renderer.h>
 
 coopa::gfx::presentation::Window window("Application", 1280, 720);
-// ... setup instance, device, swapchain, render_pass, command_pool ...
-coopa::gfx::presentation::Renderer renderer(device, swapchain, render_pass, command_pool);
+coopa::gfx::presentation::Renderer renderer(device, swapchain, render_pass, cmd_pool);
 
 while (!window.should_close()) {
     window.poll_events();
 
     renderer.begin_frame([&](coopa::gfx::command::CommandBuffer& cmd) {
-        auto extent = swapchain.extent();
-        cmd.set_viewport(0, 0, extent.width, extent.height);
-        cmd.set_scissor(0, 0, extent.width, extent.height);
-        // ... record render commands ...
+        cmd.bind_pipeline(pipeline);
+        cmd.draw(3);
     });
 }
-
 device.wait_idle();
 ```

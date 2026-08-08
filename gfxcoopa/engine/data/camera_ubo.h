@@ -9,8 +9,8 @@
  * boundary to prevent sub-pixel jitter at low render resolutions.
  */
 
-#ifndef COOPA_GFX_ENGINE_CAMERA_UBO_H
-#define COOPA_GFX_ENGINE_CAMERA_UBO_H
+#ifndef GFXCOOPA_ENGINE_DATA_CAMERA_UBO_H
+#define GFXCOOPA_ENGINE_DATA_CAMERA_UBO_H
 
 #include <volk/volk.h>
 #include <glm/glm.hpp>
@@ -24,6 +24,7 @@
 namespace coopa {
 namespace gfx {
 namespace engine {
+namespace data {
 
 /**
  * @struct CameraData
@@ -102,6 +103,7 @@ private:
     memory::Buffer buffer_; /**< GPU-side uniform buffer. */
 };
 
+} // namespace data
 } // namespace engine
 } // namespace gfx
 } // namespace coopa

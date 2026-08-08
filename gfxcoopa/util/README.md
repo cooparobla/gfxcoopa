@@ -1,42 +1,50 @@
-# `gfxcoopa::util` Submodule
+# Utility Submodule (`coopa::gfx::util`)
 
-The `gfxcoopa::util` submodule provides foundational utilities including error checking macros, format selection helpers, Volk dynamic loader initialization, and Vulkan validation layer debug message handlers.
+The `coopa::gfx::util` submodule provides debug validation messengers, format helpers, Volk dynamic loader initialization, and error checking macros.
 
 ---
 
-## Util Architecture & Error Flow Graph
+## Utility Component Graph
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────────────────┐
-│                            UTIL ARCHITECTURE & ERROR FLOW                                │
+│                             UTILITY COMPONENT HIERARCHY                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
 
-    ┌───────────────────────┐                     ┌───────────────────────┐
-    │       volk_init       │                     │    debug_messenger    │
-    ├───────────────────────┤                     ├───────────────────────┤
-    │ - init_volk()         │                     │ - DebugMessenger      │
-    │   (Loads Vulkan Symbols│                     │   (Validation Layer   │
-    └───────────────────────┘                     │    Error Callback)    │
-                                                  └───────────────────────┘
-
-    ┌───────────────────────┐                     ┌───────────────────────┐
-    │        format         │                     │         error         │
-    ├───────────────────────┤                     ├───────────────────────┤
-    │ - format_from_channels│                     │ - GFX_VK_CHECK(expr)  │
-    │ - format_byte_size    │                     │ - vk_result_string()  │
-    └───────────────────────┘                     └───────────────────────┘
+                                ┌───────────────────────┐
+                                │       volk_init       │  (volkInitialize)
+                                └───────────┬───────────┘
+                                            │
+       ┌────────────────────────────────────┼────────────────────────────────────┐
+       ▼                                    ▼                                    ▼
+┌───────────────┐                  ┌─────────────────┐                  ┌────────────────┐
+│DebugMessenger │                  │  GFX_VK_CHECK   │                  │ Format Helpers │
+└───────────────┘                  └─────────────────┘                  └────────────────┘
 ```
 
 ---
 
-## Header Files
+## File Breakdown
 
-| File | Primary Class / Struct / Function | Description |
-|---|---|---|
-| [`debug_messenger.h`](debug_messenger.h) | [`DebugMessenger`](debug_messenger.h) | RAII wrapper for `VkDebugUtilsMessengerEXT`. Configures Vulkan validation layer message callback to log warnings, errors, and performance details to `std::cerr`. |
-| [`error.h`](error.h) | `GFX_VK_CHECK(expr)`, `vk_result_string()` | Macro for evaluating Vulkan `VkResult` expressions and throwing descriptive `std::runtime_error` exceptions with context on failure, along with a helper function translating `VkResult` enum values to strings. |
-| [`format.h`](format.h) | `format_from_channels()`, `format_byte_size()`, `format_has_depth()`, `format_has_stencil()` | Utility functions mapping channel counts and sRGB flags to corresponding `VkFormat` enums, computing format stride in bytes, and checking depth/stencil properties. |
-| [`volk_init.h`](volk_init.h) | `init_volk()` | One-time initialization guard function that safely invokes `volkInitialize()` to dynamically load entry points from `libvulkan.so`. |
+### [debug_messenger.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/util/debug_messenger.h)
+- **Role**: Vulkan validation layer debug messenger (`VkDebugUtilsMessengerEXT`).
+- **Key Classes / Structs**: `DebugMessenger`.
+- **Details**: Captures Vulkan API warning/error logs and routes formatted debug reports to stdout/stderr.
+
+### [error.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/util/error.h)
+- **Role**: Error checking macros and string translation utilities.
+- **Key Classes / Structs**: `GFX_VK_CHECK()`, `vk_result_string()`.
+- **Details**: Throws `std::runtime_error` with source filename and line number when Vulkan API functions return non-success codes.
+
+### [format.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/util/format.h)
+- **Role**: Vulkan format selection helpers.
+- **Key Classes / Structs**: `find_supported_format()`, `find_depth_format()`.
+- **Details**: Queries physical device format properties to select depth/stencil attachment formats (`VK_FORMAT_D32_SFLOAT`, `VK_FORMAT_D24_UNORM_S8_UINT`, etc.).
+
+### [volk_init.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/util/volk_init.h)
+- **Role**: Dynamic Vulkan loader initialization wrapper.
+- **Key Classes / Structs**: `init_volk()`.
+- **Details**: Calls `volkInitialize()` to dynamically load Vulkan entry points without linking against static Vulkan loader libraries.
 
 ---
 
@@ -46,17 +54,14 @@ The `gfxcoopa::util` submodule provides foundational utilities including error c
 #include <gfxcoopa/util/volk_init.h>
 #include <gfxcoopa/util/error.h>
 #include <gfxcoopa/util/format.h>
-#include <gfxcoopa/util/debug_messenger.h>
 
-// One-time volk initialization
+// 1. Initialize Volk dynamic loader
 coopa::gfx::util::init_volk();
 
-// Error check macro
-GFX_VK_CHECK(vkCreateInstance(&createInfo, nullptr, &instance));
+// 2. Check Vulkan API result macro
+VkResult result = vkCreateInstance(&instance_info, nullptr, &instance);
+GFX_VK_CHECK(result);
 
-// Format lookup helper (e.g. 4 channels, linear space)
-VkFormat format = coopa::gfx::util::format_from_channels(4, false); // VK_FORMAT_R8G8B8A8_UNORM
-
-// Setup debug messenger for validation layer logs
-coopa::gfx::util::DebugMessenger messenger(instance);
+// 3. Find optimal depth format
+VkFormat depth_format = coopa::gfx::util::find_depth_format(physical_device);
 ```

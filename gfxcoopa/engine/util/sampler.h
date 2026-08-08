@@ -6,8 +6,8 @@
  * no bilinear interpolation blurs the retro low-res render.
  */
 
-#ifndef COOPA_GFX_ENGINE_SAMPLER_H
-#define COOPA_GFX_ENGINE_SAMPLER_H
+#ifndef GFXCOOPA_ENGINE_UTIL_SAMPLER_H
+#define GFXCOOPA_ENGINE_UTIL_SAMPLER_H
 
 #include <volk/volk.h>
 #include <stdexcept>
@@ -17,6 +17,7 @@
 namespace coopa {
 namespace gfx {
 namespace engine {
+namespace util {
 
 /**
  * @class Sampler
@@ -121,6 +122,7 @@ private:
     VkSampler     sampler_ = VK_NULL_HANDLE; /**< The Vulkan sampler. */
 };
 
+} // namespace util
 } // namespace engine
 } // namespace gfx
 } // namespace coopa

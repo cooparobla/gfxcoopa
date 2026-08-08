@@ -1,10 +1,11 @@
+#include <gfxcoopa/engine/util/sampler.h>
 /**
  * @file cubemap_target.h
  * @brief HDR color cubemap render target for reflection probe capture.
  */
 
-#ifndef COOPA_GFX_ENGINE_CUBEMAP_TARGET_H
-#define COOPA_GFX_ENGINE_CUBEMAP_TARGET_H
+#ifndef GFXCOOPA_ENGINE_TARGETS_CUBEMAP_TARGET_H
+#define GFXCOOPA_ENGINE_TARGETS_CUBEMAP_TARGET_H
 
 #include <volk/volk.h>
 #include <vector>
@@ -24,6 +25,9 @@
 namespace coopa {
 namespace gfx {
 namespace engine {
+namespace targets {
+
+
 
 /**
  * @class CubemapTarget
@@ -414,6 +418,7 @@ private:
     std::unique_ptr<pipeline::RenderPass> prefilter_pass_;
 };
 
+} // namespace targets
 } // namespace engine
 } // namespace gfx
 } // namespace coopa

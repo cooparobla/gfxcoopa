@@ -3,8 +3,8 @@
  * @brief Vulkan pipelines for directional and cubemap shadow map depth passes.
  */
 
-#ifndef COOPA_GFX_ENGINE_SHADOW_PIPELINE_H
-#define COOPA_GFX_ENGINE_SHADOW_PIPELINE_H
+#ifndef GFXCOOPA_ENGINE_PASSES_SHADOW_PIPELINE_H
+#define GFXCOOPA_ENGINE_PASSES_SHADOW_PIPELINE_H
 
 #include <volk/volk.h>
 #include <memory>
@@ -16,11 +16,15 @@
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/command/command_buffer.h>
-#include <gfxcoopa/engine/mesh.h>
+#include <gfxcoopa/engine/data/mesh.h>
 
 namespace coopa {
 namespace gfx {
 namespace engine {
+namespace passes {
+
+
+
 
 /**
  * @struct DirectionalShadowPushConstants
@@ -60,7 +64,7 @@ public:
         dir_vert_ = std::make_unique<pipeline::Shader>(device, dir_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         dir_frag_ = std::make_unique<pipeline::Shader>(device, dir_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        auto binding = Vertex::binding_description();
+        auto binding = data::Vertex::binding_description();
 
         // Shadow depth shaders only consume position (location 0).
         // Providing only that attribute eliminates validation warnings about
@@ -69,7 +73,7 @@ public:
             .location = 0,
             .binding  = 0,
             .format   = VK_FORMAT_R32G32B32_SFLOAT,
-            .offset   = offsetof(Vertex, position)
+            .offset   = offsetof(data::Vertex, position)
         }};
 
         pipeline::PipelineConfig cfg{};
@@ -139,6 +143,7 @@ private:
     std::unique_ptr<pipeline::Pipeline> cube_pipeline_;
 };
 
+} // namespace passes
 } // namespace engine
 } // namespace gfx
 } // namespace coopa

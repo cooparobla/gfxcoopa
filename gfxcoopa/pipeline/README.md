@@ -1,53 +1,54 @@
-# `gfxcoopa::pipeline` Submodule
+# Pipeline Submodule (`coopa::gfx::pipeline`)
 
-The `gfxcoopa::pipeline` submodule provides Vulkan pipeline infrastructure, including shader bytecode loading, render pass setup, descriptor pools/layouts/sets management, and graphics pipeline state configuration.
+The `coopa::gfx::pipeline` submodule provides RAII wrappers and builders for Vulkan shaders, render passes, descriptor pools/layouts/sets, and graphics pipeline state configuration.
 
 ---
 
-## Pipeline & Descriptor Setup Graph
+## Pipeline Architecture Graph
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────────────────┐
-│                           PIPELINE & DESCRIPTOR SETUP MODEL                              │
+│                            PIPELINE CREATION & LAYOUT FLOW                               │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
 
-    ┌───────────────────────┐                     ┌───────────────────────┐
-    │        Shader         │                     │      RenderPass       │
-    ├───────────────────────┤                     ├───────────────────────┤
-    │ SPIR-V .spv Bytecode  │                     │ Color & Depth Attach  │
-    └───────────┬───────────┘                     └───────────┬───────────┘
-                │                                             │
-                └───────────────────┬─────────────────────────┘
-                                    │
-                                    ▼
-    ┌───────────────────────┐  ┌───────────────────────┐  ┌───────────────────────┐
-    │ DescriptorSetLayout   │─►│       Pipeline        │◄─│ Push Constant Ranges  │
-    └───────────────────────┘  └───────────────────────┘  └───────────────────────┘
-                                           ▲
-                                           │ binds layout & resources
-    ┌───────────────────────┐              │
-    │    DescriptorPool     │              │
-    └───────────┬───────────┘              │
-                │ allocates                │
-                ▼                          │
-    ┌───────────────────────┐              │
-    │     DescriptorSet     │──────────────┘
-    ├───────────────────────┤
-    │ - write_buffer()      │
-    │ - write_image()       │
-    └───────────────────────┘
+       ┌───────────────────────┐                        ┌───────────────────────┐
+       │     ShaderModule      │                        │  DescriptorSetLayout  │
+       └───────────┬───────────┘                        └───────────┬───────────┘
+                   │                                                │
+                   ▼                                                ▼
+       ┌───────────────────────┐                        ┌───────────────────────┐
+       │    PipelineConfig     ├───────────────────────►│    PipelineLayout     │
+       └───────────┬───────────┘                        └───────────┬───────────┘
+                   │                                                │
+                   ▼                                                ▼
+       ┌───────────────────────┐                        ┌───────────────────────┐
+       │      RenderPass       ├───────────────────────►│       Pipeline        │
+       └───────────────────────┘                        └───────────────────────┘
 ```
 
 ---
 
-## Header Files
+## File Breakdown
 
-| File | Primary Class / Struct | Description |
-|---|---|---|
-| [`shader.h`](shader.h) | [`Shader`](shader.h) | RAII wrapper around `VkShaderModule`. Loads compiled SPIR-V `.spv` files from disk and returns `VkPipelineShaderStageCreateInfo`. |
-| [`render_pass.h`](render_pass.h) | [`RenderPassConfig`](render_pass.h), [`RenderPass`](render_pass.h) | RAII wrapper around `VkRenderPass`. Configures color and optional depth attachments, subpass definitions, clear values, load/store ops, and layout transitions. |
-| [`descriptor.h`](descriptor.h) | [`DescriptorPool`](descriptor.h), [`DescriptorSetLayout`](descriptor.h), [`DescriptorSet`](descriptor.h) | RAII wrappers for Vulkan descriptor resource management: `DescriptorPool` allocates sets, `DescriptorSetLayout` specifies binding contracts, and `DescriptorSet` binds buffers (`write_buffer()`) and samplers/images (`write_image()`). |
-| [`pipeline.h`](pipeline.h) | [`PipelineConfig`](pipeline.h), [`Pipeline`](pipeline.h) | RAII wrapper for `VkPipeline` and `VkPipelineLayout`. Configures input assembly, rasterization, depth testing, blending, dynamic states (viewport/scissor), push constant ranges, and layout binding. |
+### [descriptor.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/pipeline/descriptor.h)
+- **Role**: RAII abstractions for Vulkan descriptor sets, layouts, and pools.
+- **Key Classes / Structs**: `DescriptorSetLayout`, `DescriptorPool`, `DescriptorWriter`.
+- **Details**: `DescriptorSetLayout` configures layout bindings; `DescriptorPool` allocates sets; `DescriptorWriter` provides a builder pattern for updating buffer (`bind_buffer`) and image (`bind_image`) descriptors via `vkUpdateDescriptorSets`.
+
+### [pipeline.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/pipeline/pipeline.h)
+- **Role**: RAII encapsulation of graphics and compute pipelines (`VkPipeline`, `VkPipelineLayout`).
+- **Key Classes / Structs**: `Pipeline`, `PipelineConfig`.
+- **Details**: Provides a builder pattern (`PipelineConfig`) for vertex input bindings, input assembly, rasterization state, multisampling, depth-stencil testing, color blending, dynamic states, and push constant ranges.
+
+### [render_pass.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/pipeline/render_pass.h)
+- **Role**: RAII wrapper for `VkRenderPass`.
+- **Key Classes / Structs**: `RenderPass`, `RenderPassBuilder`.
+- **Details**: Simplifies creation of multi-attachment color/depth render passes, subpass descriptions, and subpass dependencies.
+
+### [shader.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/pipeline/shader.h)
+- **Role**: Encapsulates SPIR-V shader module loading (`VkShaderModule`).
+- **Key Classes / Structs**: `ShaderModule`.
+- **Details**: Loads binary SPIR-V bytecode from file paths and creates shader stage info structures (`VkPipelineShaderStageCreateInfo`).
 
 ---
 
@@ -59,23 +60,29 @@ The `gfxcoopa::pipeline` submodule provides Vulkan pipeline infrastructure, incl
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/pipeline.h>
 
-// Create RenderPass
-coopa::gfx::pipeline::RenderPass render_pass(device, swapchain.image_format(), VK_FORMAT_D32_SFLOAT);
+// 1. Create render pass
+coopa::gfx::pipeline::RenderPassBuilder rp_builder(device);
+auto render_pass = rp_builder
+    .add_color_attachment(swapchain.format(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+    .build();
 
-// Load Shaders
-coopa::gfx::pipeline::Shader vert(device, "vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
-coopa::gfx::pipeline::Shader frag(device, "frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
+// 2. Load SPIR-V shaders
+coopa::gfx::pipeline::ShaderModule vert_shader(device, "shaders/vert.spv");
+coopa::gfx::pipeline::ShaderModule frag_shader(device, "shaders/frag.spv");
 
-// Create Descriptor Layout
-coopa::gfx::pipeline::DescriptorSetLayout layout(device, {
-    {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT}
-});
+// 3. Build descriptor set layout
+coopa::gfx::pipeline::DescriptorSetLayout layout = coopa::gfx::pipeline::DescriptorSetLayout::Builder(device)
+    .add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT)
+    .build();
 
-// Build Graphics Pipeline
-coopa::gfx::pipeline::Pipeline pipeline(
-    device, render_pass,
-    {&vert, &frag},
-    {layout.handle()},
-    {/* push constant ranges */}
-);
+// 4. Configure and create graphics pipeline
+coopa::gfx::pipeline::PipelineConfig config{};
+config.shader_stages = {
+    vert_shader.stage_info(VK_SHADER_STAGE_VERTEX_BIT),
+    frag_shader.stage_info(VK_SHADER_STAGE_FRAGMENT_BIT)
+};
+config.descriptor_set_layouts = { layout.handle() };
+config.render_pass = render_pass->handle();
+
+coopa::gfx::pipeline::Pipeline pipeline(device, config);
 ```
