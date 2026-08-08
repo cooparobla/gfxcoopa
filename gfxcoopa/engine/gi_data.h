@@ -8,6 +8,7 @@
 
 #include <volk/volk.h>
 #include <glm/glm.hpp>
+#include <array>
 #include <memory>
 #include <vector>
 
@@ -18,6 +19,15 @@
 namespace coopa {
 namespace gfx {
 namespace engine {
+
+/// Maximum number of reflection probes blended together per pixel. Matches
+/// this codebase's existing point-shadow-map cap (also 4) -- small enough
+/// that shader-side consumers can address each one with a compile-time-
+/// constant-indexed, separately-named sampler binding (see ibl.glsl) rather
+/// than a dynamically-indexed sampler array, which the device does not
+/// enable (VkPhysicalDeviceFeatures::shaderSampledImageArrayDynamicIndexing
+/// is off -- only samplerAnisotropy is turned on in device.h).
+static constexpr uint32_t MAX_REFLECTION_PROBES = 4;
 
 /// Per-probe SH data: 9 vec4s = 144 bytes per probe.
 /// Each vec4 stores one SH band's RGB coefficients + padding.
@@ -35,12 +45,14 @@ struct alignas(16) GiUniforms {
     glm::vec4 gi_params    = glm::vec4(1.0f, 1.0f, 5.0f, 0.0f); // x = gi_intensity, y = reflection_intensity, z = max_roughness_mip, w = num_reflection_probes
 };
 
-/// Uniform block for a single reflection probe.
+/// Uniform block for a single reflection probe. 4x vec4 = 64 bytes -- already
+/// a multiple of 16, so an array of these under std140 has no inter-element
+/// padding surprises (element stride == sizeof(ReflectionProbeUniforms)).
 struct alignas(16) ReflectionProbeUniforms {
     glm::vec4 probe_position = glm::vec4(0.0f); // xyz = world position, w = unused
     glm::vec4 box_min        = glm::vec4(0.0f); // xyz = AABB min for parallax correction, w = unused
     glm::vec4 box_max        = glm::vec4(0.0f); // xyz = AABB max for parallax correction, w = unused
-    glm::vec4 params         = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f); // x = blend_distance, y = importance, z = 0, w = 0
+    glm::vec4 params         = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f); // x = blend_distance, y = importance, z = intensity, w = max_roughness_mip
 };
 
 /// Manages the UBO and SSBO for GI data on the GPU.
@@ -59,7 +71,7 @@ public:
         );
 
         reflection_buf_ = std::make_unique<memory::Buffer>(
-            memory::Buffer::uniform(device, allocator, sizeof(ReflectionProbeUniforms))
+            memory::Buffer::uniform(device, allocator, sizeof(ReflectionProbeUniforms) * MAX_REFLECTION_PROBES)
         );
 
         upload_uniforms();
@@ -86,12 +98,19 @@ public:
         probes_buf_->upload(probes.data(), upload_size);
     }
 
+    /// Uploads up to MAX_REFLECTION_PROBES entries (extras are silently
+    /// dropped, same behavior as upload_probes()'s clamping). Always uploads
+    /// the full fixed-size array so unused trailing slots are zeroed --
+    /// harmless since shader consumers gate on the active count
+    /// (GiUniforms.gi_params.w), but keeps every slot's descriptor read
+    /// well-defined regardless.
     void upload_reflection_uniforms(const std::vector<ReflectionProbeUniforms>& probes) {
-        if (probes.empty()) {
-            reflection_buf_->upload(&reflection_uniforms_, sizeof(ReflectionProbeUniforms));
-        } else {
-            reflection_buf_->upload(&probes[0], sizeof(ReflectionProbeUniforms));
+        std::array<ReflectionProbeUniforms, MAX_REFLECTION_PROBES> buf{};
+        size_t n = std::min(probes.size(), static_cast<size_t>(MAX_REFLECTION_PROBES));
+        for (size_t i = 0; i < n; ++i) {
+            buf[i] = probes[i];
         }
+        reflection_buf_->upload(buf.data(), sizeof(buf));
     }
 
     memory::Buffer& uniforms_buffer() { return *uniforms_buf_; }

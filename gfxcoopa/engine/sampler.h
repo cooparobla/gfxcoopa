@@ -33,17 +33,27 @@ public:
      * @param device        Logical device.
      * @param filter        Min/mag filter (VK_FILTER_NEAREST or VK_FILTER_LINEAR).
      * @param address_mode  UV wrap mode (default: clamp to edge).
+     * @param max_lod       Maximum LOD clamp for explicit-LOD sampling (e.g. textureLod) as well
+     *                      as implicit mip selection. Defaults to 0.0f (single-mip images, the
+     *                      behavior every existing caller relies on). Pass the image's mip count
+     *                      to sample a real mip chain (e.g. a Hi-Z pyramid).
+     * @param mipmap_mode   Mip selection filter (VK_SAMPLER_MIPMAP_MODE_NEAREST or _LINEAR).
+     *                      Defaults to NEAREST, matching every existing caller's expectations.
+     *                      Pass LINEAR for smooth roughness-driven mip blending (e.g. a
+     *                      prefiltered reflection cubemap).
      */
     Sampler(core::Device& device,
             VkFilter filter,
-            VkSamplerAddressMode address_mode = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+            VkSamplerAddressMode address_mode = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            float max_lod = 0.0f,
+            VkSamplerMipmapMode mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST)
         : device_(device)
     {
         VkSamplerCreateInfo info{};
         info.sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
         info.magFilter               = filter;
         info.minFilter               = filter;
-        info.mipmapMode              = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        info.mipmapMode              = mipmap_mode;
         info.addressModeU            = address_mode;
         info.addressModeV            = address_mode;
         info.addressModeW            = address_mode;
@@ -51,7 +61,7 @@ public:
         info.anisotropyEnable        = VK_FALSE;
         info.compareEnable           = VK_FALSE;
         info.minLod                  = 0.0f;
-        info.maxLod                  = 0.0f;
+        info.maxLod                  = max_lod;
         info.borderColor             = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
         info.unnormalizedCoordinates = VK_FALSE;
 
