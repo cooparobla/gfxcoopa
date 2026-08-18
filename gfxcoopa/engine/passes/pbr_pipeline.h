@@ -31,11 +31,11 @@ class PbrPipeline {
 public:
     struct PushConstants {
         coopa::gfx::engine::data::ModelPushConstants model; // 128 bytes
-        glm::vec4 albedo    = {0.8f, 0.8f, 0.8f, 0.0f}; // 16 bytes: xyz=color, w=has_albedo_tex
-        float     metallic  = 0.0f;
-        float     roughness = 0.5f;
-        float     ao        = 1.0f;
-        float     flags     = 0.0f;                     // 16 bytes: bit 0 = has_normal, bit 1 = has_orm
+        glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f}; // 16 bytes; .w = alpha
+        float     metallic     = 0.0f;
+        float     roughness    = 0.5f;
+        float     ao           = 1.0f;
+        float     alpha_cutoff = 0.0f;                     // 16 bytes; 0.0 = no alpha test
     };
 
     PbrPipeline(coopa::gfx::core::Device& device,

@@ -12,6 +12,7 @@
 #define COOPA_GFX_PIPELINE_PIPELINE_H
 
 #include <volk/volk.h>
+#include <algorithm>
 #include <vector>
 #include <stdexcept>
 
@@ -33,15 +34,17 @@ namespace pipeline {
  * polygons, back-face culling, CCW winding, depth test on, no blending.
  */
 struct PipelineConfig {
-    VkPrimitiveTopology    topology       = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; /**< Input primitive topology. */
-    VkPolygonMode          polygon_mode   = VK_POLYGON_MODE_FILL;                /**< Fill, line, or point rendering. */
-    VkCullModeFlags        cull_mode      = VK_CULL_MODE_BACK_BIT;               /**< Face culling mode. */
-    VkFrontFace            front_face     = VK_FRONT_FACE_COUNTER_CLOCKWISE;     /**< CCW winding is front-facing. */
-    bool                   depth_test     = true;                                 /**< Enable depth testing. */
-    bool                   depth_write    = true;                                 /**< Enable depth writing. */
-    bool                   blending       = false;                                /**< Enable alpha blending. */
-    float                  line_width     = 1.0f;                                 /**< Rasterized line width. */
-    VkSampleCountFlagBits  samples        = VK_SAMPLE_COUNT_1_BIT;               /**< MSAA sample count. */
+    VkPrimitiveTopology    topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; /**< Input primitive topology. */
+    VkPolygonMode          polygon_mode           = VK_POLYGON_MODE_FILL;                /**< Fill, line, or point rendering. */
+    VkCullModeFlags        cull_mode              = VK_CULL_MODE_BACK_BIT;               /**< Face culling mode. */
+    VkFrontFace            front_face             = VK_FRONT_FACE_COUNTER_CLOCKWISE;     /**< CCW winding is front-facing. */
+    bool                   depth_test             = true;                                 /**< Enable depth testing. */
+    bool                   depth_write            = true;                                 /**< Enable depth writing. */
+    bool                   blending               = false;                                /**< Enable alpha blending. */
+    float                  line_width             = 1.0f;                                 /**< Rasterized line width. */
+    VkSampleCountFlagBits  samples                = VK_SAMPLE_COUNT_1_BIT;               /**< MSAA sample count. */
+    VkCompareOp             depth_compare_op       = VK_COMPARE_OP_LESS;                  /**< Depth comparison function. */
+    uint32_t                color_attachment_count = 1;                                   /**< Color attachments sharing this blend state. */
 };
 
 /**
@@ -68,6 +71,35 @@ public:
      */
     Pipeline(core::Device&                                           device,
              RenderPass&                                             render_pass,
+             const std::vector<Shader*>&                            shaders,
+             const std::vector<VkVertexInputBindingDescription>&    vertex_bindings,
+             const std::vector<VkVertexInputAttributeDescription>&  vertex_attributes,
+             const std::vector<VkDescriptorSetLayout>&              descriptor_layouts = {},
+             const PipelineConfig&                                  config = {},
+             const std::vector<VkPushConstantRange>&                push_constants = {})
+        : device_(device)
+    {
+        create_layout(descriptor_layouts, push_constants);
+        create_pipeline(render_pass.handle(), shaders, vertex_bindings, vertex_attributes, config);
+    }
+
+    /**
+     * @brief Creates a graphics pipeline against a raw render pass handle.
+     *
+     * For callers (e.g. a pass with a hand-built VkRenderPass) that don't own a RenderPass
+     * wrapper.
+     *
+     * @param device             The logical device.
+     * @param render_pass        Handle of a compatible render pass.
+     * @param shaders            Pointers to Shader objects (vertex + fragment required).
+     * @param vertex_bindings    VkVertexInputBindingDescription array (per-buffer stride).
+     * @param vertex_attributes  VkVertexInputAttributeDescription array (per-attribute layout).
+     * @param descriptor_layouts Descriptor set layouts used by the shaders.
+     * @param config             Rasterization state overrides (defaults are GL-like).
+     * @param push_constants     Push constant ranges (e.g. for per-object model matrices).
+     */
+    Pipeline(core::Device&                                           device,
+             VkRenderPass                                            render_pass,
              const std::vector<Shader*>&                            shaders,
              const std::vector<VkVertexInputBindingDescription>&    vertex_bindings,
              const std::vector<VkVertexInputAttributeDescription>&  vertex_attributes,
@@ -167,13 +199,13 @@ private:
 
     /**
      * @brief Creates the VkPipeline from all pipeline state.
-     * @param render_pass       Compatible render pass.
+     * @param render_pass       Handle of a compatible render pass.
      * @param shaders           Shader stages.
      * @param vertex_bindings   Vertex buffer binding descriptions.
      * @param vertex_attributes Vertex attribute descriptions.
      * @param config            Rasterization overrides.
      */
-    void create_pipeline(RenderPass&                                             render_pass,
+    void create_pipeline(VkRenderPass                                            render_pass,
                          const std::vector<Shader*>&                            shaders,
                          const std::vector<VkVertexInputBindingDescription>&    vertex_bindings,
                          const std::vector<VkVertexInputAttributeDescription>&  vertex_attributes,
@@ -238,10 +270,11 @@ private:
         depth_stencil.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
         depth_stencil.depthTestEnable  = config.depth_test  ? VK_TRUE : VK_FALSE;
         depth_stencil.depthWriteEnable = config.depth_write ? VK_TRUE : VK_FALSE;
-        depth_stencil.depthCompareOp   = VK_COMPARE_OP_LESS;
+        depth_stencil.depthCompareOp   = config.depth_compare_op;
         depth_stencil.stencilTestEnable= VK_FALSE;
 
-        // Color blending.
+        // Color blending. The same attachment state is replicated across
+        // config.color_attachment_count attachments (defaults to 1).
         VkPipelineColorBlendAttachmentState blend_attachment{};
         if (config.blending) {
             blend_attachment.blendEnable         = VK_TRUE;
@@ -258,11 +291,14 @@ private:
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 
+        std::vector<VkPipelineColorBlendAttachmentState> blend_attachments(
+            std::max(1u, config.color_attachment_count), blend_attachment);
+
         VkPipelineColorBlendStateCreateInfo color_blending{};
         color_blending.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
         color_blending.logicOpEnable   = VK_FALSE;
-        color_blending.attachmentCount = 1;
-        color_blending.pAttachments    = &blend_attachment;
+        color_blending.attachmentCount = static_cast<uint32_t>(blend_attachments.size());
+        color_blending.pAttachments    = blend_attachments.data();
 
         // Final pipeline create info.
         VkGraphicsPipelineCreateInfo pipeline_info{};
@@ -278,7 +314,7 @@ private:
         pipeline_info.pColorBlendState    = &color_blending;
         pipeline_info.pDynamicState       = &dynamic_state;
         pipeline_info.layout              = layout_;
-        pipeline_info.renderPass          = render_pass.handle();
+        pipeline_info.renderPass          = render_pass;
         pipeline_info.subpass             = 0;
 
         GFX_VK_CHECK(vkCreateGraphicsPipelines(device_.handle(), VK_NULL_HANDLE, 1,

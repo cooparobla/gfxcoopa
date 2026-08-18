@@ -149,9 +149,8 @@ public:
         resolve_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, resolve_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
         // 3. Descriptor Set Layouts
-        // G-Buffer layout (3 images: G0, G1, G2), shared by the SSR raymarch set and the
-        // composite set -- the raymarch no longer reads G_depth (Hi-Z supplies depth), so both
-        // passes now bind the identical 3-image layout instead of two near-duplicate ones.
+        // G-Buffer layout (3 images: G0, G1, G2) for the SSR raymarch set -- it no longer reads
+        // G_depth (Hi-Z supplies depth).
         std::vector<VkDescriptorSetLayoutBinding> gbuf3_bindings;
         for (uint32_t i = 0; i < 3; ++i) {
             VkDescriptorSetLayoutBinding b{};
@@ -162,6 +161,20 @@ public:
             gbuf3_bindings.push_back(b);
         }
         gbuf3_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, gbuf3_bindings);
+
+        // Composite G-buffer layout: same G0-G2 plus an SSAO sampler (binding 3), so the
+        // composite can attenuate the SSR/env delta by the same ao * ssao term
+        // deferred_lighting.frag applies to indirect_specular (see ssr_composite.frag).
+        std::vector<VkDescriptorSetLayoutBinding> comp_gbuf_bindings = gbuf3_bindings;
+        {
+            VkDescriptorSetLayoutBinding b{};
+            b.binding         = 3;
+            b.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            b.descriptorCount = 1;
+            b.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+            comp_gbuf_bindings.push_back(b);
+        }
+        comp_gbuf_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, comp_gbuf_bindings);
 
         // Single image sampler layouts
         std::vector<VkDescriptorSetLayoutBinding> single_img = {
@@ -181,11 +194,11 @@ public:
         };
         resolve_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, resolve_bindings);
 
-        // 4. Descriptor Pool (6 sets / 11 combined-image-sampler descriptors used; sized with headroom)
+        // 4. Descriptor Pool (6 sets / 12 combined-image-sampler descriptors used; sized with headroom)
         desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
             device, 12,
             std::vector<VkDescriptorPoolSize>{
-                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 24}
+                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 25}
             }
         );
 
@@ -195,7 +208,7 @@ public:
         scene_color_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *scene_color_layout_);
         resolve_set_     = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *resolve_layout_);
 
-        comp_gbuf3_set_       = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *gbuf3_layout_);
+        comp_gbuf3_set_       = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *comp_gbuf_layout_);
         comp_raw_ssr_set_     = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *raw_ssr_layout_);
         comp_scene_color_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *scene_color_layout_);
 
@@ -230,7 +243,7 @@ public:
         // 6. SSR Composite Pipeline Creation
         std::vector<VkDescriptorSetLayout> comp_layouts = {
             camera_layout,
-            gbuf3_layout_->handle(),
+            comp_gbuf_layout_->handle(),
             raw_ssr_layout_->handle(),
             scene_color_layout_->handle(),
             gi_layout
@@ -326,6 +339,14 @@ public:
         // Composite now reads the temporally-resolved buffer, not the raw single-sample trace.
         comp_raw_ssr_set_->bind_image(0, resolved_target_->color_view(), linear_sampler.handle());
         comp_scene_color_set_->bind_image(0, scene_color_view, linear_sampler.handle());
+    }
+
+    /// Binding 3 of the composite G-buffer set must be rebound every frame -- callers pass the
+    /// SSAO pass's blurred output when enabled, or its permanent neutral (fully-unoccluded)
+    /// texture when disabled/absent, mirroring DeferredLightingPass::set_ssao_image() so the two
+    /// passes always attenuate indirect specular by the identical ao * ssao term.
+    void set_ssao_image(VkImageView ssao_view, VkSampler ssao_sampler) {
+        comp_gbuf3_set_->bind_image(3, ssao_view, ssao_sampler);
     }
 
     void execute(coopa::gfx::command::CommandBuffer& cmd,
@@ -541,6 +562,7 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::Shader> resolve_frag_;
 
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> gbuf3_layout_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> comp_gbuf_layout_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> hiz_layout_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> scene_color_layout_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> raw_ssr_layout_;

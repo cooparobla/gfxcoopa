@@ -78,6 +78,7 @@ public:
     {
         create_framebuffers();
         create_sync_objects();
+        create_render_finished_semaphores();
         create_command_buffers();
     }
 
@@ -138,6 +139,16 @@ public:
                                      util::vk_result_string(result));
         }
 
+        // If this swapchain image was last written by a *different* frame-in-flight slot,
+        // wait for that submission to finish before touching the image again. With
+        // image_count() != MAX_FRAMES_IN_FLIGHT (typically 3 images, 2 frames in flight),
+        // the slot-only fence wait above does not by itself guarantee this.
+        if (images_in_flight_[image_index] != VK_NULL_HANDLE) {
+            GFX_VK_CHECK(vkWaitForFences(device_.handle(), 1,
+                                         &images_in_flight_[image_index], VK_TRUE, UINT64_MAX));
+        }
+        images_in_flight_[image_index] = in_flight_fences_[current_frame_]->handle();
+
         // Reset the fence only after we know we are going to submit.
         in_flight_fences_[current_frame_]->reset();
 
@@ -157,8 +168,16 @@ public:
         cmd.end();
 
         // Submit.
+        //
+        // wait_semaphores stays frame-slot-indexed (signaled by vkAcquireNextImageKHR above,
+        // scoped to this frame-in-flight slot). signal_semaphores must instead be indexed by
+        // image_index: it's waited on by vkQueuePresentKHR below keyed to that same image, and
+        // with image_count() != MAX_FRAMES_IN_FLIGHT a frame-slot-indexed signal semaphore can
+        // be re-signaled while the presentation engine may still be waiting on its earlier use
+        // (VUID-vkQueueSubmit-pSignalSemaphores-00067) — one semaphore per swapchain image,
+        // never per frame-in-flight slot, is the fix.
         VkSemaphore wait_semaphores[]   = { image_available_semaphores_[current_frame_]->handle() };
-        VkSemaphore signal_semaphores[] = { render_finished_semaphores_[current_frame_]->handle() };
+        VkSemaphore signal_semaphores[] = { render_finished_semaphores_[image_index]->handle() };
         VkPipelineStageFlags wait_stages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
 
         VkSubmitInfo submit_info{};
@@ -207,6 +226,10 @@ public:
         device_.wait_idle();
         destroy_framebuffers();
         create_framebuffers();
+        // image_count() can change across a recreate (different present mode / surface
+        // capabilities), so the per-image semaphore array — and the fence-aliasing array
+        // indexed the same way — must be rebuilt to match.
+        create_render_finished_semaphores();
     }
 
 private:
@@ -246,21 +269,40 @@ private:
     }
 
     /**
-     * @brief Creates MAX_FRAMES_IN_FLIGHT Fence and Semaphore pairs.
+     * @brief Creates MAX_FRAMES_IN_FLIGHT image-available Semaphores and in-flight Fences.
+     *
+     * render_finished_semaphores_ is deliberately not created here — see
+     * create_render_finished_semaphores(), which sizes it by swapchain image count instead.
      */
     void create_sync_objects() {
         image_available_semaphores_.reserve(MAX_FRAMES_IN_FLIGHT);
-        render_finished_semaphores_.reserve(MAX_FRAMES_IN_FLIGHT);
         in_flight_fences_.reserve(MAX_FRAMES_IN_FLIGHT);
 
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
             image_available_semaphores_.push_back(
                 std::make_unique<command::Semaphore>(device_));
-            render_finished_semaphores_.push_back(
-                std::make_unique<command::Semaphore>(device_));
             in_flight_fences_.push_back(
                 std::make_unique<command::Fence>(device_, /*signaled=*/true));
         }
+    }
+
+    /**
+     * @brief (Re)creates one render-finished Semaphore per swapchain image.
+     *
+     * Unlike image_available_semaphores_/in_flight_fences_ (scoped to a frame-in-flight
+     * slot), render_finished_semaphores_ must be scoped to the swapchain image it's paired
+     * with at present time — see the wait_semaphores/signal_semaphores comment in
+     * begin_frame() for why. Also resets images_in_flight_ to match the (possibly new)
+     * image count, since old entries reference no-longer-valid in-flight state.
+     */
+    void create_render_finished_semaphores() {
+        render_finished_semaphores_.clear();
+        uint32_t count = swapchain_.image_count();
+        render_finished_semaphores_.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            render_finished_semaphores_.push_back(std::make_unique<command::Semaphore>(device_));
+        }
+        images_in_flight_.assign(count, VK_NULL_HANDLE);
     }
 
     /**
@@ -292,9 +334,10 @@ private:
     command::CommandPool& cmd_pool_;     /**< Command pool for buffer allocation (not owned). */
 
     std::vector<VkFramebuffer>                          framebuffers_;                     /**< One framebuffer per swapchain image. */
-    std::vector<std::unique_ptr<command::Semaphore>>    image_available_semaphores_;       /**< Signaled when a swapchain image is acquired. */
-    std::vector<std::unique_ptr<command::Semaphore>>    render_finished_semaphores_;       /**< Signaled when rendering is complete. */
-    std::vector<std::unique_ptr<command::Fence>>        in_flight_fences_;                 /**< Fences to throttle CPU ahead of GPU. */
+    std::vector<std::unique_ptr<command::Semaphore>>    image_available_semaphores_;       /**< Signaled when a swapchain image is acquired. Indexed by current_frame_. */
+    std::vector<std::unique_ptr<command::Semaphore>>    render_finished_semaphores_;       /**< Signaled when rendering is complete. Indexed by image_index — see begin_frame(). */
+    std::vector<std::unique_ptr<command::Fence>>        in_flight_fences_;                 /**< Fences to throttle CPU ahead of GPU. Indexed by current_frame_. */
+    std::vector<VkFence>                                images_in_flight_;                 /**< Non-owning: aliases the in_flight_fences_ handle that last wrote each swapchain image. Indexed by image_index. */
     std::vector<VkCommandBuffer>                        raw_cmd_buffers_;                  /**< Command buffers (allocated from cmd_pool_). */
     uint32_t                                            current_frame_ = 0;                /**< Current frame-in-flight index. */
 };

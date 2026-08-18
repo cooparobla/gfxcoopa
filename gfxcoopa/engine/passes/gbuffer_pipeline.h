@@ -31,11 +31,11 @@ class GBufferPipeline {
 public:
     struct PushConstants {
         coopa::gfx::engine::data::ModelPushConstants model; // 128 bytes
-        glm::vec4 albedo    = {0.8f, 0.8f, 0.8f, 0.0f}; // 16 bytes
-        float     metallic  = 0.0f;
-        float     roughness = 0.5f;
-        float     ao        = 1.0f;
-        float     flags     = 0.0f;                     // 16 bytes
+        glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f}; // 16 bytes; .w = alpha
+        float     metallic     = 0.0f;
+        float     roughness    = 0.5f;
+        float     ao           = 1.0f;
+        float     alpha_cutoff = 0.0f;                     // 16 bytes; 0.0 = no alpha test
     };
 
     GBufferPipeline(coopa::gfx::core::Device& device,

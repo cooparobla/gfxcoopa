@@ -89,10 +89,9 @@ public:
 
         // Collect scene boxes and materials
         std::vector<SceneBox> boxes;
-        for (const auto* obj : scene.get_renderable_objects()) {
-            if (!obj) continue;
-            const auto* mr = obj->get_mesh_renderer();
-            const auto* tc = obj->get_transform();
+        for (const auto& ref : scene.get_renderable_objects()) {
+            const auto* mr = ref.renderer;
+            const auto* tc = ref.transform;
             if (!mr || !tc) continue;
 
             glm::mat4 m = tc->get_world_matrix();

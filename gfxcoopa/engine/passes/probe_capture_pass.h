@@ -51,11 +51,11 @@ public:
     /// PbrPipeline::PushConstants.
     struct PushConstants {
         coopa::gfx::engine::data::ModelPushConstants model; // 128 bytes
-        glm::vec4 albedo    = {0.8f, 0.8f, 0.8f, 0.0f};
-        float     metallic  = 0.0f;
-        float     roughness = 0.5f;
-        float     ao        = 1.0f;
-        float     flags     = 0.0f;
+        glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f};
+        float     metallic     = 0.0f;
+        float     roughness    = 0.5f;
+        float     ao           = 1.0f;
+        float     alpha_cutoff = 0.0f;
     };
 
     struct SkyPushConstants {

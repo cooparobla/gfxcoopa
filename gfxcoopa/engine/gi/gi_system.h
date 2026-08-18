@@ -21,6 +21,7 @@
 #include <gfxcoopa/engine/gi/gi_baker.h>
 #include <gfxcoopa/engine/passes/env_prefilter_pass.h>
 #include <gfxcoopa/engine/passes/probe_capture_pass.h>
+#include <gfxcoopa/engine/components/mesh_renderer.h>
 
 #include <algorithm>
 #include <memory>
@@ -36,6 +37,7 @@ using targets::CubemapTarget;
 using util::Sampler;
 using passes::EnvPrefilterPass;
 using passes::ProbeCapturePass;
+using components::MeshRenderer;
 
 
 
@@ -440,18 +442,16 @@ private:
         // --- (2) Flatten the scene once. get_renderable_objects() returns
         //         active objects that have a MeshRenderer; transform and
         //         readiness are ours to check.
-        auto renderables = scene.get_renderable_objects();
+        const auto& renderables = scene.get_renderable_objects();
         if (renderables.empty()) return;
-        using MeshRendererPtr = std::remove_reference_t<decltype(renderables[0]->get_mesh_renderer())>;
         struct CaptureItem {
-            MeshRendererPtr mr;
+            MeshRenderer* mr;
             glm::mat4 world;
         };
         std::vector<CaptureItem> items;
-        for (auto* obj : renderables) {
-            if (!obj) continue;
-            auto* mr = obj->get_mesh_renderer();
-            auto* tc = obj->get_transform();
+        for (const auto& ref : renderables) {
+            auto* mr = ref.renderer;
+            auto* tc = ref.transform;
             if (!mr || !mr->is_ready() || !mr->affects_reflection_probes) continue;
             items.push_back({ mr, tc ? tc->get_world_matrix() : glm::mat4(1.0f) });
         }
@@ -490,11 +490,14 @@ private:
                 pc.model.model         = it.world;
                 pc.model.normal_matrix = glm::transpose(glm::inverse(it.world));
                 const auto& mat = it.mr->material;
-                pc.albedo    = glm::vec4(mat.albedo, 0.0f);
-                pc.metallic  = mat.metallic;
-                pc.roughness = mat.roughness;
-                pc.ao        = mat.ao;
-                pc.flags     = 0.0f;
+                // Probe captures always render fully opaque -- mat.alpha/alpha_mode are not
+                // forwarded here. Transparent renderers are still baked in as opaque geometry
+                // (not excluded); see the "known limitations" note in the transparency plan.
+                pc.albedo       = glm::vec4(mat.albedo, 1.0f);
+                pc.metallic     = mat.metallic;
+                pc.roughness    = mat.roughness;
+                pc.ao           = mat.ao;
+                pc.alpha_cutoff = 0.0f;
                 probe_capture_->push(cmd, pc);
                 it.mr->get_mesh()->bind(cmd);
                 it.mr->get_mesh()->draw(cmd);
