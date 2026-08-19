@@ -9,9 +9,12 @@
 #include <gfxcoopa/engine/util/sh_math.h>
 #include <gfxcoopa/engine/gi/gi_data.h>
 #include <gfxcoopa/engine/targets/cubemap_target.h>
+#include <gfxcoopa/engine/components/renderable_ref.h>
+#include <gfxcoopa/engine/components/directional_light.h>
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/command/command_pool.h>
+#include <coopa/scene/scene.h>
 
 #include <vector>
 #include <array>
@@ -75,10 +78,10 @@ inline HitInfo intersect_box(const glm::vec3& O, const glm::vec3& D, const Scene
 
 class GiBaker {
 public:
-    template<typename ProbeVolume, typename Scene>
+    template<typename ProbeVolume>
     static std::vector<gi::SHProbe> bake_cpu(
         const ProbeVolume& volume,
-        const Scene& scene)
+        const coopa::scene::Scene& scene)
     {
         const int Nx = volume.grid_resolution.x;
         const int Ny = volume.grid_resolution.y;
@@ -89,7 +92,7 @@ public:
 
         // Collect scene boxes and materials
         std::vector<SceneBox> boxes;
-        for (const auto& ref : scene.get_renderable_objects()) {
+        for (const auto& ref : coopa::gfx::engine::components::gather_renderables(scene)) {
             const auto* mr = ref.renderer;
             const auto* tc = ref.transform;
             if (!mr || !tc) continue;
@@ -111,7 +114,7 @@ public:
         const float weight = (4.0f * PI) / float(SAMPLE_COUNT);
         const float GOLDEN_ANGLE = 2.39996322972865332f;
 
-        const auto* dir_light = scene.active_light();
+        const auto* dir_light = scene.find_first_component<coopa::gfx::engine::components::DirectionalLightComponent>();
 
         for (int iz = 0; iz < Nz; ++iz) {
             for (int iy = 0; iy < Ny; ++iy) {

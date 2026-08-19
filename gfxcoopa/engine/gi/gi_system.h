@@ -22,6 +22,12 @@
 #include <gfxcoopa/engine/passes/env_prefilter_pass.h>
 #include <gfxcoopa/engine/passes/probe_capture_pass.h>
 #include <gfxcoopa/engine/components/mesh_renderer.h>
+#include <gfxcoopa/engine/components/renderable_ref.h>
+#include <gfxcoopa/engine/components/directional_light.h>
+#include <gfxcoopa/engine/components/point_light.h>
+#include <gfxcoopa/engine/components/gi_probe_volume.h>
+#include <gfxcoopa/engine/components/reflection_probe.h>
+#include <coopa/scene/scene.h>
 
 #include <algorithm>
 #include <memory>
@@ -38,6 +44,11 @@ using util::Sampler;
 using passes::EnvPrefilterPass;
 using passes::ProbeCapturePass;
 using components::MeshRenderer;
+using components::gather_renderables;
+using components::DirectionalLightComponent;
+using components::PointLightComponent;
+using components::GiProbeVolumeComponent;
+using components::ReflectionProbeComponent;
 
 
 
@@ -206,9 +217,8 @@ public:
         return m;
     }
 
-    template<typename Scene>
-    void bake(Scene& scene) {
-        auto volumes = scene.get_gi_probe_volumes();
+    void bake(coopa::scene::Scene& scene) {
+        auto volumes = scene.get_components<GiProbeVolumeComponent>();
         if (!volumes.empty() && volumes[0]) {
             const auto* vol = volumes[0];
             std::cout << "[GiSystem] Baking SH light probe volume ("
@@ -235,7 +245,7 @@ public:
             gi_active_ = true;
         }
 
-        auto reflection_probes = scene.get_reflection_probes();
+        auto reflection_probes = scene.get_components<ReflectionProbeComponent>();
         if (!reflection_probes.empty()) {
             using ReflectionProbePtr = std::remove_reference_t<decltype(reflection_probes[0])>;
             std::vector<ReflectionProbePtr> sorted_probes;
@@ -405,8 +415,7 @@ private:
     /// mips 1..N-1 from that capture. Fully self-contained (own camera/light
     /// UBOs, shared across every probe index) -- see the constructor comment
     /// for why this doesn't reuse PbrRenderPipeline's per-frame ones.
-    template<typename Scene>
-    void capture_reflection_probe_(Scene& scene, size_t index, const glm::vec3& probe_pos) {
+    void capture_reflection_probe_(coopa::scene::Scene& scene, size_t index, const glm::vec3& probe_pos) {
         auto& target = *cubemap_targets_[index];
         auto& source_set = *cap_source_sets_[index];
 
@@ -419,7 +428,7 @@ private:
         //         shadow samplers. v1 limitation: probe capture is unshadowed.
         auto& lu = capture_lights_->data();
         lu = data::LightUBO{}; // reset counts / point array
-        if (auto* dir_light = scene.active_light()) {
+        if (auto* dir_light = scene.find_first_component<DirectionalLightComponent>()) {
             lu.dir_direction     = glm::vec4(glm::normalize(dir_light->direction), dir_light->intensity);
             lu.dir_color         = glm::vec4(dir_light->color, 1.0f);
             lu.dir_ambient       = glm::vec4(dir_light->ambient, 1.0f);
@@ -427,7 +436,7 @@ private:
             lu.light_counts.x    = 1;
         }
         uint32_t n = 0;
-        for (auto* pl : scene.get_point_lights()) {
+        for (auto* pl : scene.get_components<PointLightComponent>()) {
             if (!pl || n >= data::MAX_POINT_LIGHTS) break;
             auto& g = lu.point_lights[n];
             g.position_range  = glm::vec4(pl->get_world_position(), pl->range);
@@ -439,10 +448,10 @@ private:
         lu.light_counts.y = n;
         capture_lights_->upload();
 
-        // --- (2) Flatten the scene once. get_renderable_objects() returns
-        //         active objects that have a MeshRenderer; transform and
-        //         readiness are ours to check.
-        const auto& renderables = scene.get_renderable_objects();
+        // --- (2) Flatten the scene once. gather_renderables() returns active
+        //         objects that have a MeshRenderer; transform and readiness
+        //         are ours to check.
+        const auto renderables = gather_renderables(scene);
         if (renderables.empty()) return;
         struct CaptureItem {
             MeshRenderer* mr;
