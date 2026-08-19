@@ -16,6 +16,15 @@
  * means the referenced Device/Allocator/CommandPool must outlive every
  * subsequent SceneLoader::load() call; call
  * coopa::scene::SceneLoader::clear_component_parsers() before destroying them.
+ *
+ * Mesh and texture loading are routed through a coopa::asset::AssetManager
+ * rather than the ad-hoc mesh_cache map this used to build inline — see
+ * gfxcoopa/engine/loaders/{mesh_loader.h,texture_loader.h} for the
+ * loaders registered against it. The caller owns the AssetManager (typically
+ * for the app's whole lifetime) and must register those two loaders on it
+ * before calling register_render_components(); this function only calls
+ * assets.load()/load_async(), never registers loaders itself, so a caller
+ * can substitute its own loader (e.g. a caml-backed one) if it wants to.
  */
 
 #ifndef GFXCOOPA_ENGINE_COMPONENTS_REGISTER_H
@@ -23,12 +32,14 @@
 
 #include <coopa/scene/scene_loader.h>
 #include <coopa/scene/scene_object.h>
+#include <coopa/asset/asset_manager.h>
 #include <fkYAML/node.hpp>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/engine/data/mesh.h>
+#include <gfxcoopa/engine/data/texture.h>
 
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/components/camera_component.h>
@@ -54,6 +65,9 @@ namespace components {
  * @brief Loads and parses a YAML file directly via fkYAML — the mesh-file
  *        equivalent of SceneLoader's own default document loading, since mesh
  *        files are not routed through SceneLoader::set_document_loader().
+ *
+ * Retained for callers that still need a raw YAML read; mesh loading itself
+ * no longer uses this directly (see MeshLoader::decode_typed()).
  */
 inline fkyaml::node load_yaml_file_(const std::string& path) {
     std::ifstream ifs(path);
@@ -66,23 +80,23 @@ inline fkyaml::node load_yaml_file_(const std::string& path) {
 /**
  * @brief Registers parsers for every gfxcoopa render component with SceneLoader.
  *
- * @param device    Vulkan logical device, used for mesh buffer creation.
- * @param allocator VMA allocator, used for mesh memory allocation.
- * @param cmd_pool  Command pool for one-shot mesh upload transfers.
+ * @param device    Vulkan logical device, used for mesh/texture buffer creation.
+ * @param allocator VMA allocator, used for mesh/texture memory allocation.
+ * @param cmd_pool  Command pool for one-shot mesh/texture upload transfers.
+ * @param assets    AssetManager with MeshLoader and TextureLoader already
+ *                  registered (see gfxcoopa/engine/loaders/). Must outlive
+ *                  every subsequent SceneLoader::load() call, same as
+ *                  device/allocator/cmd_pool.
  */
 inline void register_render_components(core::Device& device,
                                        memory::Allocator& allocator,
-                                       command::CommandPool& cmd_pool) {
+                                       command::CommandPool& cmd_pool,
+                                       coopa::asset::AssetManager& assets) {
     using coopa::scene::SceneLoader;
     using coopa::scene::SceneObject;
 
-    // Logical mesh path -> shared GPU Mesh, so objects referencing the same
-    // mesh_path within (or across) loads share one upload. Captured by the
-    // MeshRenderer lambda via shared_ptr so it survives across SceneLoader::load() calls.
-    auto mesh_cache = std::make_shared<std::unordered_map<std::string, std::shared_ptr<data::Mesh>>>();
-
     SceneLoader::register_component_parser("MeshRenderer",
-        [&device, &allocator, &cmd_pool, mesh_cache](
+        [&assets](
             const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext& ctx) {
             auto* mr = obj.add_component<MeshRenderer>();
             std::string mesh_path_key;
@@ -95,21 +109,14 @@ inline void register_render_components(core::Device& device,
                 mr->affects_reflection_probes = node.at("affects_reflection_probes").get_value<bool>();
 
             if (!mesh_path_key.empty()) {
-                if (mesh_cache->count(mesh_path_key) == 0) {
-                    std::string mesh_file = ctx.scene_dir + "/meshes/" + mesh_path_key + ".yaml";
-                    try {
-                        fkyaml::node mesh_node = load_yaml_file_(mesh_file);
-                        auto gpu_mesh = std::make_shared<data::Mesh>(
-                            data::Mesh::from_node(device, allocator, cmd_pool, mesh_node));
-                        (*mesh_cache)[mesh_path_key] = gpu_mesh;
-                    } catch (const std::exception& e) {
-                        std::cerr << "[register_render_components] Failed to load mesh '" << mesh_file
-                                  << "': " << e.what() << std::endl;
-                    }
+                std::string mesh_virtual_path = "meshes/" + mesh_path_key + ".yaml";
+                auto mesh_handle = assets.load<data::Mesh>(mesh_virtual_path, ctx.scene_dir);
+                if (mesh_handle.is_failed()) {
+                    std::cerr << "[register_render_components] Failed to load mesh '"
+                              << mesh_virtual_path << "' (scene_dir=" << ctx.scene_dir
+                              << "): " << mesh_handle.error() << std::endl;
                 }
-                if (mesh_cache->count(mesh_path_key)) {
-                    mr->set_mesh(mesh_cache->at(mesh_path_key));
-                }
+                mr->set_mesh(std::move(mesh_handle));
             }
 
             if (node.contains("material")) {
@@ -139,12 +146,18 @@ inline void register_render_components(core::Device& device,
                     }
                 }
 
-                if (mat_node.contains("texture_albedo"))
+                if (mat_node.contains("texture_albedo")) {
                     mr->material.texture_albedo = mat_node.at("texture_albedo").get_value<std::string>();
-                if (mat_node.contains("texture_normal"))
+                    mr->material.albedo_handle = assets.load_async<data::Texture>(mr->material.texture_albedo, ctx.scene_dir);
+                }
+                if (mat_node.contains("texture_normal")) {
                     mr->material.texture_normal = mat_node.at("texture_normal").get_value<std::string>();
-                if (mat_node.contains("texture_metallic_roughness"))
+                    mr->material.normal_handle = assets.load_async<data::Texture>(mr->material.texture_normal, ctx.scene_dir);
+                }
+                if (mat_node.contains("texture_metallic_roughness")) {
                     mr->material.texture_metallic_roughness = mat_node.at("texture_metallic_roughness").get_value<std::string>();
+                    mr->material.metallic_roughness_handle = assets.load_async<data::Texture>(mr->material.texture_metallic_roughness, ctx.scene_dir);
+                }
             }
         });
 

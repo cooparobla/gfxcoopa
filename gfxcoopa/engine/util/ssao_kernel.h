@@ -18,6 +18,7 @@
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/memory/buffer.h>
 #include <gfxcoopa/memory/image.h>
+#include <gfxcoopa/memory/image_upload.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/util/error.h>
@@ -103,86 +104,8 @@ public:
 
 private:
     void upload_texture_(coopa::gfx::command::CommandPool& cmd_pool, const void* data) {
-        VkDeviceSize size = static_cast<VkDeviceSize>(kSize) * kSize * 2;
-
-        coopa::gfx::memory::Buffer staging(
-            device_, allocator_, size,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_AUTO,
-            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT
-        );
-        staging.upload(data, size);
-
-        image_ = std::make_unique<coopa::gfx::memory::Image>(
-            device_, allocator_, kSize, kSize, VK_FORMAT_R8G8_UNORM,
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT, VMA_MEMORY_USAGE_AUTO, VK_SAMPLE_COUNT_1_BIT
-        );
-
-        VkCommandBufferAllocateInfo alloc_info{};
-        alloc_info.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        alloc_info.commandPool        = cmd_pool.handle();
-        alloc_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        alloc_info.commandBufferCount = 1;
-
-        VkCommandBuffer cmd_handle = VK_NULL_HANDLE;
-        vkAllocateCommandBuffers(device_.handle(), &alloc_info, &cmd_handle);
-
-        VkCommandBufferBeginInfo begin_info{};
-        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(cmd_handle, &begin_info);
-
-        VkImageMemoryBarrier barrier{};
-        barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image               = image_->handle();
-        barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier.subresourceRange.baseMipLevel   = 0;
-        barrier.subresourceRange.levelCount     = 1;
-        barrier.subresourceRange.baseArrayLayer = 0;
-        barrier.subresourceRange.layerCount     = 1;
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-        vkCmdPipelineBarrier(cmd_handle, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-        VkBufferImageCopy copy_region{};
-        copy_region.bufferOffset      = 0;
-        copy_region.bufferRowLength   = 0;
-        copy_region.bufferImageHeight = 0;
-        copy_region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy_region.imageSubresource.mipLevel       = 0;
-        copy_region.imageSubresource.baseArrayLayer = 0;
-        copy_region.imageSubresource.layerCount     = 1;
-        copy_region.imageOffset                     = {0, 0, 0};
-        copy_region.imageExtent                     = {kSize, kSize, 1};
-
-        vkCmdCopyBufferToImage(cmd_handle, staging.handle(), image_->handle(),
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
-
-        barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-        vkCmdPipelineBarrier(cmd_handle, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-        vkEndCommandBuffer(cmd_handle);
-
-        VkSubmitInfo submit{};
-        submit.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers    = &cmd_handle;
-        vkQueueSubmit(device_.graphics_queue(), 1, &submit, VK_NULL_HANDLE);
-        vkQueueWaitIdle(device_.graphics_queue());
-
-        vkFreeCommandBuffers(device_.handle(), cmd_pool.handle(), 1, &cmd_handle);
+        image_ = coopa::gfx::memory::upload_image_2d(
+            device_, allocator_, cmd_pool, data, kSize, kSize, VK_FORMAT_R8G8_UNORM, 2);
     }
 
     coopa::gfx::core::Device&      device_;

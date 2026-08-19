@@ -19,6 +19,7 @@
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/memory/image.h>
+#include <gfxcoopa/memory/image_upload.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/pipeline/pipeline.h>
@@ -237,12 +238,7 @@ public:
 
     ~SsaoPass() {
         destroy_resources_();
-        if (neutral_view_ != VK_NULL_HANDLE) {
-            vkDestroyImageView(device_.handle(), neutral_view_, nullptr);
-        }
-        if (neutral_image_ != VK_NULL_HANDLE) {
-            vmaDestroyImage(allocator_.handle(), neutral_image_, neutral_allocation_);
-        }
+        // neutral_image_ (a memory::Image) cleans up its own view + allocation.
     }
 
     SsaoPass(const SsaoPass&) = delete;
@@ -444,7 +440,7 @@ public:
     /// disabled) -- blur_view_ is only transitioned to SHADER_READ_ONLY_OPTIMAL by execute()
     /// actually running, so binding it unconditionally would read an image still sitting in
     /// VK_IMAGE_LAYOUT_UNDEFINED on the very first disabled frame.
-    VkImageView neutral_view() const { return neutral_view_; }
+    VkImageView neutral_view() const { return neutral_image_->view(); }
 
     /// Drops the accumulated temporal history. Call when execute() is skipped for a frame (SSAO
     /// disabled) -- otherwise the next re-enabled frame's resolve pass blends against AO captured
@@ -545,109 +541,8 @@ private:
 
     void create_neutral_texture_(coopa::gfx::command::CommandPool& cmd_pool) {
         uint8_t white = 255;
-
-        coopa::gfx::memory::Buffer staging(
-            device_, allocator_, 1,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_AUTO,
-            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT
-        );
-        staging.upload(&white, 1);
-
-        VkImageCreateInfo img_info{};
-        img_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        img_info.imageType     = VK_IMAGE_TYPE_2D;
-        img_info.format        = VK_FORMAT_R8_UNORM;
-        img_info.extent        = {1, 1, 1};
-        img_info.mipLevels     = 1;
-        img_info.arrayLayers   = 1;
-        img_info.samples       = VK_SAMPLE_COUNT_1_BIT;
-        img_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-        img_info.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        img_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-        VmaAllocationCreateInfo alloc_info{};
-        alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
-
-        GFX_VK_CHECK(vmaCreateImage(allocator_.handle(), &img_info, &alloc_info, &neutral_image_, &neutral_allocation_, nullptr));
-
-        VkImageViewCreateInfo view_info{};
-        view_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        view_info.image                           = neutral_image_;
-        view_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-        view_info.format                          = VK_FORMAT_R8_UNORM;
-        view_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-        view_info.subresourceRange.baseMipLevel   = 0;
-        view_info.subresourceRange.levelCount     = 1;
-        view_info.subresourceRange.baseArrayLayer = 0;
-        view_info.subresourceRange.layerCount     = 1;
-
-        GFX_VK_CHECK(vkCreateImageView(device_.handle(), &view_info, nullptr, &neutral_view_));
-
-        VkCommandBufferAllocateInfo alloc_cmd_info{};
-        alloc_cmd_info.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        alloc_cmd_info.commandPool        = cmd_pool.handle();
-        alloc_cmd_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        alloc_cmd_info.commandBufferCount = 1;
-
-        VkCommandBuffer cmd_handle = VK_NULL_HANDLE;
-        vkAllocateCommandBuffers(device_.handle(), &alloc_cmd_info, &cmd_handle);
-
-        VkCommandBufferBeginInfo begin_info{};
-        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(cmd_handle, &begin_info);
-
-        VkImageMemoryBarrier barrier{};
-        barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.oldLayout                       = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image                           = neutral_image_;
-        barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier.subresourceRange.baseMipLevel   = 0;
-        barrier.subresourceRange.levelCount     = 1;
-        barrier.subresourceRange.baseArrayLayer = 0;
-        barrier.subresourceRange.layerCount     = 1;
-        barrier.srcAccessMask                   = 0;
-        barrier.dstAccessMask                   = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-        vkCmdPipelineBarrier(cmd_handle, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-        VkBufferImageCopy copy_region{};
-        copy_region.bufferOffset      = 0;
-        copy_region.bufferRowLength   = 0;
-        copy_region.bufferImageHeight = 0;
-        copy_region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy_region.imageSubresource.mipLevel       = 0;
-        copy_region.imageSubresource.baseArrayLayer = 0;
-        copy_region.imageSubresource.layerCount     = 1;
-        copy_region.imageOffset                     = {0, 0, 0};
-        copy_region.imageExtent                     = {1, 1, 1};
-
-        vkCmdCopyBufferToImage(cmd_handle, staging.handle(), neutral_image_,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
-
-        barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-        vkCmdPipelineBarrier(cmd_handle, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-        vkEndCommandBuffer(cmd_handle);
-
-        VkSubmitInfo submit{};
-        submit.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers    = &cmd_handle;
-        vkQueueSubmit(device_.graphics_queue(), 1, &submit, VK_NULL_HANDLE);
-        vkQueueWaitIdle(device_.graphics_queue());
-
-        vkFreeCommandBuffers(device_.handle(), cmd_pool.handle(), 1, &cmd_handle);
+        neutral_image_ = coopa::gfx::memory::upload_image_2d(
+            device_, allocator_, cmd_pool, &white, 1, 1, VK_FORMAT_R8_UNORM, 1);
     }
 
     void create_target_(VkImage& image, VmaAllocation& allocation, VkImageView& view,
@@ -745,9 +640,7 @@ private:
     std::unique_ptr<coopa::gfx::memory::Image> history_image_;
     bool history_initialized_ = false;
 
-    VkImage       neutral_image_      = VK_NULL_HANDLE;
-    VmaAllocation neutral_allocation_ = VK_NULL_HANDLE;
-    VkImageView   neutral_view_       = VK_NULL_HANDLE;
+    std::unique_ptr<coopa::gfx::memory::Image> neutral_image_;
 
     std::unique_ptr<util::SsaoKernel>       kernel_;
     std::unique_ptr<util::SsaoNoiseTexture> noise_;

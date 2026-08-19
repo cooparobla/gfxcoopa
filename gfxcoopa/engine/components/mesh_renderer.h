@@ -2,21 +2,25 @@
  * @file mesh_renderer.h
  * @brief Component that references a GPU mesh for rendering.
  *
- * Holds a shared_ptr to a coopa::gfx::engine::data::Mesh (GPU-resident).
- * The mesh is loaded and assigned by register_render_components()'s
+ * Holds a coopa::asset::AssetHandle to a coopa::gfx::engine::data::Mesh
+ * (GPU-resident), obtained from register_render_components()'s
  * "MeshRenderer" parser after parsing the scene YAML's MeshRenderer
- * component. Multiple objects can share the same Mesh instance.
+ * component. Multiple objects loading the same resolved mesh path share
+ * one underlying asset slot (see coopa::asset::AssetManager); the handle
+ * itself is a lightweight, refcounted, non-owning reference.
  */
 
 #ifndef GFXCOOPA_ENGINE_COMPONENTS_MESH_RENDERER_H
 #define GFXCOOPA_ENGINE_COMPONENTS_MESH_RENDERER_H
 
 #include <coopa/scene/component.h>
+#include <coopa/asset/asset_handle.h>
 #include <glm/glm.hpp>
 #include <string>
 #include <memory>
 
 #include <gfxcoopa/engine/data/mesh.h>
+#include <gfxcoopa/engine/data/texture.h>
 
 namespace coopa {
 namespace gfx {
@@ -45,6 +49,18 @@ struct PBRMaterial {
     std::string texture_albedo             = "";
     std::string texture_normal             = "";
     std::string texture_metallic_roughness = "";
+
+    // Populated by register_render_components()'s "MeshRenderer" parser once
+    // the corresponding texture_* path above has been loaded via
+    // coopa::asset::AssetManager. Not yet consumed by any pipeline
+    // descriptor set -- binding these into the G-buffer pass is a separate,
+    // not-yet-implemented follow-up (see gfxcoopa's asset-system
+    // integration plan) that also needs a material descriptor set layout
+    // and push-constant changes. Until then these just make texture loading
+    // itself observable/testable ahead of that wiring.
+    coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> albedo_handle;
+    coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> normal_handle;
+    coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> metallic_roughness_handle;
 
     /** @brief Returns true when this material must be drawn by the forward transparent pass. */
     bool is_blended() const { return alpha_mode == AlphaMode::Blend; }
@@ -90,25 +106,27 @@ public:
     const std::string& mesh_path() const { return mesh_path_; }
 
     /**
-     * @brief Sets the GPU mesh (shared ownership).
+     * @brief Sets the GPU mesh handle.
      *
-     * Called once the Mesh has been uploaded to the GPU.
+     * Called once AssetManager::load()/load_async() has been kicked off for
+     * this renderer's mesh_path. The handle may still be Loading at this
+     * point (async) -- see is_ready().
      *
-     * @param mesh Shared pointer to the GPU-resident Mesh.
+     * @param mesh Refcounted handle to the GPU-resident Mesh asset.
      */
-    void set_mesh(std::shared_ptr<coopa::gfx::engine::data::Mesh> mesh) {
+    void set_mesh(coopa::asset::AssetHandle<coopa::gfx::engine::data::Mesh> mesh) {
         mesh_ = std::move(mesh);
     }
 
     /**
-     * @brief Returns the GPU mesh, or nullptr if not yet loaded.
+     * @brief Returns the mesh handle. Dereference only after checking is_ready() (or the handle's own is_loaded()).
      */
-    std::shared_ptr<coopa::gfx::engine::data::Mesh> get_mesh() const { return mesh_; }
+    const coopa::asset::AssetHandle<coopa::gfx::engine::data::Mesh>& get_mesh() const { return mesh_; }
 
     /**
      * @brief Returns true if this renderer has a valid GPU mesh ready to draw.
      */
-    bool is_ready() const { return mesh_ != nullptr; }
+    bool is_ready() const { return mesh_.is_loaded(); }
 
     PBRMaterial material;
 
@@ -125,8 +143,8 @@ public:
     bool affects_reflection_probes = true;
 
 private:
-    std::string mesh_path_;                                    /**< Logical mesh path from YAML. */
-    std::shared_ptr<coopa::gfx::engine::data::Mesh> mesh_;          /**< GPU-resident mesh (shared). */
+    std::string mesh_path_; /**< Logical mesh path from YAML. */
+    coopa::asset::AssetHandle<coopa::gfx::engine::data::Mesh> mesh_; /**< Refcounted GPU-resident mesh handle. */
 };
 
 } // namespace components

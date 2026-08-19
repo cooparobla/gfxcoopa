@@ -16,6 +16,15 @@ find_package(Vulkan REQUIRED)
 # Window system (GLFW)
 find_package(glfw3 REQUIRED)
 
+# --- Sibling library paths (header-only, no build targets required) ---
+# engine/components/ already includes <coopa/scene/...> and (as of the
+# coopa::asset integration) <coopa/asset/...>; without this, gfxcoopa's own
+# test target can't compile its own engine/ layer -- only a downstream app
+# that separately adds these paths (blendy, uicoopa) could.
+set(LIBCOOPA_DIR "${ROOT_DIR_PARENT}/libcoopa")
+include_directories(${LIBCOOPA_DIR}/includes/)        # fkYAML, glm, phmap
+include_directories(${LIBCOOPA_DIR})                  # coopa/
+
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/includes/)   # volk/, vma/
 include_directories(${CMAKE_SOURCE_DIR})
