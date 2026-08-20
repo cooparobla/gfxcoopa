@@ -14,6 +14,7 @@
 #include <gfxcoopa/engine/gi/gi_data.h>
 #include <gfxcoopa/engine/targets/cubemap_target.h>
 #include <gfxcoopa/engine/util/sampler.h>
+#include <gfxcoopa/engine/util/instance_batcher.h>
 #include <gfxcoopa/engine/data/camera_ubo.h>
 #include <gfxcoopa/engine/data/light_data.h>
 #include <gfxcoopa/pipeline/descriptor.h>
@@ -415,6 +416,20 @@ private:
     /// mips 1..N-1 from that capture. Fully self-contained (own camera/light
     /// UBOs, shared across every probe index) -- see the constructor comment
     /// for why this doesn't reuse PbrRenderPipeline's per-frame ones.
+    /**
+     * @brief True when two materials would produce byte-identical probe-capture push constants.
+     *
+     * Same fields as PbrRenderPipeline's own same_material_() predicate,
+     * minus alpha/alpha_cutoff: probe capture always forces albedo.a=1 and
+     * cutoff=0 regardless of the source material (see capture_reflection_probe_()'s
+     * "always render fully opaque" comment), so those two never actually
+     * vary between any two items here.
+     */
+    static bool same_capture_material_(const components::PBRMaterial& a, const components::PBRMaterial& b) {
+        return a.albedo == b.albedo && a.metallic == b.metallic
+            && a.roughness == b.roughness && a.ao == b.ao;
+    }
+
     void capture_reflection_probe_(coopa::scene::Scene& scene, size_t index, const glm::vec3& probe_pos) {
         auto& target = *cubemap_targets_[index];
         auto& source_set = *cap_source_sets_[index];
@@ -465,6 +480,24 @@ private:
             items.push_back({ mr, tc ? tc->get_world_matrix() : glm::mat4(1.0f) });
         }
 
+        // A local, one-shot InstanceBatcher: this is a bake (called a
+        // handful of times, not per frame), so there's no reason to keep a
+        // persistent instance buffer around between bakes the way
+        // PbrRenderPipeline does for its per-frame geometry passes. Same
+        // batch key as the G-buffer/transparent passes (mesh + material
+        // equality) -- probe capture always forces albedo.a=1 and cutoff=0,
+        // so those two fields are excluded from the comparison here.
+        util::InstanceBatcher batcher(device_, allocator_, items.size());
+        batcher.begin();
+        for (size_t i = 0; i < items.size(); ++i) {
+            const data::Mesh* mesh = items[i].mr->get_mesh().get();
+            bool continue_batch = i > 0 &&
+                mesh == items[i - 1].mr->get_mesh().get() &&
+                same_capture_material_(items[i].mr->material, items[i - 1].mr->material);
+            batcher.add(mesh, continue_batch, items[i].world, static_cast<uint32_t>(i));
+        }
+        batcher.upload();
+
         // --- (3) Six faces, one submit-and-wait each. data::CameraUBO::update() is
         //         a host map/memcpy/unmap, so it cannot be safely re-issued
         //         between draws inside one still-open command buffer. One
@@ -494,11 +527,10 @@ private:
             cmd.bind_descriptor_set(probe_capture_->geometry_layout(), *cap_light_set_,  1);
             cmd.bind_descriptor_set(probe_capture_->geometry_layout(), *cap_brdf_set_,   2);
 
-            for (const auto& it : items) {
+            batcher.bind(cmd);
+            for (const auto& b : batcher.batches()) {
+                const auto& mat = items[b.item_index].mr->material;
                 ProbeCapturePass::PushConstants pc{};
-                pc.model.model         = it.world;
-                pc.model.normal_matrix = glm::transpose(glm::inverse(it.world));
-                const auto& mat = it.mr->material;
                 // Probe captures always render fully opaque -- mat.alpha/alpha_mode are not
                 // forwarded here. Transparent renderers are still baked in as opaque geometry
                 // (not excluded); see the "known limitations" note in the transparency plan.
@@ -508,8 +540,8 @@ private:
                 pc.ao           = mat.ao;
                 pc.alpha_cutoff = 0.0f;
                 probe_capture_->push(cmd, pc);
-                it.mr->get_mesh()->bind(cmd);
-                it.mr->get_mesh()->draw(cmd);
+                b.mesh->bind(cmd);
+                b.mesh->draw(cmd, b.instance_count, b.first_instance);
             }
 
             target.end_face_pass(cmd);

@@ -28,21 +28,32 @@ namespace passes {
 
 /**
  * @struct DirectionalShadowPushConstants
- * @brief Push constant block for directional shadow depth pass (128 bytes).
+ * @brief Push constant block for directional shadow depth pass (68 bytes).
+ *
+ * model used to live here too (128B total) but is now streamed per-instance
+ * instead (see data::InstanceData) — light_space_matrix is shared across the
+ * whole pass call; alpha is per-BATCH (all instances in one draw share one
+ * mesh AND, for BLEND casters, one alpha -- see InstanceBatcher's shadow
+ * batch key) and drives shadow_depth.frag's stochastic alpha-dither discard.
+ * 1.0 (the default, and always what OPAQUE/MASK casters get) means "fully
+ * opaque, no dithering" -- see shadow_common.glsl.
  */
 struct DirectionalShadowPushConstants {
     glm::mat4 light_space_matrix;
-    glm::mat4 model;
+    float     alpha = 1.0f;
 };
 
 /**
  * @struct CubeShadowPushConstants
- * @brief Push constant block for point light cubemap shadow pass (144 bytes).
+ * @brief Push constant block for point light cubemap shadow pass (84 bytes).
+ *
+ * Same model-removal as DirectionalShadowPushConstants above; alpha has the
+ * same per-batch, stochastic-dither meaning too.
  */
 struct CubeShadowPushConstants {
     glm::mat4 light_space_matrix;
-    glm::mat4 model;
     glm::vec4 light_pos_range; // xyz = light pos, w = range
+    float     alpha = 1.0f;
 };
 
 /**
@@ -65,9 +76,12 @@ public:
         dir_frag_ = std::make_unique<pipeline::Shader>(device, dir_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
         auto binding = data::Vertex::binding_description();
+        auto instance_binding = data::InstanceData::binding_description();
+        std::vector<VkVertexInputBindingDescription> binding_vec = {binding, instance_binding};
 
-        // Shadow depth shaders only consume position (location 0).
-        // Providing only that attribute eliminates validation warnings about
+        // Shadow depth shaders only consume position (location 0) from the
+        // per-vertex stream, plus the per-instance model matrix (locations
+        // 4-7). Providing only that eliminates validation warnings about
         // unconsumed locations 1/2/3 for normal, uv, and tangent.
         std::vector<VkVertexInputAttributeDescription> attr_vec = {{
             .location = 0,
@@ -75,6 +89,8 @@ public:
             .format   = VK_FORMAT_R32G32B32_SFLOAT,
             .offset   = offsetof(data::Vertex, position)
         }};
+        auto instance_attrs = data::InstanceData::attribute_descriptions();
+        attr_vec.insert(attr_vec.end(), instance_attrs.begin(), instance_attrs.end());
 
         pipeline::PipelineConfig cfg{};
         cfg.cull_mode   = VK_CULL_MODE_NONE;
@@ -82,14 +98,14 @@ public:
         cfg.depth_write = true;
 
         VkPushConstantRange dir_pc{};
-        dir_pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        dir_pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         dir_pc.offset     = 0;
         dir_pc.size       = sizeof(DirectionalShadowPushConstants);
 
         dir_pipeline_ = std::make_unique<pipeline::Pipeline>(
             device, dir_pass,
             std::vector<pipeline::Shader*>{dir_vert_.get(), dir_frag_.get()},
-            std::vector<VkVertexInputBindingDescription>{binding},
+            binding_vec,
             attr_vec,
             std::vector<VkDescriptorSetLayout>{},
             cfg,
@@ -108,7 +124,7 @@ public:
         cube_pipeline_ = std::make_unique<pipeline::Pipeline>(
             device, cube_pass,
             std::vector<pipeline::Shader*>{cube_vert_.get(), cube_frag_.get()},
-            std::vector<VkVertexInputBindingDescription>{binding},
+            binding_vec,
             attr_vec,
             std::vector<VkDescriptorSetLayout>{},
             cfg,
@@ -121,7 +137,7 @@ public:
     }
 
     void push_directional(command::CommandBuffer& cmd, const DirectionalShadowPushConstants& pc) const {
-        cmd.push_constants(dir_pipeline_->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(DirectionalShadowPushConstants), &pc);
+        cmd.push_constants(dir_pipeline_->layout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(DirectionalShadowPushConstants), &pc);
     }
 
     void bind_cube(command::CommandBuffer& cmd) const {

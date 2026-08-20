@@ -30,6 +30,7 @@
 #include <array>
 #include <stdexcept>
 #include <cstdint>
+#include <limits>
 
 namespace coopa {
 namespace gfx {
@@ -87,6 +88,49 @@ struct Vertex {
         attrs[3].format   = VK_FORMAT_R32G32B32A32_SFLOAT;
         attrs[3].offset   = offsetof(Vertex, tangent);
 
+        return attrs;
+    }
+};
+
+/**
+ * @struct InstanceData
+ * @brief Per-instance vertex stream at binding 1: one world matrix per instance.
+ *
+ * normal_matrix is deliberately NOT streamed — every consuming shader derives
+ * it as transpose(inverse(mat3(in_model))) in-shader instead, halving the
+ * per-instance payload (64B vs 128B) and removing a glm::inverse() call per
+ * object per frame from the CPU side of every geometry pass. Scenes here use
+ * non-uniform scale (e.g. Cornell box walls), so the shader must do the full
+ * 3x3 inverse-transpose, not just mat3(in_model) directly.
+ */
+struct InstanceData {
+    glm::mat4 model = glm::mat4(1.0f); /**< Object-to-world; consumed as locations 4..7, one vec4 per column. */
+
+    /** @brief Binding 1, per-instance rate. Binding 0 stays Vertex's per-vertex stream. */
+    static VkVertexInputBindingDescription binding_description() {
+        VkVertexInputBindingDescription desc{};
+        desc.binding   = 1;
+        desc.stride    = sizeof(InstanceData);
+        desc.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+        return desc;
+    }
+
+    /**
+     * @brief Returns the VkVertexInputAttributeDescriptions for locations 4-7 (one mat4).
+     *
+     * A mat4 attribute occupies four consecutive vec4 locations. These
+     * locations are used uniformly by every pipeline that consumes instance
+     * data (including the shadow pipelines, whose binding-0 attributes only
+     * use location 0), so this one array serves all of them.
+     */
+    static std::array<VkVertexInputAttributeDescription, 4> attribute_descriptions() {
+        std::array<VkVertexInputAttributeDescription, 4> attrs{};
+        for (uint32_t i = 0; i < 4; ++i) {
+            attrs[i].binding  = 1;
+            attrs[i].location = 4 + i;
+            attrs[i].format   = VK_FORMAT_R32G32B32A32_SFLOAT;
+            attrs[i].offset   = static_cast<uint32_t>(offsetof(InstanceData, model) + i * sizeof(glm::vec4));
+        }
         return attrs;
     }
 };
@@ -263,8 +307,21 @@ public:
         vb.upload(vertices.data(), vb_size);
         ib.upload(indices.data(),  ib_size);
 
+        // Object-space AABB over the triangulated vertex stream (not the raw
+        // `positions` array, which can contain entries no face references) --
+        // this is exactly the geometry that gets drawn. Used by callers that
+        // need to fit a projection (e.g. a directional shadow-map ortho box)
+        // to what a mesh instance actually occupies.
+        glm::vec3 bounds_min(std::numeric_limits<float>::max());
+        glm::vec3 bounds_max(std::numeric_limits<float>::lowest());
+        for (const auto& v : vertices) {
+            bounds_min = glm::min(bounds_min, v.position);
+            bounds_max = glm::max(bounds_max, v.position);
+        }
+
         return Mesh(std::move(vb), std::move(ib),
-                    static_cast<uint32_t>(indices.size()));
+                    static_cast<uint32_t>(indices.size()),
+                    bounds_min, bounds_max);
     }
 
     // --- Draw calls ---
@@ -286,8 +343,31 @@ public:
         cmd.draw_indexed(index_count_);
     }
 
+    /**
+     * @brief Records an instanced indexed draw call for this mesh.
+     *
+     * Callers bind the shared per-instance stream (see InstanceData,
+     * engine::util::InstanceBatcher::bind()) once per pass before looping
+     * batches — bind() above only binds slot 0 (this mesh's own vertex/index
+     * buffers), so per-batch mesh rebinding never disturbs the instance
+     * stream at slot 1.
+     *
+     * @param cmd            Command buffer to record into.
+     * @param instance_count Number of instances to draw.
+     * @param first_instance Offset into the bound instance-rate stream.
+     */
+    void draw(command::CommandBuffer& cmd, uint32_t instance_count, uint32_t first_instance) const {
+        cmd.draw_indexed(index_count_, 0, 0, instance_count, first_instance);
+    }
+
     /** @brief Returns the number of indices in the mesh. */
     uint32_t index_count() const { return index_count_; }
+
+    /** @brief Returns the minimum corner of the object-space bounding box. */
+    const glm::vec3& bounds_min() const { return bounds_min_; }
+
+    /** @brief Returns the maximum corner of the object-space bounding box. */
+    const glm::vec3& bounds_max() const { return bounds_max_; }
 
     // Move only (buffers are not copyable).
     Mesh(Mesh&&) = default;
@@ -296,15 +376,20 @@ public:
     Mesh& operator=(const Mesh&) = delete;
 
 private:
-    Mesh(memory::Buffer vb, memory::Buffer ib, uint32_t index_count)
+    Mesh(memory::Buffer vb, memory::Buffer ib, uint32_t index_count,
+         const glm::vec3& bounds_min, const glm::vec3& bounds_max)
         : vertex_buffer_(std::move(vb)),
           index_buffer_(std::move(ib)),
-          index_count_(index_count)
+          index_count_(index_count),
+          bounds_min_(bounds_min),
+          bounds_max_(bounds_max)
     {}
 
     memory::Buffer vertex_buffer_; /**< Interleaved vertex data. */
     memory::Buffer index_buffer_;  /**< 32-bit index data. */
     uint32_t       index_count_;   /**< Total number of indices to draw. */
+    glm::vec3      bounds_min_;    /**< Object-space AABB minimum corner. */
+    glm::vec3      bounds_max_;    /**< Object-space AABB maximum corner. */
 };
 
 } // namespace data

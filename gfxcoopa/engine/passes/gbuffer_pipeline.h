@@ -29,8 +29,11 @@ namespace passes {
 
 class GBufferPipeline {
 public:
+    // model/normal_matrix used to live here too (160 bytes total) but are
+    // now streamed per-instance instead (see data::InstanceData) — this
+    // block is shared once per instanced draw batch rather than pushed per
+    // object, so only genuinely per-batch material state remains.
     struct PushConstants {
-        coopa::gfx::engine::data::ModelPushConstants model; // 128 bytes
         glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f}; // 16 bytes; .w = alpha
         float     metallic     = 0.0f;
         float     roughness    = 0.5f;
@@ -55,9 +58,11 @@ public:
             layouts.push_back(material_layout);
         }
 
-        // Push constant range
+        // Push constant range -- fragment-only now that model/normal_matrix
+        // (the only fields the vertex stage used to read) moved to the
+        // per-instance vertex stream.
         VkPushConstantRange pc_range{};
-        pc_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         pc_range.offset     = 0;
         pc_range.size       = sizeof(PushConstants);
 
@@ -70,15 +75,20 @@ public:
 
         GFX_VK_CHECK(vkCreatePipelineLayout(device_.handle(), &layout_info, nullptr, &pipeline_layout_));
 
-        // Vertex Input
-        auto binding = coopa::gfx::engine::data::Vertex::binding_description();
-        auto attrs   = coopa::gfx::engine::data::Vertex::attribute_descriptions();
+        // Vertex Input -- binding 0 (per-vertex) + binding 1 (per-instance model matrix).
+        auto binding          = coopa::gfx::engine::data::Vertex::binding_description();
+        auto instance_binding = coopa::gfx::engine::data::InstanceData::binding_description();
+        std::vector<VkVertexInputBindingDescription> binding_vec = {binding, instance_binding};
+
+        auto attrs = coopa::gfx::engine::data::Vertex::attribute_descriptions();
         std::vector<VkVertexInputAttributeDescription> attr_vec(attrs.begin(), attrs.end());
+        auto instance_attrs = coopa::gfx::engine::data::InstanceData::attribute_descriptions();
+        attr_vec.insert(attr_vec.end(), instance_attrs.begin(), instance_attrs.end());
 
         VkPipelineVertexInputStateCreateInfo vertex_input{};
         vertex_input.sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertex_input.vertexBindingDescriptionCount   = 1;
-        vertex_input.pVertexBindingDescriptions      = &binding;
+        vertex_input.vertexBindingDescriptionCount   = static_cast<uint32_t>(binding_vec.size());
+        vertex_input.pVertexBindingDescriptions      = binding_vec.data();
         vertex_input.vertexAttributeDescriptionCount = static_cast<uint32_t>(attr_vec.size());
         vertex_input.pVertexAttributeDescriptions    = attr_vec.data();
 
@@ -186,9 +196,7 @@ public:
     }
 
     void push(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& pc) const {
-        cmd.push_constants(pipeline_layout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(PushConstants), &pc);
+        cmd.push_constants(pipeline_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
     }
 
     VkPipelineLayout layout() const {

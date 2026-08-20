@@ -213,17 +213,24 @@ public:
 
     /**
      * @brief Records an indexed draw call (analogous to glDrawElements).
-     * @param index_count  Number of indices to draw.
-     * @param first_index  Offset into the index buffer.
-     * @param vertex_offset Offset added to each index value.
+     * @param index_count    Number of indices to draw.
+     * @param first_index    Offset into the index buffer.
+     * @param vertex_offset  Offset added to each index value.
      * @param instance_count Number of instances (default 1).
+     * @param first_instance First instance ID; offsets into any bound
+     *   VK_VERTEX_INPUT_RATE_INSTANCE stream (gl_InstanceIndex already
+     *   includes this — never use gl_InstanceIndex to index anything else).
+     *   Affects instance-rate vertex attribute fetching in core Vulkan with
+     *   no feature flag required (the drawIndirectFirstInstance device
+     *   feature applies only to *indirect* draws, a common confusion).
      */
     void draw_indexed(uint32_t index_count,
                       uint32_t first_index    = 0,
                       int32_t  vertex_offset  = 0,
-                      uint32_t instance_count = 1)
+                      uint32_t instance_count = 1,
+                      uint32_t first_instance = 0)
     {
-        vkCmdDrawIndexed(cmd_, index_count, instance_count, first_index, vertex_offset, 0);
+        vkCmdDrawIndexed(cmd_, index_count, instance_count, first_index, vertex_offset, first_instance);
     }
 
     // --- Dynamic state ---

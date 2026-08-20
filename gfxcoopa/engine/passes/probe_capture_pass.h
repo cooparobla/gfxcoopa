@@ -47,10 +47,11 @@ namespace passes {
 /// shadows in v1).
 class ProbeCapturePass {
 public:
-    /// 160 bytes -- byte-identical to GBufferPipeline::PushConstants /
-    /// PbrPipeline::PushConstants.
+    /// 32 bytes -- byte-identical to GBufferPipeline::PushConstants /
+    /// TransparentPass::PushConstants. model/normal_matrix moved to the
+    /// per-instance vertex stream (data::InstanceData); this block is now
+    /// shared once per instanced batch, not pushed per object.
     struct PushConstants {
-        coopa::gfx::engine::data::ModelPushConstants model; // 128 bytes
         glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f};
         float     metallic     = 0.0f;
         float     roughness    = 0.5f;
@@ -102,9 +103,14 @@ public:
         geom_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(
             device, shader_dir + "/probe_capture.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        auto binding = coopa::gfx::engine::data::Vertex::binding_description();
-        auto attrs   = coopa::gfx::engine::data::Vertex::attribute_descriptions();
+        auto binding          = coopa::gfx::engine::data::Vertex::binding_description();
+        auto instance_binding = coopa::gfx::engine::data::InstanceData::binding_description();
+        std::vector<VkVertexInputBindingDescription> binding_vec = {binding, instance_binding};
+
+        auto attrs = coopa::gfx::engine::data::Vertex::attribute_descriptions();
         std::vector<VkVertexInputAttributeDescription> attr_vec(attrs.begin(), attrs.end());
+        auto instance_attrs = coopa::gfx::engine::data::InstanceData::attribute_descriptions();
+        attr_vec.insert(attr_vec.end(), instance_attrs.begin(), instance_attrs.end());
 
         coopa::gfx::pipeline::PipelineConfig geom_cfg{};
         // CULL_MODE_NONE, not the main pass's back-face/CCW convention: this
@@ -116,7 +122,7 @@ public:
         geom_cfg.depth_write = true;
 
         VkPushConstantRange geom_pc_range{};
-        geom_pc_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        geom_pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         geom_pc_range.offset     = 0;
         geom_pc_range.size       = sizeof(PushConstants);
 
@@ -125,7 +131,7 @@ public:
         geom_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
             device, face_pass,
             std::vector<coopa::gfx::pipeline::Shader*>{geom_vert_.get(), geom_frag_.get()},
-            std::vector<VkVertexInputBindingDescription>{binding},
+            binding_vec,
             attr_vec,
             geom_layouts,
             geom_cfg,
@@ -151,9 +157,7 @@ public:
     }
 
     void push(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& pc) const {
-        cmd.push_constants(geom_pipeline_->layout(),
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(PushConstants), &pc);
+        cmd.push_constants(geom_pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
     }
 
     VkPipelineLayout geometry_layout() const { return geom_pipeline_->layout(); }

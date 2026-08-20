@@ -40,9 +40,10 @@ namespace passes {
 
 class TransparentPass {
 public:
-    /// 160 bytes -- byte-identical to GBufferPipeline::PushConstants.
+    /// 32 bytes -- byte-identical to GBufferPipeline::PushConstants. model/
+    /// normal_matrix moved to the per-instance vertex stream (data::InstanceData);
+    /// this block is now shared once per instanced batch, not pushed per object.
     struct PushConstants {
-        coopa::gfx::engine::data::ModelPushConstants model; // 128 bytes
         glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f}; // 16 bytes; .w = alpha
         float     metallic     = 0.0f;
         float     roughness    = 0.5f;
@@ -84,13 +85,18 @@ public:
         }
 
         VkPushConstantRange pc_range{};
-        pc_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         pc_range.offset     = 0;
         pc_range.size       = sizeof(PushConstants);
 
-        auto binding = coopa::gfx::engine::data::Vertex::binding_description();
-        auto attrs   = coopa::gfx::engine::data::Vertex::attribute_descriptions();
+        auto binding          = coopa::gfx::engine::data::Vertex::binding_description();
+        auto instance_binding = coopa::gfx::engine::data::InstanceData::binding_description();
+        std::vector<VkVertexInputBindingDescription> binding_vec = {binding, instance_binding};
+
+        auto attrs = coopa::gfx::engine::data::Vertex::attribute_descriptions();
         std::vector<VkVertexInputAttributeDescription> attr_vec(attrs.begin(), attrs.end());
+        auto instance_attrs = coopa::gfx::engine::data::InstanceData::attribute_descriptions();
+        attr_vec.insert(attr_vec.end(), instance_attrs.begin(), instance_attrs.end());
 
         coopa::gfx::pipeline::PipelineConfig cfg{};
         cfg.cull_mode        = VK_CULL_MODE_BACK_BIT;
@@ -103,7 +109,7 @@ public:
         pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
             device, render_pass_,
             std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), frag_shader_.get()},
-            std::vector<VkVertexInputBindingDescription>{binding},
+            binding_vec,
             attr_vec,
             layouts,
             cfg,
@@ -212,11 +218,9 @@ public:
         cmd.bind_pipeline(*pipeline_);
     }
 
-    /** @brief Uploads per-object push constants. */
+    /** @brief Uploads per-batch material push constants. */
     void push(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& pc) {
-        cmd.push_constants(pipeline_->layout(),
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(PushConstants), &pc);
+        cmd.push_constants(pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
     }
 
     /** @brief Ends the render pass. */
