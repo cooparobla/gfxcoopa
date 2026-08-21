@@ -113,11 +113,20 @@ public:
      *                  Called between begin_render_pass and end_render_pass.
      * @param clear_color RGBA clear color applied at the start of the render pass.
      * @param on_resize   Optional callback invoked when the swapchain is recreated.
+     * @param pre_pass_fn Optional callable invoked after cmd.begin() but BEFORE this
+     *                  render pass opens -- the seam for recording an earlier, separate
+     *                  render pass into the same command buffer (e.g. an offscreen target
+     *                  a later blit will sample), so it shares this frame's single submit
+     *                  rather than needing its own vkQueueSubmit + wait. Pair with a
+     *                  RenderPass built with a SHADER_READ_ONLY_OPTIMAL final layout so its
+     *                  exit subpass dependency (see pipeline/render_pass.h) synchronizes the
+     *                  handoff instead of leaving it to chance.
      * @return True if the frame was presented successfully, false if the window was minimized.
      */
     bool begin_frame(std::function<void(command::CommandBuffer&)> record_fn,
                      VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}},
-                     std::function<void()> on_resize = nullptr)
+                     std::function<void()> on_resize = nullptr,
+                     std::function<void(command::CommandBuffer&)> pre_pass_fn = nullptr)
     {
         // Wait for this frame slot to be free.
         in_flight_fences_[current_frame_]->wait();
@@ -158,6 +167,9 @@ public:
 
         command::CommandBuffer cmd(raw_cmd);
         cmd.begin();
+
+        if (pre_pass_fn) pre_pass_fn(cmd);
+
         cmd.begin_render_pass(render_pass_.handle(),
                               framebuffers_[image_index],
                               swapchain_.extent(), clear_color);

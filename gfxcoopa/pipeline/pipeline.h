@@ -27,6 +27,22 @@ namespace gfx {
 namespace pipeline {
 
 /**
+ * @enum BlendMode
+ * @brief Richer blend equations than PipelineConfig::blending's single bool covers.
+ *
+ * None means "let PipelineConfig::blending decide" (see the resolution rule
+ * on PipelineConfig::blend_mode) — every pre-existing caller that only ever
+ * set `blending` keeps its exact prior behavior. The other modes are opt-in.
+ */
+enum class BlendMode {
+    None,                ///< No blending (defers to PipelineConfig::blending).
+    Alpha,                ///< Straight alpha: src*srcA + dst*(1-srcA). Same as blending=true today.
+    PremultipliedAlpha,   ///< src*1 + dst*(1-srcA). For premultiplied-alpha source data (e.g. a sprite atlas composited with coverage baked in).
+    Additive,             ///< src*srcA + dst*1. Glow/particle-style accumulation.
+    Multiply,             ///< src*dst (color), dst unchanged (alpha). Tinting/shadow-style darkening.
+};
+
+/**
  * @struct PipelineConfig
  * @brief Configurable rasterization state for Pipeline construction.
  *
@@ -40,7 +56,8 @@ struct PipelineConfig {
     VkFrontFace            front_face             = VK_FRONT_FACE_COUNTER_CLOCKWISE;     /**< CCW winding is front-facing. */
     bool                   depth_test             = true;                                 /**< Enable depth testing. */
     bool                   depth_write            = true;                                 /**< Enable depth writing. */
-    bool                   blending               = false;                                /**< Enable alpha blending. */
+    bool                   blending               = false;                                /**< Enable alpha blending (see blend_mode). */
+    BlendMode               blend_mode             = BlendMode::None;                      /**< Blend equation; None defers to `blending` (see BlendMode). */
     float                  line_width             = 1.0f;                                 /**< Rasterized line width. */
     VkSampleCountFlagBits  samples                = VK_SAMPLE_COUNT_1_BIT;               /**< MSAA sample count. */
     VkCompareOp             depth_compare_op       = VK_COMPARE_OP_LESS;                  /**< Depth comparison function. */
@@ -275,8 +292,18 @@ private:
 
         // Color blending. The same attachment state is replicated across
         // config.color_attachment_count attachments (defaults to 1).
+        //
+        // blend_mode == None defers entirely to the legacy `blending` bool, so
+        // every pre-existing PipelineConfig{} (which never sets blend_mode)
+        // produces byte-identical blend state to before BlendMode existed.
+        BlendMode effective_mode = config.blend_mode;
+        if (effective_mode == BlendMode::None && config.blending) {
+            effective_mode = BlendMode::Alpha;
+        }
+
         VkPipelineColorBlendAttachmentState blend_attachment{};
-        if (config.blending) {
+        switch (effective_mode) {
+        case BlendMode::Alpha:
             blend_attachment.blendEnable         = VK_TRUE;
             blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
             blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -284,8 +311,38 @@ private:
             blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
             blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
-        } else {
+            break;
+        case BlendMode::PremultipliedAlpha:
+            blend_attachment.blendEnable         = VK_TRUE;
+            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::Additive:
+            blend_attachment.blendEnable         = VK_TRUE;
+            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::Multiply:
+            blend_attachment.blendEnable         = VK_TRUE;
+            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::None:
+        default:
             blend_attachment.blendEnable = VK_FALSE;
+            break;
         }
         blend_attachment.colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |

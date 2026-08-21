@@ -55,6 +55,12 @@ public:
      * @param height     Texture height in pixels.
      * @param srgb       True to interpret the data as sRGB-encoded (albedo/base color maps);
      *                   false for linear data (normal maps, metallic/roughness, masks).
+     * @param filter     Sampler min/mag filter. Defaults to VK_FILTER_LINEAR (every prior
+     *                   caller's behavior); pass VK_FILTER_NEAREST for pixel-art atlases,
+     *                   where bilinear filtering blurs texel edges.
+     * @param address_mode Sampler UV wrap mode. Defaults to VK_SAMPLER_ADDRESS_MODE_REPEAT
+     *                   (every prior caller's behavior); pass CLAMP_TO_EDGE for an atlas,
+     *                   where wrapping across unrelated packed frames is never wanted.
      * @return A new GPU-resident Texture, ready to sample.
      */
     static Texture upload(core::Device& device,
@@ -62,11 +68,13 @@ public:
                           command::CommandPool& cmd_pool,
                           const uint8_t* pixels,
                           uint32_t width, uint32_t height,
-                          bool srgb)
+                          bool srgb,
+                          VkFilter filter = VK_FILTER_LINEAR,
+                          VkSamplerAddressMode address_mode = VK_SAMPLER_ADDRESS_MODE_REPEAT)
     {
         VkFormat format = srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
         auto image = memory::upload_image_2d(device, allocator, cmd_pool, pixels, width, height, format, 4);
-        auto sampler = std::make_unique<util::Sampler>(device, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+        auto sampler = std::make_unique<util::Sampler>(device, filter, address_mode);
         return Texture(std::move(image), std::move(sampler));
     }
 

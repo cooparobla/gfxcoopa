@@ -91,17 +91,19 @@ public:
     /**
      * @brief Begins the offscreen render pass.
      *
-     * Records begin_render_pass with a black clear color and far-depth clear.
-     * Sets dynamic viewport and scissor to the full render resolution.
+     * Records begin_render_pass with the given clear color (dark gray by
+     * default, matching every existing caller) and a far-depth clear. Sets
+     * dynamic viewport and scissor to the full render resolution.
      *
-     * @param cmd Command buffer to record into.
+     * @param cmd   Command buffer to record into.
+     * @param clear Color attachment clear value.
      */
-    void begin(command::CommandBuffer& cmd) const {
+    void begin(command::CommandBuffer& cmd, VkClearColorValue clear = {{0.05f, 0.05f, 0.05f, 1.0f}}) const {
         cmd.begin_render_pass(
             render_pass_->handle(),
             framebuffer_,
             {width_, height_},
-            {{0.05f, 0.05f, 0.05f, 1.0f}},
+            clear,
             1.0f
         );
         // Use negative viewport height to flip Y for Vulkan NDC (VK_KHR_maintenance1).

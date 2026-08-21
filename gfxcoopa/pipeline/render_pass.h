@@ -126,16 +126,41 @@ public:
         subpass.pResolveAttachments     = has_msaa ? &resolve_ref : nullptr;
 
         // --- Subpass dependencies ---
-        VkSubpassDependency dependency{};
-        dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
-        dependency.dstSubpass    = 0;
-        dependency.srcStageMask  = (has_color ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : 0) |
-                                   (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
-        dependency.srcAccessMask = 0;
-        dependency.dstStageMask  = (has_color ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : 0) |
-                                   (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
-        dependency.dstAccessMask = (has_color ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : 0) |
-                                   (has_depth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0);
+        VkSubpassDependency entry_dependency{};
+        entry_dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
+        entry_dependency.dstSubpass    = 0;
+        entry_dependency.srcStageMask  = (has_color ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : 0) |
+                                         (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
+        entry_dependency.srcAccessMask = 0;
+        entry_dependency.dstStageMask  = (has_color ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : 0) |
+                                         (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
+        entry_dependency.dstAccessMask = (has_color ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : 0) |
+                                         (has_depth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0);
+
+        std::vector<VkSubpassDependency> dependencies{entry_dependency};
+
+        // An EXIT dependency is only needed when a later stage will sample this
+        // pass's output as a texture (e.g. an offscreen target feeding a blit/
+        // post-process pass) -- without it, that later sampled read races the
+        // automatic layout transition this render pass performs on end, which
+        // is exactly the hazard synchronization validation flags once two such
+        // passes are recorded into the same command buffer back-to-back with no
+        // intervening vkQueueWaitIdle to (accidentally) mask it.
+        bool needs_exit_dependency =
+            (has_color && color_final_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) ||
+            (has_depth && depth_final_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (needs_exit_dependency) {
+            VkSubpassDependency exit_dependency{};
+            exit_dependency.srcSubpass    = 0;
+            exit_dependency.dstSubpass    = VK_SUBPASS_EXTERNAL;
+            exit_dependency.srcStageMask  = (has_color ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : 0) |
+                                            (has_depth ? VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT : 0);
+            exit_dependency.srcAccessMask = (has_color ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : 0) |
+                                            (has_depth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0);
+            exit_dependency.dstStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            exit_dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            dependencies.push_back(exit_dependency);
+        }
 
         VkRenderPassCreateInfo create_info{};
         create_info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -143,8 +168,8 @@ public:
         create_info.pAttachments    = attachments.data();
         create_info.subpassCount    = 1;
         create_info.pSubpasses      = &subpass;
-        create_info.dependencyCount = 1;
-        create_info.pDependencies   = &dependency;
+        create_info.dependencyCount = static_cast<uint32_t>(dependencies.size());
+        create_info.pDependencies   = dependencies.data();
 
         GFX_VK_CHECK(vkCreateRenderPass(device_.handle(), &create_info, nullptr, &render_pass_));
     }
