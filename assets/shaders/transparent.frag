@@ -1,5 +1,13 @@
 #version 450
 
+// Forward-shaded BLEND transparent pass. Lighting body is copied from
+// deferred_lighting.frag (Cook-Torrance direct + SH/IBL indirect) since that is the
+// live, correct lighting model -- see deferred_lighting.frag for the source of
+// truth this was derived from. Differences: material comes from a push constant
+// (forward geometry, not a G-buffer fetch), there is no SSAO term, and out_color
+// carries the material's alpha instead of being forced to 1.0.
+
+#include <gfx/sky.glsl>
 #include <gfx/ibl.glsl>
 #include <gfx/brdf.glsl>
 #include <gfx/shadow_sampling.glsl>
@@ -35,7 +43,9 @@ layout(set = 1, binding = 0) uniform LightUBO {
 } lights;
 
 // Set 2: Shadow maps -- *Shadow sampler types: hardware compareEnable
-// (util::Sampler::shadow()), see gfx/shadow_sampling.glsl's *Shadow-family doc.
+// (util::Sampler::shadow()), see gfx/shadow_sampling.glsl's *Shadow-family doc. This set is
+// typically shared with deferred_lighting.frag's identical set 2 (both draw against the same
+// shadow_sampler_/shadow_set_), so the sampler types here must match that file's.
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
 layout(set = 2, binding = 1) uniform samplerCubeShadow point_shadow_map_0;
 layout(set = 2, binding = 2) uniform samplerCubeShadow point_shadow_map_1;
@@ -60,10 +70,6 @@ layout(std430, set = 3, binding = 1) readonly buffer GiProbeBuffer {
 
 layout(set = 3, binding = 2) uniform sampler2D u_brdf_lut;
 
-// Bindings 3-6: up to MAX_REFLECTION_PROBES reflection probe cubemaps.
-// Separately-named (not a samplerCube[] array): this device does not enable
-// shaderSampledImageArrayDynamicIndexing, so a dynamically-indexed sampler
-// array would be illegal here -- mirrors point_shadow_map_0..3 above.
 layout(set = 3, binding = 3) uniform samplerCube u_reflection_map_0;
 layout(set = 3, binding = 4) uniform samplerCube u_reflection_map_1;
 layout(set = 3, binding = 5) uniform samplerCube u_reflection_map_2;
@@ -73,24 +79,22 @@ layout(set = 3, binding = 7) uniform ReflectionProbeUBO {
     ReflectionProbeData probes[MAX_REFLECTION_PROBES];
 } reflection;
 
-// Push constants: Material only (32 bytes) -- model/normal_matrix moved to
-// the per-instance vertex stream (see pbr.vert), shared once per instanced
-// draw batch rather than pushed per object.
+// Push constants: Material only (32 bytes). Byte-identical to
+// GBufferPipeline::PushConstants. model/normal_matrix moved to the
+// per-instance vertex stream (see pbr.vert, which this pass's vertex stage uses).
 layout(push_constant) uniform PushConstants {
     vec4  albedo;     // xyz = albedo, w = alpha
     float metallic;
     float roughness;
     float ao;
-    float alpha_cutoff;
+    float alpha_cutoff; // unused here -- BLEND materials never alpha-test
 } material;
 
 layout(location = 0) out vec4 out_color;
 
 // Directional shadow: rotated-Vogel-disk PCF, hardware depth-compare taps (kernel in
-// gfx/shadow_sampling.glsl). IGN rather than gfx_random_angle for the rotation seed --
-// this pass has no temporal resolve downstream to average out a white-noise hash, so the
-// rotation itself must not read as grain; see deferred_lighting.frag's calc_dir_shadow
-// (blendy) for the fuller version of this reasoning, including its per-frame variant.
+// gfx/shadow_sampling.glsl). IGN, not gfx_random_angle -- see deferred_lighting.frag's
+// calc_dir_shadow for why a white-noise rotation reads as grain here.
 float calc_dir_shadow(vec4 light_space_pos, vec3 normal, vec3 light_dir) {
     if (lights.dir_shadow_params.z < 0.5) return 0.0;
 
@@ -109,13 +113,15 @@ float calc_dir_shadow(vec4 light_space_pos, vec3 normal, vec3 light_dir) {
     return gfx_shadow_dir_pcf_vogel(dir_shadow_map, proj_coords, bias, texel_size, angle, 24);
 }
 
-// Point shadow: single hard compare (this legacy forward path never adopted
-// deferred_lighting.frag's 8-tap PCF upgrade).
+// Point shadow: single hard compare -- this pass has not adopted
+// deferred_lighting.frag's 8-tap PCF upgrade (see that file's history for
+// why the upgrade mattered once shadow_cube.frag started dithering BLEND
+// occluders: a single tap of a dithered depth buffer reads as binary
+// speckle rather than a soft grey shadow. Transparent surfaces retain that
+// harder edge today).
 float sample_point_shadow_map(int index, vec3 frag_to_light, float range) {
     vec3 dir = normalize(frag_to_light);
     float current_dist = length(frag_to_light) / range;
-    // Bias in world-space units (0.05), normalized by range so it stays
-    // proportional regardless of the light's range value.
     float bias = 0.05 / range;
 
     if (index == 0) return gfx_shadow_cube_hard(point_shadow_map_0, dir, current_dist, bias);
@@ -187,12 +193,16 @@ vec3 sample_gi_probes(vec3 P, vec3 N) {
 }
 
 void main() {
-    vec3 albedo   = material.albedo.rgb;
+    vec3 albedo     = material.albedo.rgb;
+    float alpha     = clamp(material.albedo.a, 0.0, 1.0);
     float metallic  = material.metallic;
-    float roughness = material.roughness;
+    float roughness = max(material.roughness, 0.045);
     float ao        = material.ao;
+    const float ssao = 1.0; // no screen-space AO for the forward transparent pass
 
     vec3 N = normalize(frag_world_normal);
+    if (!gl_FrontFacing) N = -N; // correct if cull_mode is ever relaxed to allow back faces
+
     vec3 V = normalize(camera.camera_pos - frag_world_pos);
 
     vec3 F0 = vec3(0.04);
@@ -255,7 +265,7 @@ void main() {
         // used when a scene doesn't set this) gives a gradual, realistic fade to the light's
         // range; ~4-8 gives a crisper, more cel-shaded-style cutoff (4 reproduces this pass's
         // original hardcoded curve exactly). Kept consistent with deferred_lighting.frag,
-        // transparent.frag and probe_capture.frag, which duplicate this same formula.
+        // probe_capture.frag and pbr.frag, which duplicate this same formula.
         float sharpness = max(pl.attenuation.x, 0.1);
         float factor = clamp(dist / range, 0.0, 1.0);
         float smooth_falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
@@ -289,36 +299,28 @@ void main() {
     // --- Indirect Lighting (GI) ---
     vec3 indirect_diffuse = vec3(0.0);
     vec3 indirect_specular = vec3(0.0);
+    float NdotV_indirect = max(dot(N, V), 0.0);
 
     if (gi.grid_counts.w > 0) {
         indirect_diffuse = sample_gi_probes(frag_world_pos, N) * gi.gi_params.x;
+    } else {
+        indirect_diffuse = sky_gradient(N);
     }
 
-    {
-        // No sky.glsl in this legacy forward path (matches its pre-existing
-        // behavior: zero indirect specular with no probe, caught by the
-        // constant-ambient fallback below) -- so sky_specular here is vec3(0),
-        // not an analytic sky term.
-        vec3 F0_indirect = mix(vec3(0.04), albedo, metallic);
-        indirect_specular = ibl_specular_probes_blended(
-            u_reflection_map_0, u_reflection_map_1, u_reflection_map_2, u_reflection_map_3, u_brdf_lut,
-            frag_world_pos, N, V, roughness, F0_indirect,
-            reflection.probes, int(gi.gi_params.w), vec3(0.0));
-    }
+    vec3 F_indirect = fresnel_schlick_roughness(NdotV_indirect, F0, roughness);
+    vec2 brdf_indirect = texture(u_brdf_lut, vec2(NdotV_indirect, roughness)).rg;
 
-    vec3 kS_indirect = fresnel_schlick(max(dot(N, V), 0.0), F0);
-    vec3 kD_indirect = (vec3(1.0) - kS_indirect) * (1.0 - metallic);
-    vec3 ambient = (kD_indirect * albedo * indirect_diffuse + indirect_specular) * ao;
+    vec3 R_indirect = reflect(-V, N);
+    vec3 sky_specular = sky_gradient(R_indirect) * (F_indirect * brdf_indirect.x + brdf_indirect.y);
 
-    // Fallback constant ambient if no GI probes are present
-    if (gi.grid_counts.w == 0 && gi.gi_params.w == 0.0) {
-        if (lights.light_counts.x > 0) {
-            ambient = lights.dir_ambient.rgb * albedo * ao;
-        } else {
-            ambient = vec3(0.03) * albedo * ao;
-        }
-    }
+    indirect_specular = ibl_specular_probes_blended(
+        u_reflection_map_0, u_reflection_map_1, u_reflection_map_2, u_reflection_map_3, u_brdf_lut,
+        frag_world_pos, N, V, roughness, F_indirect,
+        reflection.probes, int(gi.gi_params.w), sky_specular);
+
+    vec3 kD_indirect = (vec3(1.0) - F_indirect) * (1.0 - metallic);
+    vec3 ambient = (kD_indirect * albedo * indirect_diffuse + indirect_specular) * ao * ssao;
 
     vec3 color = ambient + Lo;
-    out_color = vec4(color, 1.0);
+    out_color = vec4(color, alpha);
 }

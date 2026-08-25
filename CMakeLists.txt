@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.0)
-cmake_policy(VERSION 3.0)
+cmake_minimum_required(VERSION 3.20)
+cmake_policy(VERSION 3.20)
 
 project(gfxcoopa)
 
@@ -40,6 +40,18 @@ add_definitions(-DVOLK_IMPLEMENTATION)
 # VMA implementation compiled once here.
 add_definitions(-DVMA_IMPLEMENTATION)
 
+# --- Shader compilation ---
+# gfxcoopa's own assets/shaders/ is the base shader library every other repo
+# points -I at, so compiling it here (INCLUDE_DIR == SHADER_DIR) is both
+# gfxcoopa's own shader build AND a continuously-run compile test that every
+# base entry point still works standalone against the gfx/ headers it ships.
+include(cmake/GfxShaders.cmake)
+gfx_add_shader_target(shaders
+    SHADER_DIR   "${CMAKE_SOURCE_DIR}/assets/shaders"
+    INCLUDE_DIR  "${CMAKE_SOURCE_DIR}/assets/shaders"
+)
+
 # Add executable
 add_executable(gfxcoopa test.cpp)
+add_dependencies(gfxcoopa shaders)
 target_link_libraries(gfxcoopa Vulkan::Vulkan glfw dl)

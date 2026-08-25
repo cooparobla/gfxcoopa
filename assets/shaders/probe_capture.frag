@@ -16,8 +16,9 @@
 //     uses the same non-recursive sky_gradient() fallback the main shaders
 //     already fall back to when no probe exists.
 
-#include "sky.glsl"
-#include "ibl.glsl"   // fresnel_schlick_roughness only
+#include <gfx/sky.glsl>
+#include <gfx/ibl.glsl>   // fresnel_schlick_roughness only
+#include <gfx/brdf.glsl>
 
 layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_world_normal;
@@ -52,59 +53,19 @@ layout(set = 1, binding = 0) uniform LightUBO {
 } lights;
 
 // Set 2: BRDF LUT (reused from GiSystem's already-built BRDFLUT)
-layout(set = 2, binding = 0) uniform sampler2D brdfLUT;
+layout(set = 2, binding = 0) uniform sampler2D u_brdf_lut;
 
-// Push constants: identical 160-byte layout to GBufferPipeline/PbrPipeline.
+// Push constants: identical 32-byte layout to GBufferPipeline/TransparentPass.
+// model/normal_matrix moved to the per-instance vertex stream (see pbr.vert).
 layout(push_constant) uniform PushConstants {
-    mat4 model;
-    mat4 normal_matrix;
-    vec4  albedo;     // xyz = albedo
+    vec4  albedo;     // xyz = albedo, w = alpha
     float metallic;
     float roughness;
     float ao;
-    float flags;
+    float alpha_cutoff;
 } material;
 
 layout(location = 0) out vec4 out_color;
-
-const float PI = 3.14159265359;
-
-// Cook-Torrance BRDF components -- copied verbatim from deferred_lighting.frag.
-float DistributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
-    float NdotH2 = NdotH * NdotH;
-
-    float num = a2;
-    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
-    denom = PI * denom * denom;
-
-    return num / max(denom, 0.000001);
-}
-
-float GeometrySchlickGGX(float NdotV, float roughness) {
-    float r = (roughness + 1.0);
-    float k = (r * r) / 8.0;
-
-    float num = NdotV;
-    float denom = NdotV * (1.0 - k) + k;
-
-    return num / max(denom, 0.000001);
-}
-
-float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
-    float NdotV = max(dot(N, V), 0.0);
-    float NdotL = max(dot(N, L), 0.0);
-    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
-    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
-
-    return ggx1 * ggx2;
-}
-
-vec3 fresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
 
 void main() {
     vec3  albedo    = material.albedo.rgb;
@@ -126,9 +87,9 @@ void main() {
 
         float NdotL = max(dot(N, L), 0.0);
         if (NdotL > 0.0) {
-            float NDF = DistributionGGX(N, H, roughness);
-            float G   = GeometrySmith(N, V, L, roughness);
-            vec3 F    = fresnelSchlick(max(dot(H, V), 0.0), F0);
+            float NDF = distribution_ggx(N, H, roughness);
+            float G   = geometry_smith(N, V, L, roughness);
+            vec3 F    = fresnel_schlick(max(dot(H, V), 0.0), F0);
 
             vec3 numerator    = NDF * G * F;
             float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
@@ -137,7 +98,7 @@ void main() {
             vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
 
             vec3 radiance = lights.dir_color.rgb * lights.dir_direction.w;
-            Lo += (kD * albedo / PI + specular) * radiance * NdotL;
+            Lo += (kD * albedo / BRDF_PI + specular) * radiance * NdotL;
         }
     }
 
@@ -159,15 +120,22 @@ void main() {
         if (NdotL <= 0.0) continue;
 
         float dist2 = dist * dist;
+        // pl.attenuation.x -- formerly an unused classical "constant attenuation" term -- is
+        // repurposed as a per-light falloff sharpness exponent: ~1 (the component's own default,
+        // used when a scene doesn't set this) gives a gradual, realistic fade to the light's
+        // range; ~4-8 gives a crisper, more cel-shaded-style cutoff (4 reproduces this pass's
+        // original hardcoded curve exactly). Kept consistent with deferred_lighting.frag,
+        // transparent.frag and pbr.frag, which duplicate this same formula.
+        float sharpness = max(pl.attenuation.x, 0.1);
         float factor = clamp(dist / range, 0.0, 1.0);
-        float smooth_falloff = clamp(1.0 - factor * factor * factor * factor, 0.0, 1.0);
+        float smooth_falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
         smooth_falloff = smooth_falloff * smooth_falloff;
-        float attenuation = (1.0 / (4.0 * PI * (dist2 + 1.0))) * smooth_falloff;
+        float attenuation = (1.0 / (4.0 * BRDF_PI * (dist2 + 1.0))) * smooth_falloff;
         vec3 radiance = pl.color_intensity.rgb * (pl.color_intensity.w * 0.08) * attenuation;
 
-        float NDF = DistributionGGX(N, H, roughness);
-        float G   = GeometrySmith(N, V, L, roughness);
-        vec3 F    = fresnelSchlick(max(dot(H, V), 0.0), F0);
+        float NDF = distribution_ggx(N, H, roughness);
+        float G   = geometry_smith(N, V, L, roughness);
+        vec3 F    = fresnel_schlick(max(dot(H, V), 0.0), F0);
 
         vec3 numerator    = NDF * G * F;
         float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
@@ -175,14 +143,14 @@ void main() {
 
         vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
 
-        Lo += (kD * albedo / PI + specular) * radiance * NdotL;
+        Lo += (kD * albedo / BRDF_PI + specular) * radiance * NdotL;
     }
 
     // Indirect: the same non-recursive sky fallback the main shaders use when
     // no probe/GI volume exists.
     float NdotV = max(dot(N, V), 0.0);
     vec3  F_ind = fresnel_schlick_roughness(NdotV, F0, roughness);
-    vec2  brdf  = texture(brdfLUT, vec2(NdotV, roughness)).rg;
+    vec2  brdf  = texture(u_brdf_lut, vec2(NdotV, roughness)).rg;
 
     vec3 indirect_diffuse  = sky_gradient(N);
     vec3 indirect_specular = sky_gradient(reflect(-V, N)) * (F_ind * brdf.x + brdf.y);

@@ -19,6 +19,7 @@
 #include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/shader.h>
+#include <gfxcoopa/pipeline/shader_library.h>
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/engine/data/model_ubo.h>
@@ -68,14 +69,14 @@ public:
                      VkDescriptorSetLayout camera_layout,
                      VkDescriptorSetLayout light_layout,
                      VkDescriptorSetLayout brdf_layout,
-                     const std::string& shader_dir)
+                     const coopa::gfx::pipeline::ShaderLibrary& shaders)
         : device_(device)
     {
         // --- Sky background pipeline ---
         sky_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(
-            device, shader_dir + "/env_prefilter.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
+            device, shaders("env_prefilter.vert"), VK_SHADER_STAGE_VERTEX_BIT);
         sky_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(
-            device, shader_dir + "/probe_sky_background.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
+            device, shaders("probe_sky_background.frag"), VK_SHADER_STAGE_FRAGMENT_BIT);
 
         coopa::gfx::pipeline::PipelineConfig sky_cfg{};
         sky_cfg.cull_mode   = VK_CULL_MODE_NONE;
@@ -99,9 +100,9 @@ public:
 
         // --- Geometry pipeline ---
         geom_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(
-            device, shader_dir + "/pbr.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
+            device, shaders("pbr.vert"), VK_SHADER_STAGE_VERTEX_BIT);
         geom_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(
-            device, shader_dir + "/probe_capture.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
+            device, shaders("probe_capture.frag"), VK_SHADER_STAGE_FRAGMENT_BIT);
 
         auto binding          = coopa::gfx::engine::data::Vertex::binding_description();
         auto instance_binding = coopa::gfx::engine::data::InstanceData::binding_description();

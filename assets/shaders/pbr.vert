@@ -5,6 +5,7 @@ layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_normal;
 layout(location = 2) in vec2 in_uv;
 layout(location = 3) in vec4 in_tangent; // xyz = tangent, w = handedness
+layout(location = 4) in mat4 in_model;   // per-instance (locations 4-7)
 
 // Set 0: Camera UBO
 layout(set = 0, binding = 0) uniform CameraUBO {
@@ -13,12 +14,6 @@ layout(set = 0, binding = 0) uniform CameraUBO {
     vec3 camera_pos;
 } camera;
 
-// Push constants: ModelPushConstants (128 bytes)
-layout(push_constant) uniform ModelPushConstants {
-    mat4 model;
-    mat4 normal_matrix;
-} model_push;
-
 // Outputs to fragment shader
 layout(location = 0) out vec3 frag_world_pos;
 layout(location = 1) out vec3 frag_world_normal;
@@ -26,10 +21,13 @@ layout(location = 2) out vec2 frag_uv;
 layout(location = 3) out mat3 frag_TBN;
 
 void main() {
-    vec4 world_pos = model_push.model * vec4(in_position, 1.0);
+    vec4 world_pos = in_model * vec4(in_position, 1.0);
     frag_world_pos = world_pos.xyz;
 
-    mat3 norm_mat = mat3(model_push.normal_matrix);
+    // normal_matrix used to be CPU-computed and streamed alongside model; now
+    // derived here instead, since scenes use non-uniform scale (e.g. Cornell
+    // box walls) so mat3(in_model) alone is wrong.
+    mat3 norm_mat = transpose(inverse(mat3(in_model)));
     vec3 N = normalize(norm_mat * in_normal);
     vec3 T = normalize(norm_mat * in_tangent.xyz);
     // Re-orthonormalize T against N

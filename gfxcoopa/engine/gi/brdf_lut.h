@@ -18,6 +18,7 @@
 #include <gfxcoopa/memory/image.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/shader.h>
+#include <gfxcoopa/pipeline/shader_library.h>
 #include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/command/command_buffer.h>
@@ -40,7 +41,7 @@ public:
     BRDFLUT(core::Device& device,
             memory::Allocator& allocator,
             command::CommandPool& cmd_pool,
-            const std::string& shader_dir)
+            const pipeline::ShaderLibrary& shaders)
         : device_(device)
     {
         // 1. Create 512x512 R16G16_SFLOAT Image
@@ -57,7 +58,7 @@ public:
         );
 
         // 3. Generate LUT texture contents via rasterization pass
-        generate_(device, allocator, cmd_pool, shader_dir);
+        generate_(device, allocator, cmd_pool, shaders);
     }
 
     ~BRDFLUT() = default;
@@ -73,7 +74,7 @@ private:
     void generate_(core::Device& device,
                    memory::Allocator& allocator,
                    command::CommandPool& cmd_pool,
-                   const std::string& shader_dir)
+                   const pipeline::ShaderLibrary& shaders)
     {
         pipeline::RenderPass render_pass(
             device, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_UNDEFINED,
@@ -93,11 +94,8 @@ private:
         VkFramebuffer framebuffer = VK_NULL_HANDLE;
         GFX_VK_CHECK(vkCreateFramebuffer(device.handle(), &fb_info, nullptr, &framebuffer));
 
-        std::string vert_path = shader_dir + "/brdf_lut.vert.spv";
-        std::string frag_path = shader_dir + "/brdf_lut.frag.spv";
-
-        pipeline::Shader vert_shader(device, vert_path, VK_SHADER_STAGE_VERTEX_BIT);
-        pipeline::Shader frag_shader(device, frag_path, VK_SHADER_STAGE_FRAGMENT_BIT);
+        pipeline::Shader vert_shader(device, shaders("brdf_lut.vert"), VK_SHADER_STAGE_VERTEX_BIT);
+        pipeline::Shader frag_shader(device, shaders("brdf_lut.frag"), VK_SHADER_STAGE_FRAGMENT_BIT);
 
         pipeline::PipelineConfig cfg{};
         cfg.cull_mode   = VK_CULL_MODE_NONE;

@@ -28,6 +28,7 @@
 #include <gfxcoopa/engine/components/point_light.h>
 #include <gfxcoopa/engine/components/gi_probe_volume.h>
 #include <gfxcoopa/engine/components/reflection_probe.h>
+#include <gfxcoopa/pipeline/shader_library.h>
 #include <coopa/scene/scene.h>
 
 #include <algorithm>
@@ -58,12 +59,12 @@ public:
     GiSystem(coopa::gfx::core::Device& device,
              coopa::gfx::memory::Allocator& allocator,
              coopa::gfx::command::CommandPool& cmd_pool,
-             const std::string& shader_dir)
-        : device_(device), allocator_(allocator), cmd_pool_(cmd_pool), shader_dir_(shader_dir)
+             const coopa::gfx::pipeline::ShaderLibrary& shaders)
+        : device_(device), allocator_(allocator), cmd_pool_(cmd_pool), shaders_(shaders)
     {
         // 1. Generate BRDF Integration LUT
         brdf_lut_ = std::make_unique<BRDFLUT>(
-            device, allocator, cmd_pool, shader_dir
+            device, allocator, cmd_pool, shaders_
         );
 
         // 2. Initialize GPU buffers
@@ -399,15 +400,15 @@ private:
 
         env_prefilter_ = std::make_unique<EnvPrefilterPass>(
             device_, cubemap_targets_[0]->prefilter_render_pass(),
-            shader_dir_ + "/env_prefilter.vert.spv",
-            shader_dir_ + "/env_prefilter.frag.spv",
+            shaders_("env_prefilter.vert"),
+            shaders_("env_prefilter.frag"),
             cap_source_layout_->handle()
         );
 
         probe_capture_ = std::make_unique<ProbeCapturePass>(
             device_, cubemap_targets_[0]->render_pass(),
             cap_camera_layout_->handle(), cap_light_layout_->handle(), cap_brdf_layout_->handle(),
-            shader_dir_
+            shaders_
         );
     }
 
@@ -591,7 +592,9 @@ private:
     coopa::gfx::core::Device& device_;
     coopa::gfx::memory::Allocator& allocator_;
     coopa::gfx::command::CommandPool& cmd_pool_;
-    std::string shader_dir_;
+    coopa::gfx::pipeline::ShaderLibrary shaders_; /**< By value: ProbeCapturePass is built lazily
+                                                        in ensure_capture_pipelines_(), well after
+                                                        construction, so a reference could dangle. */
     std::unique_ptr<BRDFLUT>        brdf_lut_;
     std::unique_ptr<GiData>         gi_data_;
 

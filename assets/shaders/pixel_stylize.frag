@@ -1,0 +1,163 @@
+#version 450
+
+// Stylize overlay: optional exposure+ACES tonemap -> depth/normal-
+// discontinuity outline (alpha-blended over the input color) -> ordered
+// (Bayer) dither -> palette quantization, in that order.
+//
+// The tonemap step is optional: a full-PBR renderer with its own tonemap/AA
+// chain (e.g. blendy) leaves `exposure` <= 0 and feeds this shader
+// already-tonemapped LDR input, so nothing double-tonemaps. A consumer with
+// no tonemap step of its own (e.g. toyengine) sets `exposure` > 0 and feeds
+// raw HDR scene color instead.
+//
+// All four effects are independently no-ops at their "off" value
+// (exposure <= 0, outline_thickness <= 0, dither_strength <= 0,
+// palette_count <= 0), so a consumer can leave this pass always-constructed
+// and always-executed and simply zero the fields it doesn't want.
+
+layout(location = 0) in vec2 in_uv;
+
+layout(set = 0, binding = 0) uniform sampler2D scene_color;  // already tonemapped LDR
+layout(set = 0, binding = 1) uniform sampler2D scene_depth;  // gbuffer depth
+layout(set = 0, binding = 2) uniform sampler2D scene_normal; // gbuffer world normal (+ metallic in .a)
+layout(set = 0, binding = 3) uniform sampler2D palette_lut;  // Nx1 RGBA8, NEAREST
+
+layout(push_constant) uniform StylizePushConstants {
+    vec4  outline_color;      // listed first: std430 would otherwise pad around a mid-struct vec4
+    vec2  inv_render_size;
+    float outline_thickness;  // in texels; <= 0 disables
+    float depth_threshold;
+    float normal_threshold;
+    float dither_strength;    // <= 0 disables
+    float palette_count;      // <= 0 disables palette quantization
+    float camera_near;
+    float camera_far;
+    float camera_is_perspective; // >= 0.5 => perspective, else orthographic
+    float exposure;              // <= 0 disables the tonemap step (input is already LDR)
+} params;
+
+layout(location = 0) out vec4 out_color;
+
+// 8x8 Bayer ordered-dither matrix, values 0..63.
+const float BAYER8[64] = float[64](
+     0,32, 8,40, 2,34,10,42,
+    48,16,56,24,50,18,58,26,
+    12,44, 4,36,14,46, 6,38,
+    60,28,52,20,62,30,54,22,
+     3,35,11,43, 1,33, 9,41,
+    51,19,59,27,49,17,57,25,
+    15,47, 7,39,13,45, 5,37,
+    63,31,55,23,61,29,53,21
+);
+
+// True view-space distance from the camera, from raw Vulkan [0,1]
+// post-projection depth. Perspective depth is hyperbolic (glm::perspective ->
+// perspectiveRH_ZO); orthographic depth is already linear in the raw value
+// (glm::ortho -> orthoRH_ZO), hence the branch.
+float linear_depth(float d) {
+    if (params.camera_is_perspective < 0.5) {
+        return mix(params.camera_near, params.camera_far, d);
+    }
+    return params.camera_near * params.camera_far /
+           (params.camera_far - d * (params.camera_far - params.camera_near));
+}
+
+bool is_background(vec3 n) { return dot(n, n) < 0.001; }
+
+// True if uv sits on the near side of a depth or normal discontinuity, at
+// n0 = the (already-normalized) normal sampled at uv.
+bool is_outline_at(vec2 uv, vec3 n0, vec2 texel) {
+    vec2 dx = vec2(texel.x, 0.0);
+    vec2 dy = vec2(0.0, texel.y);
+
+    vec3 nx  = texture(scene_normal, uv + dx).rgb;
+    vec3 ny  = texture(scene_normal, uv + dy).rgb;
+    vec3 nxn = texture(scene_normal, uv - dx).rgb;
+    vec3 nyn = texture(scene_normal, uv - dy).rgb;
+
+    // A background neighbour is an unconditional silhouette edge: there is no
+    // depth or normal on that side to compare against, so if it were reachable
+    // by the depth test at all, the sky sits at the far plane where hyperbolic
+    // depth precision is at its worst.
+    if (is_background(nx) || is_background(ny) || is_background(nxn) || is_background(nyn)) {
+        return true;
+    }
+
+    float z0  = linear_depth(texture(scene_depth, uv).r);
+    float zx  = linear_depth(texture(scene_depth, uv + dx).r);
+    float zy  = linear_depth(texture(scene_depth, uv + dy).r);
+    float zxn = linear_depth(texture(scene_depth, uv - dx).r);
+    float zyn = linear_depth(texture(scene_depth, uv - dy).r);
+
+    // 1/z is affine in screen space over any plane, however steeply it
+    // recedes -- so on a plane the centre sits exactly halfway between its
+    // two opposite neighbours in inverse depth, and this is identically
+    // zero. Only a genuine step in Z (not just a grazing viewing angle)
+    // makes it non-zero. The *z0 turns the raw 1/z gap (~Delta z / z^2) into
+    // a relative step (~Delta z / z), so one depth_threshold works at any
+    // distance. The signed (not abs) form keeps the line one-sided: it
+    // fires on the texel that pops toward the camera, not on the surface
+    // behind it.
+    float rel_x = (1.0 / z0 - 0.5 * (1.0 / zx + 1.0 / zxn)) * z0;
+    float rel_y = (1.0 / z0 - 0.5 * (1.0 / zy + 1.0 / zyn)) * z0;
+    if (max(rel_x, rel_y) > params.depth_threshold) return true;
+
+    float min_dot = min(min(dot(n0, normalize(nx)), dot(n0, normalize(ny))),
+                         min(dot(n0, normalize(nxn)), dot(n0, normalize(nyn))));
+    return min_dot < params.normal_threshold;
+}
+
+bool is_outline(vec2 uv, vec3 n0) {
+    int steps = max(int(round(params.outline_thickness)), 0);
+    for (int i = 1; i <= steps; ++i) {
+        vec2 texel = float(i) * params.inv_render_size;
+        if (is_outline_at(uv, n0, texel)) return true;
+    }
+    return false;
+}
+
+// ACES fitted curve (Narkowicz), ported from toyengine's pixel_post.frag.
+vec3 aces_film(vec3 x) {
+    float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+vec3 quantize_to_palette(vec3 color) {
+    int count = int(params.palette_count);
+    if (count <= 0) return color;
+
+    vec3 best = color;
+    float best_dist = 1.0 / 0.0; // +inf
+    for (int i = 0; i < count; ++i) {
+        float u = (float(i) + 0.5) / params.palette_count;
+        vec3 entry = texture(palette_lut, vec2(u, 0.5)).rgb;
+        vec3 diff = entry - color;
+        float dist = dot(diff, diff);
+        if (dist < best_dist) {
+            best_dist = dist;
+            best = entry;
+        }
+    }
+    return best;
+}
+
+void main() {
+    vec3 color = texture(scene_color, in_uv).rgb;
+    if (params.exposure > 0.0) color = aces_film(color * params.exposure);
+
+    vec3 n0 = texture(scene_normal, in_uv).rgb;
+    if (params.outline_thickness > 0.0 && !is_background(n0) &&
+        is_outline(in_uv, normalize(n0))) {
+        color = mix(color, params.outline_color.rgb, params.outline_color.a);
+    }
+
+    if (params.dither_strength > 0.0) {
+        ivec2 texel = ivec2(gl_FragCoord.xy);
+        float t = (BAYER8[(texel.y & 7) * 8 + (texel.x & 7)] / 63.0 - 0.5) * params.dither_strength;
+        color += vec3(t);
+    }
+
+    color = quantize_to_palette(clamp(color, 0.0, 1.0));
+
+    out_color = vec4(clamp(color, 0.0, 1.0), 1.0);
+}

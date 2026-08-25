@@ -1,17 +1,15 @@
-// ibl.glsl -- shared image-based-lighting helpers.
-//
-// This file deliberately declares no uniforms, samplers or blocks. The three
-// shaders that include it place the GI descriptor set at different indices
-// (3 in deferred_lighting.frag and pbr.frag, 4 in ssr_composite.frag) and give
-// the resources different names, so every resource is passed in as a function
-// parameter instead. That also removes any dependence on include position.
+#ifndef GFX_IBL_GLSL
+#define GFX_IBL_GLSL
 
-/// Fresnel-Schlick with a roughness-aware ceiling (Sebastien Lagarde). Used
-/// for all IBL, so rough dielectrics do not blow out to white at grazing
-/// angles the way plain Schlick does.
-vec3 fresnel_schlick_roughness(float cosTheta, vec3 F0, float roughness) {
-    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
+// gfx/ibl.glsl -- shared image-based-lighting helpers.
+//
+// This file deliberately declares no uniforms, samplers or blocks besides
+// the plain ReflectionProbeData struct. Consumers place the GI descriptor
+// set at whatever index suits them and give the resources whatever names
+// they want, so every resource is passed in as a function parameter instead.
+// That also removes any dependence on include position.
+
+#include <gfx/brdf.glsl>  // fresnel_schlick_roughness
 
 /// Parallax-corrects a reflection vector against the probe's world-space AABB.
 vec3 ibl_parallax_correct(vec3 P, vec3 R, vec3 box_min, vec3 box_max, vec3 probe_pos) {
@@ -120,3 +118,5 @@ vec3 ibl_specular_probes_blended(
     vec3 probe_result = (total > 1e-4) ? (weighted_sum / max(total, 1e-4)) : vec3(0.0);
     return mix(sky_specular, probe_result, clamp(total, 0.0, 1.0));
 }
+
+#endif // GFX_IBL_GLSL

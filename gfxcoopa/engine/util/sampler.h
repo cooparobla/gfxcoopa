@@ -26,6 +26,7 @@ namespace util {
  * Factory methods:
  *   - Sampler::nearest() — pixel-perfect, no interpolation (for upscale pass)
  *   - Sampler::linear()  — bilinear filtering (for post-processing intermediates)
+ *   - Sampler::shadow()  — hardware depth-compare + PCF (for sampler2DShadow/samplerCubeShadow)
  */
 class Sampler {
 public:
@@ -42,12 +43,20 @@ public:
      *                      Defaults to NEAREST, matching every existing caller's expectations.
      *                      Pass LINEAR for smooth roughness-driven mip blending (e.g. a
      *                      prefiltered reflection cubemap).
+     * @param compare_op    Depth-compare op for shadow-map hardware PCF (sampler2DShadow /
+     *                      samplerCubeShadow in GLSL). Defaults to VK_COMPARE_OP_NEVER, which
+     *                      leaves compareEnable off (every existing caller's behavior). Pass
+     *                      VK_COMPARE_OP_GREATER via Sampler::shadow() to enable it: GLSL's
+     *                      `texture(sampler2DShadow, vec3(uv, ref))` evaluates `ref OP sampled`
+     *                      and bilinearly filters the per-tap compare *result*, not the raw
+     *                      depth -- see gfx/shadow_sampling.glsl's sampler2DShadow overloads.
      */
     Sampler(core::Device& device,
             VkFilter filter,
             VkSamplerAddressMode address_mode = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
             float max_lod = 0.0f,
-            VkSamplerMipmapMode mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST)
+            VkSamplerMipmapMode mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            VkCompareOp compare_op = VK_COMPARE_OP_NEVER)
         : device_(device)
     {
         VkSamplerCreateInfo info{};
@@ -60,7 +69,8 @@ public:
         info.addressModeW            = address_mode;
         info.mipLodBias              = 0.0f;
         info.anisotropyEnable        = VK_FALSE;
-        info.compareEnable           = VK_FALSE;
+        info.compareEnable           = compare_op != VK_COMPARE_OP_NEVER ? VK_TRUE : VK_FALSE;
+        info.compareOp               = compare_op;
         info.minLod                  = 0.0f;
         info.maxLod                  = max_lod;
         info.borderColor             = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
@@ -115,6 +125,24 @@ public:
      */
     static Sampler linear(core::Device& device) {
         return Sampler(device, VK_FILTER_LINEAR);
+    }
+
+    /**
+     * @brief Creates a hardware depth-compare sampler for shadow maps.
+     *
+     * Backs GLSL `sampler2DShadow`/`samplerCubeShadow`: the GPU compares the
+     * reference depth (third `texture()` coordinate) against the stored depth
+     * with VK_COMPARE_OP_GREATER *before* bilinearly filtering, so a single
+     * tap already averages a 2x2 neighbourhood of pass/fail results instead
+     * of returning one binary value. See gfx/shadow_sampling.glsl for the
+     * kernels that consume this.
+     *
+     * @param device Logical device.
+     * @return Linear, depth-compare-enabled Sampler.
+     */
+    static Sampler shadow(core::Device& device) {
+        return Sampler(device, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                       0.0f, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_COMPARE_OP_GREATER);
     }
 
 private:

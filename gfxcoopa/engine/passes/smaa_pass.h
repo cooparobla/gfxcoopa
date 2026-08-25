@@ -19,6 +19,7 @@
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/shader.h>
+#include <gfxcoopa/pipeline/shader_library.h>
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/engine/targets/offscreen_target.h>
 #include <gfxcoopa/engine/util/sampler.h>
@@ -54,7 +55,7 @@ public:
              coopa::gfx::command::CommandPool& cmd_pool,
              uint32_t width, uint32_t height,
              const util::Sampler& linear_sampler,
-             const std::string& shader_dir)
+             const coopa::gfx::pipeline::ShaderLibrary& shaders)
         : device_(device), allocator_(allocator), width_(width), height_(height)
     {
         smaa_textures_ = std::make_unique<util::SmaaTextures>(device, allocator, cmd_pool);
@@ -68,8 +69,8 @@ public:
         );
 
         // --- Stage 1: Edge Detection ---
-        edge_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shader_dir + "/smaa_edge.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
-        edge_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shader_dir + "/smaa_edge.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
+        edge_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shaders("smaa_edge.vert"), VK_SHADER_STAGE_VERTEX_BIT);
+        edge_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shaders("smaa_edge.frag"), VK_SHADER_STAGE_FRAGMENT_BIT);
 
         VkDescriptorSetLayoutBinding b0{};
         b0.binding = 0; b0.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; b0.descriptorCount = 1; b0.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -90,8 +91,8 @@ public:
         );
 
         // --- Stage 2: Blending Weight Calculation ---
-        blend_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shader_dir + "/smaa_blend.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
-        blend_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shader_dir + "/smaa_blend.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
+        blend_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shaders("smaa_blend.vert"), VK_SHADER_STAGE_VERTEX_BIT);
+        blend_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shaders("smaa_blend.frag"), VK_SHADER_STAGE_FRAGMENT_BIT);
 
         std::vector<VkDescriptorSetLayoutBinding> b_blend(3);
         b_blend[0].binding = 0; b_blend[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; b_blend[0].descriptorCount = 1; b_blend[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -115,8 +116,8 @@ public:
         blend_set_->bind_image(2, smaa_textures_->search_view(), smaa_textures_->sampler().handle());
 
         // --- Stage 3: Neighborhood Blending ---
-        neigh_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shader_dir + "/smaa_neighborhood.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
-        neigh_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shader_dir + "/smaa_neighborhood.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
+        neigh_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shaders("smaa_neighborhood.vert"), VK_SHADER_STAGE_VERTEX_BIT);
+        neigh_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shaders("smaa_neighborhood.frag"), VK_SHADER_STAGE_FRAGMENT_BIT);
 
         std::vector<VkDescriptorSetLayoutBinding> b_neigh(2);
         b_neigh[0].binding = 0; b_neigh[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; b_neigh[0].descriptorCount = 1; b_neigh[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;

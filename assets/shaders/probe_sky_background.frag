@@ -7,7 +7,7 @@
 // on the same attachment would just clear it away.
 
 #include "cubemap_faces.glsl"
-#include "sky.glsl"
+#include <gfx/sky.glsl>
 
 layout(location = 0) in  vec2 in_uv;
 layout(location = 0) out vec4 out_color;

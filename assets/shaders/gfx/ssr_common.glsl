@@ -1,7 +1,12 @@
-// ssr_common.glsl -- geometry helpers shared by the SSR raymarch and composite passes.
+#ifndef GFX_SSR_COMMON_GLSL
+#define GFX_SSR_COMMON_GLSL
+
+// gfx/ssr_common.glsl -- geometry helpers shared by the SSR raymarch,
+// SSAO, and composite passes.
 //
-// Declares no uniforms or samplers: ssr.frag and ssr_composite.frag bind the camera UBO at
-// different set indices, so every input here is a function parameter (same rule as ibl.glsl).
+// Declares no uniforms or samplers: includers bind the camera UBO at
+// different set indices, so every input here is a function parameter (same
+// rule as ibl.glsl).
 
 /// World-space size of one full-resolution screen texel at a given view-space depth.
 ///
@@ -32,3 +37,5 @@ float ssr_ggx_cone_tan(float roughness) {
     float cos_theta  = pow(0.244, 1.0 / (spec_power + 1.0));
     return sqrt(max(1.0 - cos_theta * cos_theta, 0.0)) / max(cos_theta, 1e-4);
 }
+
+#endif // GFX_SSR_COMMON_GLSL

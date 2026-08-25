@@ -20,7 +20,7 @@
 #include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/engine/util/sampler.h>
-#include <gfxcoopa/engine/gi/gi_system.h>
+#include <gfxcoopa/engine/passes/extra_sets.h>
 
 namespace coopa {
 namespace gfx {
@@ -36,12 +36,15 @@ public:
                          VkDescriptorSetLayout camera_layout,
                          VkDescriptorSetLayout light_layout,
                          VkDescriptorSetLayout shadow_layout,
-                         VkDescriptorSetLayout gi_layout,
                          const util::Sampler& linear_sampler,
                          const std::string& vert_spv,
-                         const std::string& frag_spv)
-        : device_(device)
+                         const std::string& frag_spv,
+                         ExtraSets extra = {},
+                         std::vector<VkPushConstantRange> pc_ranges = {})
+        : device_(device), extra_(std::move(extra))
     {
+        extra_.validate("DeferredLightingPass");
+
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
@@ -82,9 +85,14 @@ public:
             light_layout,
             shadow_layout
         };
-        if (gi_layout != VK_NULL_HANDLE) {
-            layouts.push_back(gi_layout);
-        }
+        // Never hardcode this index at the bind site -- it shifts if this pass ever gains
+        // another owned set ahead of the caller's extras. This is also the fix for the bug
+        // that used to live here: the gbuffer set index below was hardcoded to 4, which is
+        // wrong (should be 3) whenever `extra` is empty -- vkCmdBindDescriptorSets against a
+        // 4-set layout with firstSet=4 is a validation error and undefined behaviour.
+        extra_first_set_ = static_cast<uint32_t>(layouts.size());
+        layouts.insert(layouts.end(), extra_.layouts.begin(), extra_.layouts.end());
+        gbuffer_set_index_ = static_cast<uint32_t>(layouts.size());
         layouts.push_back(gbuffer_desc_layout_->handle());
 
         pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
@@ -94,7 +102,7 @@ public:
             std::vector<VkVertexInputAttributeDescription>{},
             layouts,
             cfg,
-            std::vector<VkPushConstantRange>{}
+            pc_ranges
         );
 
         (void)linear_sampler;
@@ -120,7 +128,6 @@ public:
               const coopa::gfx::pipeline::DescriptorSet& camera_set,
               const coopa::gfx::pipeline::DescriptorSet& light_set,
               const coopa::gfx::pipeline::DescriptorSet& shadow_set,
-              const gi::GiSystem* gi_system,
               uint32_t viewport_w, uint32_t viewport_h) const
     {
         cmd.bind_pipeline(*pipeline_);
@@ -130,10 +137,10 @@ public:
         cmd.bind_descriptor_set(pipeline_->layout(), camera_set, 0);
         cmd.bind_descriptor_set(pipeline_->layout(), light_set, 1);
         cmd.bind_descriptor_set(pipeline_->layout(), shadow_set, 2);
-        if (gi_system) {
-            gi_system->bind(cmd, pipeline_->layout());
+        if (extra_.bind) {
+            extra_.bind(cmd, pipeline_->layout(), extra_first_set_);
         }
-        cmd.bind_descriptor_set(pipeline_->layout(), *gbuffer_desc_set_, 4);
+        cmd.bind_descriptor_set(pipeline_->layout(), *gbuffer_desc_set_, gbuffer_set_index_);
 
         cmd.draw(3); // Fullscreen triangle
     }
@@ -151,6 +158,10 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      gbuffer_desc_pool_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       gbuffer_desc_set_;
     std::unique_ptr<coopa::gfx::pipeline::Pipeline>           pipeline_;
+
+    ExtraSets extra_;
+    uint32_t  extra_first_set_   = 0;
+    uint32_t  gbuffer_set_index_ = 0;
 };
 
 } // namespace passes

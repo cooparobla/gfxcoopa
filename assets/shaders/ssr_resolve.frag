@@ -1,6 +1,6 @@
 #version 450
 
-#include "ssr_common.glsl"
+#include <gfx/ssr_common.glsl>
 
 // Temporal resolve for the SSR raymarch output (rgb = confidence-premultiplied hit radiance,
 // a = confidence).

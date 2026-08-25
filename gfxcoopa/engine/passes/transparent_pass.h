@@ -29,6 +29,7 @@
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/engine/data/model_ubo.h>
+#include <gfxcoopa/engine/passes/extra_sets.h>
 #include <gfxcoopa/util/error.h>
 
 namespace coopa {
@@ -60,34 +61,50 @@ public:
      * @param camera_layout Set 0.
      * @param light_layout  Set 1.
      * @param shadow_layout Set 2.
-     * @param gi_layout     Set 3, if not VK_NULL_HANDLE.
      * @param vert_spv      Vertex shader (reuses pbr.vert.spv -- see plan/transparency docs).
      * @param frag_spv      Fragment shader (transparent.frag.spv).
+     * @param extra         Optional trailing sets (e.g. GI), appended after set 2.
+     * @param extra_pc_bytes Additional bytes to reserve past PushConstants' own
+     *                      [0, sizeof(PushConstants)) -- for a consumer whose transparent.frag
+     *                      needs frame-level data (e.g. toyengine's
+     *                      soft_lighting/light_bands/spec_threshold toggle) beyond the
+     *                      per-object material block this pass owns. Folded into ONE fragment-
+     *                      stage VkPushConstantRange, not a second one: the Vulkan spec forbids
+     *                      two ranges in the same pipeline layout sharing a stage, even with
+     *                      disjoint byte ranges. GLSL likewise permits only one push_constant
+     *                      block per stage, so such a consumer's shader declares ONE block
+     *                      spanning [0, sizeof(PushConstants) + extra_pc_bytes) and pushes into
+     *                      each region independently (this pass's own push() call handles
+     *                      [0, sizeof(PushConstants)); the caller issues its own
+     *                      cmd.push_constants() at [sizeof(PushConstants), ...) for the rest).
      */
     TransparentPass(coopa::gfx::core::Device& device,
                     VkFormat color_format,
                     VkDescriptorSetLayout camera_layout,
                     VkDescriptorSetLayout light_layout,
                     VkDescriptorSetLayout shadow_layout,
-                    VkDescriptorSetLayout gi_layout,
                     const std::string& vert_spv,
-                    const std::string& frag_spv)
-        : device_(device), color_format_(color_format)
+                    const std::string& frag_spv,
+                    ExtraSets extra = {},
+                    uint32_t extra_pc_bytes = 0)
+        : device_(device), color_format_(color_format), extra_(std::move(extra))
     {
+        extra_.validate("TransparentPass");
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
         create_render_pass_();
 
         std::vector<VkDescriptorSetLayout> layouts = { camera_layout, light_layout, shadow_layout };
-        if (gi_layout != VK_NULL_HANDLE) {
-            layouts.push_back(gi_layout);
-        }
+        extra_first_set_ = static_cast<uint32_t>(layouts.size());
+        layouts.insert(layouts.end(), extra_.layouts.begin(), extra_.layouts.end());
 
         VkPushConstantRange pc_range{};
         pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         pc_range.offset     = 0;
-        pc_range.size       = sizeof(PushConstants);
+        pc_range.size       = sizeof(PushConstants) + extra_pc_bytes;
+
+        std::vector<VkPushConstantRange> pc_ranges{pc_range};
 
         auto binding          = coopa::gfx::engine::data::Vertex::binding_description();
         auto instance_binding = coopa::gfx::engine::data::InstanceData::binding_description();
@@ -113,7 +130,7 @@ public:
             attr_vec,
             layouts,
             cfg,
-            std::vector<VkPushConstantRange>{pc_range}
+            pc_ranges
         );
     }
 
@@ -218,6 +235,14 @@ public:
         cmd.bind_pipeline(*pipeline_);
     }
 
+    /// Binds the caller's extra sets (e.g. GI), if any were provided at construction. Call
+    /// after bind(), alongside binding sets 0-2, before draws. A no-op when `extra` was empty.
+    void bind_extra(coopa::gfx::command::CommandBuffer& cmd) {
+        if (extra_.bind) {
+            extra_.bind(cmd, pipeline_->layout(), extra_first_set_);
+        }
+    }
+
     /** @brief Uploads per-batch material push constants. */
     void push(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& pc) {
         cmd.push_constants(pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
@@ -247,11 +272,19 @@ private:
         attachments[0].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         // 1: the G-Buffer's own depth image, read-only -- this pass tests against it but
-        // never writes it.
+        // never writes it. storeOp is DONT_CARE, not STORE: nothing here ever modifies depth
+        // (depth_write=false above, and the READ_ONLY layout disallows it regardless), so there
+        // is nothing to preserve -- and DONT_CARE matters beyond the pass itself: sync
+        // validation (VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT) models any
+        // depth/stencil attachment with storeOp=STORE as a WRITE access at vkCmdEndRenderPass
+        // regardless of the actual layout or pipeline state, which produced a false
+        // WRITE_AFTER_WRITE hazard for any barrier a caller issues afterward to read this same
+        // depth image again later in the frame (e.g. toyengine's PixelStylizePass usage, which
+        // samples it for outline detection right after this pass runs).
         attachments[1].format         = VK_FORMAT_D32_SFLOAT;
         attachments[1].samples        = VK_SAMPLE_COUNT_1_BIT;
         attachments[1].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
-        attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         attachments[1].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         attachments[1].initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
@@ -319,6 +352,9 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::Shader> vert_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Shader> frag_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> pipeline_;
+
+    ExtraSets extra_;
+    uint32_t  extra_first_set_ = 0;
 };
 
 } // namespace passes
