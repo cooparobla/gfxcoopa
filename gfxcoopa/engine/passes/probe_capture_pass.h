@@ -66,9 +66,9 @@ public:
 
     ProbeCapturePass(coopa::gfx::core::Device& device,
                      coopa::gfx::pipeline::RenderPass& face_pass,
-                     VkDescriptorSetLayout camera_layout,
-                     VkDescriptorSetLayout light_layout,
-                     VkDescriptorSetLayout brdf_layout,
+                     const coopa::gfx::pipeline::DescriptorSetLayout& camera_layout,
+                     const coopa::gfx::pipeline::DescriptorSetLayout& light_layout,
+                     const coopa::gfx::pipeline::DescriptorSetLayout& brdf_layout,
                      const coopa::gfx::pipeline::ShaderLibrary& shaders)
         : device_(device)
     {
@@ -78,25 +78,15 @@ public:
         sky_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(
             device, shaders("probe_sky_background.frag"), VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        coopa::gfx::pipeline::PipelineConfig sky_cfg{};
-        sky_cfg.cull_mode   = VK_CULL_MODE_NONE;
-        sky_cfg.depth_test  = false;
-        sky_cfg.depth_write = false;
+        coopa::gfx::pipeline::PipelineDesc sky_desc;
+        sky_desc.shaders = {sky_vert_.get(), sky_frag_.get()};
+        sky_desc.vertex  = coopa::gfx::VertexLayout::none();
+        sky_desc.raster.cull = coopa::gfx::CullMode::None;
+        sky_desc.depth.test  = false;
+        sky_desc.depth.write = false;
+        sky_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(SkyPushConstants)}};
 
-        VkPushConstantRange sky_pc_range{};
-        sky_pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        sky_pc_range.offset     = 0;
-        sky_pc_range.size       = sizeof(SkyPushConstants);
-
-        sky_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, face_pass,
-            std::vector<coopa::gfx::pipeline::Shader*>{sky_vert_.get(), sky_frag_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            std::vector<VkDescriptorSetLayout>{},
-            sky_cfg,
-            std::vector<VkPushConstantRange>{sky_pc_range}
-        );
+        sky_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, face_pass, sky_desc);
 
         // --- Geometry pipeline ---
         geom_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(
@@ -104,40 +94,21 @@ public:
         geom_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(
             device, shaders("probe_capture.frag"), VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        auto binding          = coopa::gfx::engine::data::Vertex::binding_description();
-        auto instance_binding = coopa::gfx::engine::data::InstanceData::binding_description();
-        std::vector<VkVertexInputBindingDescription> binding_vec = {binding, instance_binding};
-
-        auto attrs = coopa::gfx::engine::data::Vertex::attribute_descriptions();
-        std::vector<VkVertexInputAttributeDescription> attr_vec(attrs.begin(), attrs.end());
-        auto instance_attrs = coopa::gfx::engine::data::InstanceData::attribute_descriptions();
-        attr_vec.insert(attr_vec.end(), instance_attrs.begin(), instance_attrs.end());
-
-        coopa::gfx::pipeline::PipelineConfig geom_cfg{};
+        coopa::gfx::pipeline::PipelineDesc geom_desc;
+        geom_desc.shaders = {geom_vert_.get(), geom_frag_.get()};
+        geom_desc.vertex  = coopa::gfx::engine::data::Vertex::layout().append(
+            coopa::gfx::engine::data::InstanceData::layout());
         // CULL_MODE_NONE, not the main pass's back-face/CCW convention: this
         // render pass's projection deliberately omits the Vulkan Y-flip (see
         // targets::CubemapTarget::get_face_projection()), which mirrors framebuffer-
         // space winding relative to the main pass.
-        geom_cfg.cull_mode   = VK_CULL_MODE_NONE;
-        geom_cfg.depth_test  = true;
-        geom_cfg.depth_write = true;
+        geom_desc.raster.cull = coopa::gfx::CullMode::None;
+        geom_desc.depth.test  = true;
+        geom_desc.depth.write = true;
+        geom_desc.descriptor_layouts = {&camera_layout, &light_layout, &brdf_layout};
+        geom_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
 
-        VkPushConstantRange geom_pc_range{};
-        geom_pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        geom_pc_range.offset     = 0;
-        geom_pc_range.size       = sizeof(PushConstants);
-
-        std::vector<VkDescriptorSetLayout> geom_layouts = { camera_layout, light_layout, brdf_layout };
-
-        geom_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, face_pass,
-            std::vector<coopa::gfx::pipeline::Shader*>{geom_vert_.get(), geom_frag_.get()},
-            binding_vec,
-            attr_vec,
-            geom_layouts,
-            geom_cfg,
-            std::vector<VkPushConstantRange>{geom_pc_range}
-        );
+        geom_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, face_pass, geom_desc);
     }
 
     /// Binds the sky pipeline and draws a fullscreen triangle for one face.
@@ -146,8 +117,7 @@ public:
     void draw_sky_background(coopa::gfx::command::CommandBuffer& cmd, uint32_t face) const {
         cmd.bind_pipeline(*sky_pipeline_);
         SkyPushConstants pc{ static_cast<int32_t>(face) };
-        cmd.push_constants(sky_pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(SkyPushConstants), &pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
         cmd.draw(3);
     }
 
@@ -158,7 +128,7 @@ public:
     }
 
     void push(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& pc) const {
-        cmd.push_constants(geom_pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
     }
 
     VkPipelineLayout geometry_layout() const { return geom_pipeline_->layout(); }

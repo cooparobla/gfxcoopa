@@ -80,31 +80,22 @@ public:
         );
 
         // 4. Descriptor Set Layout (Set 0: Binding 0 input colour)
-        std::vector<VkDescriptorSetLayoutBinding> bindings = {
-            {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
-        };
-        desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, bindings);
+        desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
 
         // 5. Pipeline Configuration
-        coopa::gfx::pipeline::PipelineConfig cfg{};
-        cfg.cull_mode   = VK_CULL_MODE_NONE;
-        cfg.depth_test  = false;
-        cfg.depth_write = false;
+        coopa::gfx::pipeline::PipelineDesc desc;
+        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
+        desc.vertex  = coopa::gfx::VertexLayout::none();
+        desc.raster.cull = coopa::gfx::CullMode::None;
+        desc.depth.test  = false;
+        desc.depth.write = false;
+        desc.descriptor_layouts = {desc_layout_.get()};
+        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
 
-        VkPushConstantRange pc_range{};
-        pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        pc_range.offset     = 0;
-        pc_range.size       = sizeof(PushConstants);
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, *render_pass_,
-            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), frag_shader_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            std::vector<VkDescriptorSetLayout>{desc_layout_->handle()},
-            cfg,
-            std::vector<VkPushConstantRange>{pc_range}
-        );
+        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, *render_pass_, desc);
     }
 
     ~SceneColorMipPass() {
@@ -195,9 +186,7 @@ public:
 
         // Create Descriptor Pool & Descriptor Sets
         desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device_, mip_levels_,
-            std::vector<VkDescriptorPoolSize>{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, mip_levels_}}
-        );
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*desc_layout_, mip_levels_).build(device_));
 
         desc_sets_.resize(mip_levels_);
         for (uint32_t m = 0; m < mip_levels_; ++m) {
@@ -207,18 +196,21 @@ public:
         }
     }
 
-    void update_descriptors(VkImageView scene_color_view) {
+    void update_descriptors(coopa::gfx::TextureView scene_color_view) {
         if (mip_levels_ == 0) return;
         // Level 0 samples the deferred-lit HDR scene colour (post skybox).
-        desc_sets_[0]->bind_image(0, scene_color_view, sampler_->handle());
+        desc_sets_[0]->bind_image(0, scene_color_view, *sampler_);
 
-        // Level m >= 1 samples mip_views_[m-1]
+        // Level m >= 1 samples mip_views_[m-1] -- mip_views_ itself stays a raw
+        // std::vector<VkImageView> (part of the mip-chain machinery with no sealed
+        // equivalent), wrapped per-use via detail::wrap() since this is gfxcoopa's own
+        // internal code (the leak gate only scopes consumer repos).
         for (uint32_t m = 1; m < mip_levels_; ++m) {
-            desc_sets_[m]->bind_image(0, mip_views_[m - 1], sampler_->handle());
+            desc_sets_[m]->bind_image(0, coopa::gfx::detail::wrap(mip_views_[m - 1]), *sampler_);
         }
     }
 
-    void execute(coopa::gfx::command::CommandBuffer& cmd, VkImageView scene_color_view) {
+    void execute(coopa::gfx::command::CommandBuffer& cmd, coopa::gfx::TextureView scene_color_view) {
         update_descriptors(scene_color_view);
 
         // No pre-loop barrier for the source: the offscreen render pass's finalLayout is
@@ -235,7 +227,7 @@ public:
             pc.src_size      = (m == 0) ? glm::ivec2(width_, height_) : glm::ivec2(std::max(1u, width_ >> (m - 1)), std::max(1u, height_ >> (m - 1)));
             pc.is_first_pass = (m == 0) ? 1 : 0;
 
-            cmd.push_constants(pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
+            cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
 
             VkClearValue clear_val{};
             clear_val.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
@@ -254,7 +246,7 @@ public:
             cmd.set_viewport(0.0f, 0.0f, static_cast<float>(mw), static_cast<float>(mh));
             cmd.set_scissor(0, 0, mw, mh);
 
-            cmd.bind_descriptor_set(pipeline_->layout(), *desc_sets_[m], 0);
+            cmd.bind_descriptor_set(*desc_sets_[m], 0);
 
             cmd.draw(3);
 
@@ -287,6 +279,7 @@ public:
     }
 
     VkImageView full_view() const { return full_view_; }
+    coopa::gfx::TextureView full_view_typed() const { return coopa::gfx::detail::wrap(full_view_); }
     uint32_t max_mip_level() const { return mip_levels_ > 0 ? mip_levels_ - 1 : 0; }
     const util::Sampler& sampler() const { return *sampler_; }
 

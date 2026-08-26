@@ -44,31 +44,22 @@ public:
                      coopa::gfx::pipeline::RenderPass& prefilter_pass,
                      const std::string& vert_spv,
                      const std::string& frag_spv,
-                     VkDescriptorSetLayout source_layout)
+                     const coopa::gfx::pipeline::DescriptorSetLayout& source_layout)
         : device_(device)
     {
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        coopa::gfx::pipeline::PipelineConfig cfg{};
-        cfg.cull_mode   = VK_CULL_MODE_NONE;
-        cfg.depth_test  = false;
-        cfg.depth_write = false;
+        coopa::gfx::pipeline::PipelineDesc desc;
+        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
+        desc.vertex  = coopa::gfx::VertexLayout::none();
+        desc.raster.cull = coopa::gfx::CullMode::None;
+        desc.depth.test  = false;
+        desc.depth.write = false;
+        desc.descriptor_layouts = {&source_layout};
+        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
 
-        VkPushConstantRange pc_range{};
-        pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        pc_range.offset     = 0;
-        pc_range.size       = sizeof(PushConstants);
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, prefilter_pass,
-            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), frag_shader_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            std::vector<VkDescriptorSetLayout>{source_layout},
-            cfg,
-            std::vector<VkPushConstantRange>{pc_range}
-        );
+        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, prefilter_pass, desc);
     }
 
     /// GGX-prefilters mips 1..N-1 of target from source_set (a samplerCube
@@ -85,7 +76,7 @@ public:
         const float denom = static_cast<float>(mips - 1);
 
         cmd.bind_pipeline(*pipeline_);
-        cmd.bind_descriptor_set(pipeline_->layout(), source_set, 0);
+        cmd.bind_descriptor_set(source_set, 0);
         for (uint32_t f = 0; f < 6; ++f) {
             for (uint32_t m = 1; m < mips; ++m) { // mip 0 is the geometry capture
                 target.begin_face_mip_pass(cmd, f, m);
@@ -93,8 +84,7 @@ public:
                 PushConstants pc{};
                 pc.face      = static_cast<int32_t>(f);
                 pc.roughness = static_cast<float>(m) / denom;
-                cmd.push_constants(pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(PushConstants), &pc);
+                cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
 
                 cmd.draw(3);
                 target.end_face_pass(cmd);

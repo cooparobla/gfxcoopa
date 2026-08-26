@@ -75,61 +75,36 @@ public:
         dir_vert_ = std::make_unique<pipeline::Shader>(device, dir_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         dir_frag_ = std::make_unique<pipeline::Shader>(device, dir_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        auto binding = data::Vertex::binding_description();
-        auto instance_binding = data::InstanceData::binding_description();
-        std::vector<VkVertexInputBindingDescription> binding_vec = {binding, instance_binding};
+        // Shadow depth shaders only consume position (location 0) from the per-vertex stream,
+        // plus the per-instance model matrix (locations 4-7) -- a position-only binding-0 layout
+        // (built here, not via data::Vertex::layout(), which declares all four of its
+        // position/normal/uv/tangent attributes) eliminates validation warnings about unconsumed
+        // locations 1/2/3 for normal, uv, and tangent.
+        coopa::gfx::VertexLayout vertex_layout;
+        vertex_layout.binding(0, sizeof(data::Vertex));
+        vertex_layout.attribute(0, coopa::gfx::Format::RGB32_Sfloat,
+                                static_cast<uint32_t>(offsetof(data::Vertex, position)));
+        vertex_layout.append(data::InstanceData::layout());
 
-        // Shadow depth shaders only consume position (location 0) from the
-        // per-vertex stream, plus the per-instance model matrix (locations
-        // 4-7). Providing only that eliminates validation warnings about
-        // unconsumed locations 1/2/3 for normal, uv, and tangent.
-        std::vector<VkVertexInputAttributeDescription> attr_vec = {{
-            .location = 0,
-            .binding  = 0,
-            .format   = VK_FORMAT_R32G32B32_SFLOAT,
-            .offset   = offsetof(data::Vertex, position)
-        }};
-        auto instance_attrs = data::InstanceData::attribute_descriptions();
-        attr_vec.insert(attr_vec.end(), instance_attrs.begin(), instance_attrs.end());
+        pipeline::PipelineDesc desc;
+        desc.vertex = vertex_layout;
+        desc.raster.cull = coopa::gfx::CullMode::None;
+        desc.depth.test  = true;
+        desc.depth.write = true;
 
-        pipeline::PipelineConfig cfg{};
-        cfg.cull_mode   = VK_CULL_MODE_NONE;
-        cfg.depth_test  = true;
-        cfg.depth_write = true;
-
-        VkPushConstantRange dir_pc{};
-        dir_pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        dir_pc.offset     = 0;
-        dir_pc.size       = sizeof(DirectionalShadowPushConstants);
-
-        dir_pipeline_ = std::make_unique<pipeline::Pipeline>(
-            device, dir_pass,
-            std::vector<pipeline::Shader*>{dir_vert_.get(), dir_frag_.get()},
-            binding_vec,
-            attr_vec,
-            std::vector<VkDescriptorSetLayout>{},
-            cfg,
-            std::vector<VkPushConstantRange>{dir_pc}
-        );
+        desc.shaders = {dir_vert_.get(), dir_frag_.get()};
+        desc.push_constants = {{coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment,
+                                0, sizeof(DirectionalShadowPushConstants)}};
+        dir_pipeline_ = std::make_unique<pipeline::Pipeline>(device, dir_pass, desc);
 
         // 2. Cube Shadow Pipeline
         cube_vert_ = std::make_unique<pipeline::Shader>(device, cube_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         cube_frag_ = std::make_unique<pipeline::Shader>(device, cube_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        VkPushConstantRange cube_pc{};
-        cube_pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        cube_pc.offset     = 0;
-        cube_pc.size       = sizeof(CubeShadowPushConstants);
-
-        cube_pipeline_ = std::make_unique<pipeline::Pipeline>(
-            device, cube_pass,
-            std::vector<pipeline::Shader*>{cube_vert_.get(), cube_frag_.get()},
-            binding_vec,
-            attr_vec,
-            std::vector<VkDescriptorSetLayout>{},
-            cfg,
-            std::vector<VkPushConstantRange>{cube_pc}
-        );
+        desc.shaders = {cube_vert_.get(), cube_frag_.get()};
+        desc.push_constants = {{coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment,
+                                0, sizeof(CubeShadowPushConstants)}};
+        cube_pipeline_ = std::make_unique<pipeline::Pipeline>(device, cube_pass, desc);
     }
 
     void bind_directional(command::CommandBuffer& cmd) const {
@@ -137,7 +112,7 @@ public:
     }
 
     void push_directional(command::CommandBuffer& cmd, const DirectionalShadowPushConstants& pc) const {
-        cmd.push_constants(dir_pipeline_->layout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(DirectionalShadowPushConstants), &pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, pc);
     }
 
     void bind_cube(command::CommandBuffer& cmd) const {
@@ -145,7 +120,7 @@ public:
     }
 
     void push_cube(command::CommandBuffer& cmd, const CubeShadowPushConstants& pc) const {
-        cmd.push_constants(cube_pipeline_->layout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(CubeShadowPushConstants), &pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, pc);
     }
 
 private:

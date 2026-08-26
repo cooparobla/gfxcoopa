@@ -75,54 +75,42 @@ public:
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        std::vector<VkDescriptorSetLayoutBinding> bindings;
+        coopa::gfx::pipeline::DescriptorLayoutBuilder layout_builder;
         for (uint32_t i = 0; i < 4; ++i) {
-            VkDescriptorSetLayoutBinding b{};
-            b.binding         = i;
-            b.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            b.descriptorCount = 1;
-            b.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
-            bindings.push_back(b);
+            layout_builder.combined_sampler(i, coopa::gfx::ShaderStage::Fragment);
         }
-        desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, bindings);
+        desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(layout_builder.build(device));
         desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device, 1, std::vector<VkDescriptorPoolSize>{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4}});
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*desc_layout_, 1).build(device));
         desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *desc_layout_);
 
-        coopa::gfx::pipeline::PipelineConfig cfg{};
-        cfg.cull_mode   = VK_CULL_MODE_NONE;
-        cfg.depth_test  = false;
-        cfg.depth_write = false;
+        coopa::gfx::pipeline::PipelineDesc desc;
+        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
+        desc.vertex  = coopa::gfx::VertexLayout::none();
+        desc.raster.cull = coopa::gfx::CullMode::None;
+        desc.depth.test  = false;
+        desc.depth.write = false;
+        desc.descriptor_layouts = {desc_layout_.get()};
+        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
 
-        VkPushConstantRange pc_range{};
-        pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        pc_range.offset     = 0;
-        pc_range.size       = sizeof(PushConstants);
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, target_pass,
-            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), frag_shader_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            std::vector<VkDescriptorSetLayout>{desc_layout_->handle()},
-            cfg,
-            std::vector<VkPushConstantRange>{pc_range});
+        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, target_pass, desc);
     }
 
     PixelStylizePass(const PixelStylizePass&) = delete;
     PixelStylizePass& operator=(const PixelStylizePass&) = delete;
 
-    void set_source_images(VkImageView scene_color, VkImageView scene_depth, VkImageView scene_normal,
-                           VkImageView palette_lut, const coopa::gfx::engine::util::Sampler& linear_sampler,
+    void set_source_images(coopa::gfx::TextureView scene_color, coopa::gfx::TextureView scene_depth,
+                           coopa::gfx::TextureView scene_normal, coopa::gfx::TextureView palette_lut,
+                           const coopa::gfx::engine::util::Sampler& linear_sampler,
                            const coopa::gfx::engine::util::Sampler& nearest_sampler) {
         // scene_depth/scene_normal use the nearest sampler, not linear: the outline edge
         // detector's taps need exact texel values (linear filtering would blend across the
         // very discontinuities it's looking for), and linear filtering of a D32_SFLOAT depth
         // image is an optional Vulkan format feature that isn't queried anywhere in this engine.
-        desc_set_->bind_image(0, scene_color, linear_sampler.handle());
-        desc_set_->bind_image(1, scene_depth, nearest_sampler.handle());
-        desc_set_->bind_image(2, scene_normal, nearest_sampler.handle());
-        desc_set_->bind_image(3, palette_lut, nearest_sampler.handle());
+        desc_set_->bind_image(0, scene_color, linear_sampler);
+        desc_set_->bind_image(1, scene_depth, nearest_sampler);
+        desc_set_->bind_image(2, scene_normal, nearest_sampler);
+        desc_set_->bind_image(3, palette_lut, nearest_sampler);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& params,
@@ -130,8 +118,8 @@ public:
         cmd.bind_pipeline(*pipeline_);
         cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
         cmd.set_scissor(0, 0, viewport_w, viewport_h);
-        cmd.bind_descriptor_set(pipeline_->layout(), *desc_set_, 0);
-        cmd.push_constants(pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &params);
+        cmd.bind_descriptor_set(*desc_set_, 0);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, params);
         cmd.draw(3);
     }
 

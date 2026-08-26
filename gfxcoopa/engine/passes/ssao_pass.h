@@ -101,7 +101,7 @@ public:
     SsaoPass(coopa::gfx::core::Device& device,
              coopa::gfx::memory::Allocator& allocator,
              coopa::gfx::command::CommandPool& cmd_pool,
-             VkDescriptorSetLayout camera_layout,
+             const coopa::gfx::pipeline::DescriptorSetLayout& camera_layout,
              const std::string& vert_spv,
              const std::string& raw_frag_spv,
              const std::string& resolve_frag_spv,
@@ -115,8 +115,12 @@ public:
         // All three targets hold an occlusion mask, not colour to be filtered -- NEAREST
         // throughout (the resolve pass's history read uses the caller's linear_sampler instead,
         // since it samples at a reprojected, non-texel-aligned UV).
-        raw_sampler_  = std::make_unique<util::Sampler>(device, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-        blur_sampler_ = std::make_unique<util::Sampler>(device, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        coopa::gfx::SamplerDesc nearest_clamp;
+        nearest_clamp.min = nearest_clamp.mag = coopa::gfx::Filter::Nearest;
+        nearest_clamp.mipmap  = coopa::gfx::MipmapMode::Nearest;
+        nearest_clamp.address = coopa::gfx::AddressMode::ClampToEdge;
+        raw_sampler_  = std::make_unique<util::Sampler>(device, nearest_clamp);
+        blur_sampler_ = std::make_unique<util::Sampler>(device, nearest_clamp);
 
         vert_shader_       = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         raw_frag_shader_   = std::make_unique<coopa::gfx::pipeline::Shader>(device, raw_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -137,23 +141,18 @@ public:
 
         // Set 1 for the raw pass (Set 0 is the caller's reused camera layout): G1 normal,
         // G2 position, noise texture, kernel UBO.
-        std::vector<VkDescriptorSetLayoutBinding> raw_bindings = {
-            {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-        };
-        raw_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, raw_bindings);
+        raw_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
+                .uniform_buffer(3, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
         raw_desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device, 1,
-            std::vector<VkDescriptorPoolSize>{
-                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3},
-                {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}
-            }
-        );
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*raw_desc_layout_, 1).build(device));
         raw_desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *raw_desc_pool_, *raw_desc_layout_);
         raw_desc_set_->bind_buffer(3, kernel_->buffer());
-        raw_desc_set_->bind_image(2, noise_->view(), noise_->sampler().handle());
+        raw_desc_set_->bind_image(2, noise_->view_typed(), noise_->sampler());
         // Bindings 0/1 (G1/G2) are rebound every resize via update_descriptors(), the same
         // reason DeferredLightingPass::set_gbuffer_images() is called after every recreate() in
         // pbr_render_pipeline.h.
@@ -161,79 +160,51 @@ public:
         // Set 0 for the resolve pass (no camera set needed -- reprojection uses the prev_view_proj
         // push constant, matching SsrPass's resolve set): current raw AO, history AO, G2 position,
         // G1 normal (background early-out).
-        std::vector<VkDescriptorSetLayoutBinding> resolve_bindings = {
-            {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-        };
-        resolve_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, resolve_bindings);
+        resolve_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(3, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
         resolve_desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device, 1, std::vector<VkDescriptorPoolSize>{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4}}
-        );
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*resolve_desc_layout_, 1).build(device));
         resolve_desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *resolve_desc_pool_, *resolve_desc_layout_);
 
         // Set 0 for the blur pass: resolved AO, G1 normal, G2 position (bilateral weights).
-        std::vector<VkDescriptorSetLayoutBinding> blur_bindings = {
-            {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-        };
-        blur_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, blur_bindings);
+        blur_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
         blur_desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device, 1, std::vector<VkDescriptorPoolSize>{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3}}
-        );
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*blur_desc_layout_, 1).build(device));
         blur_desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *blur_desc_pool_, *blur_desc_layout_);
 
-        coopa::gfx::pipeline::PipelineConfig cfg{};
-        cfg.cull_mode   = VK_CULL_MODE_NONE;
-        cfg.depth_test  = false;
-        cfg.depth_write = false;
+        coopa::gfx::pipeline::PipelineDesc common_desc;
+        common_desc.vertex = coopa::gfx::VertexLayout::none();
+        common_desc.raster.cull = coopa::gfx::CullMode::None;
+        common_desc.depth.test  = false;
+        common_desc.depth.write = false;
 
-        VkPushConstantRange raw_pc_range{};
-        raw_pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        raw_pc_range.offset     = 0;
-        raw_pc_range.size       = sizeof(PushConstants);
+        coopa::gfx::pipeline::PipelineDesc raw_desc = common_desc;
+        raw_desc.shaders = {vert_shader_.get(), raw_frag_shader_.get()};
+        raw_desc.descriptor_layouts = {&camera_layout, raw_desc_layout_.get()};
+        raw_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
+        raw_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, *raw_render_pass_, raw_desc);
 
-        raw_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, *raw_render_pass_,
-            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), raw_frag_shader_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            std::vector<VkDescriptorSetLayout>{camera_layout, raw_desc_layout_->handle()},
-            cfg,
-            std::vector<VkPushConstantRange>{raw_pc_range}
-        );
+        coopa::gfx::pipeline::PipelineDesc resolve_desc = common_desc;
+        resolve_desc.shaders = {vert_shader_.get(), resolve_frag_shader_.get()};
+        resolve_desc.descriptor_layouts = {resolve_desc_layout_.get()};
+        resolve_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(ResolvePushConstants)}};
+        resolve_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, *resolve_render_pass_, resolve_desc);
 
-        VkPushConstantRange resolve_pc_range{};
-        resolve_pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        resolve_pc_range.offset     = 0;
-        resolve_pc_range.size       = sizeof(ResolvePushConstants);
-
-        resolve_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, *resolve_render_pass_,
-            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), resolve_frag_shader_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            std::vector<VkDescriptorSetLayout>{resolve_desc_layout_->handle()},
-            cfg,
-            std::vector<VkPushConstantRange>{resolve_pc_range}
-        );
-
-        VkPushConstantRange blur_pc_range{};
-        blur_pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        blur_pc_range.offset     = 0;
-        blur_pc_range.size       = sizeof(BlurPushConstants);
-
-        blur_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, *blur_render_pass_,
-            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), blur_frag_shader_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            std::vector<VkDescriptorSetLayout>{blur_desc_layout_->handle()},
-            cfg,
-            std::vector<VkPushConstantRange>{blur_pc_range}
-        );
+        coopa::gfx::pipeline::PipelineDesc blur_desc = common_desc;
+        blur_desc.shaders = {vert_shader_.get(), blur_frag_shader_.get()};
+        blur_desc.descriptor_layouts = {blur_desc_layout_.get()};
+        blur_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(BlurPushConstants)}};
+        blur_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, *blur_render_pass_, blur_desc);
     }
 
     ~SsaoPass() {
@@ -269,23 +240,27 @@ public:
         );
         history_initialized_ = false;
 
-        resolve_desc_set_->bind_image(0, raw_view_, raw_sampler_->handle());
-        blur_desc_set_->bind_image(0, resolved_view_, raw_sampler_->handle());
+        // raw_view_/resolved_view_ stay raw VkImageView (part of the render-target-triple
+        // machinery with no sealed equivalent -- see create_target_()'s doc), wrapped per-use
+        // via detail::wrap() since this is gfxcoopa's own internal code.
+        resolve_desc_set_->bind_image(0, coopa::gfx::detail::wrap(raw_view_), *raw_sampler_);
+        blur_desc_set_->bind_image(0, coopa::gfx::detail::wrap(resolved_view_), *raw_sampler_);
     }
 
     /// g1_view/g2_view: the live G-Buffer normal/position views (rebound every resize).
     /// linear_sampler: used only for the resolve pass's history read, which samples at a
     /// reprojected (non-texel-aligned) UV -- everything else here stays NEAREST.
-    void update_descriptors(VkImageView g1_view, VkImageView g2_view, const util::Sampler& linear_sampler) {
-        raw_desc_set_->bind_image(0, g1_view, linear_sampler.handle());
-        raw_desc_set_->bind_image(1, g2_view, linear_sampler.handle());
+    void update_descriptors(coopa::gfx::TextureView g1_view, coopa::gfx::TextureView g2_view,
+                            const util::Sampler& linear_sampler) {
+        raw_desc_set_->bind_image(0, g1_view, linear_sampler);
+        raw_desc_set_->bind_image(1, g2_view, linear_sampler);
 
-        resolve_desc_set_->bind_image(1, history_image_->view(), linear_sampler.handle());
-        resolve_desc_set_->bind_image(2, g2_view, raw_sampler_->handle());
-        resolve_desc_set_->bind_image(3, g1_view, raw_sampler_->handle());
+        resolve_desc_set_->bind_image(1, history_image_->view_typed(), linear_sampler);
+        resolve_desc_set_->bind_image(2, g2_view, *raw_sampler_);
+        resolve_desc_set_->bind_image(3, g1_view, *raw_sampler_);
 
-        blur_desc_set_->bind_image(1, g1_view, raw_sampler_->handle());
-        blur_desc_set_->bind_image(2, g2_view, raw_sampler_->handle());
+        blur_desc_set_->bind_image(1, g1_view, *raw_sampler_);
+        blur_desc_set_->bind_image(2, g2_view, *raw_sampler_);
     }
 
     void execute(coopa::gfx::command::CommandBuffer& cmd,
@@ -335,8 +310,8 @@ public:
         cmd.set_viewport(0.0f, 0.0f, static_cast<float>(width_), static_cast<float>(height_));
         cmd.set_scissor(0, 0, width_, height_);
         cmd.bind_pipeline(*raw_pipeline_);
-        cmd.bind_descriptor_set(raw_pipeline_->layout(), camera_set, 0);
-        cmd.bind_descriptor_set(raw_pipeline_->layout(), *raw_desc_set_, 1);
+        cmd.bind_descriptor_set(camera_set, 0);
+        cmd.bind_descriptor_set(*raw_desc_set_, 1);
 
         PushConstants raw_pc{};
         raw_pc.radius         = params.radius;
@@ -346,7 +321,7 @@ public:
         raw_pc.noise_scale_x  = params.noise_scale_x;
         raw_pc.noise_scale_y  = params.noise_scale_y;
         raw_pc.noise_rotation = params.temporal_enabled ? params.noise_rotation : 0;
-        cmd.push_constants(raw_pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &raw_pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, raw_pc);
         cmd.draw(3);
 
         cmd.end_render_pass();
@@ -381,7 +356,7 @@ public:
         cmd.set_viewport(0.0f, 0.0f, static_cast<float>(width_), static_cast<float>(height_));
         cmd.set_scissor(0, 0, width_, height_);
         cmd.bind_pipeline(*resolve_pipeline_);
-        cmd.bind_descriptor_set(resolve_pipeline_->layout(), *resolve_desc_set_, 0);
+        cmd.bind_descriptor_set(*resolve_desc_set_, 0);
 
         ResolvePushConstants resolve_pc{};
         resolve_pc.prev_view_proj = params.prev_view_proj;
@@ -392,7 +367,7 @@ public:
         // (prev_view_proj_valid) must exist -- the matrix lags the image by a frame on a
         // fresh-start/resize, so ANDing avoids reprojecting with a stale/identity matrix.
         resolve_pc.history_valid = (history_initialized_ && params.prev_view_proj_valid) ? 1 : 0;
-        cmd.push_constants(resolve_pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(ResolvePushConstants), &resolve_pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, resolve_pc);
         cmd.draw(3);
 
         cmd.end_render_pass();
@@ -419,11 +394,11 @@ public:
         cmd.set_viewport(0.0f, 0.0f, static_cast<float>(width_), static_cast<float>(height_));
         cmd.set_scissor(0, 0, width_, height_);
         cmd.bind_pipeline(*blur_pipeline_);
-        cmd.bind_descriptor_set(blur_pipeline_->layout(), *blur_desc_set_, 0);
+        cmd.bind_descriptor_set(*blur_desc_set_, 0);
 
         BlurPushConstants blur_pc{};
         blur_pc.radius = params.radius;
-        cmd.push_constants(blur_pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(BlurPushConstants), &blur_pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, blur_pc);
         cmd.draw(3);
 
         cmd.end_render_pass();
@@ -433,6 +408,7 @@ public:
     }
 
     VkImageView output_view() const { return blur_view_; }
+    coopa::gfx::TextureView output_view_typed() const { return coopa::gfx::detail::wrap(blur_view_); }
     const util::Sampler& sampler() const { return *blur_sampler_; }
 
     /// A permanent 1x1 texel = 255 (fully unoccluded) texture, valid from construction and never
@@ -441,6 +417,7 @@ public:
     /// actually running, so binding it unconditionally would read an image still sitting in
     /// VK_IMAGE_LAYOUT_UNDEFINED on the very first disabled frame.
     VkImageView neutral_view() const { return neutral_image_->view(); }
+    coopa::gfx::TextureView neutral_view_typed() const { return neutral_image_->view_typed(); }
 
     /// Drops the accumulated temporal history. Call when execute() is skipped for a frame (SSAO
     /// disabled) -- otherwise the next re-enabled frame's resolve pass blends against AO captured
@@ -542,7 +519,7 @@ private:
     void create_neutral_texture_(coopa::gfx::command::CommandPool& cmd_pool) {
         uint8_t white = 255;
         neutral_image_ = coopa::gfx::memory::upload_image_2d(
-            device_, allocator_, cmd_pool, &white, 1, 1, VK_FORMAT_R8_UNORM, 1);
+            device_, allocator_, cmd_pool, &white, 1, 1, coopa::gfx::Format::R8_Unorm, 1);
     }
 
     void create_target_(VkImage& image, VmaAllocation& allocation, VkImageView& view,

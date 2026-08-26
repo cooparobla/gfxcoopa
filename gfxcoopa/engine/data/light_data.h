@@ -9,7 +9,6 @@
 #ifndef GFXCOOPA_ENGINE_DATA_LIGHT_DATA_H
 #define GFXCOOPA_ENGINE_DATA_LIGHT_DATA_H
 
-#include <volk/volk.h>
 #include <glm/glm.hpp>
 #include <memory>
 
@@ -96,7 +95,7 @@ public:
     }
 
     /**
-     * @brief Returns the underlying VkBuffer for descriptor binding.
+     * @brief Returns the underlying uniform buffer for descriptor binding.
      */
     const memory::Buffer& buffer() const { return buffer_; }
 

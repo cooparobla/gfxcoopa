@@ -148,7 +148,7 @@ public:
      */
     SsrPass(coopa::gfx::core::Device& device,
             coopa::gfx::memory::Allocator& allocator,
-            VkDescriptorSetLayout camera_layout,
+            const coopa::gfx::pipeline::DescriptorSetLayout& camera_layout,
             uint32_t width,
             uint32_t height,
             const std::string& ssr_vert_spv,
@@ -178,30 +178,28 @@ public:
         // a texel center, so a LINEAR sampler bilinearly blends world positions/normals across
         // silhouette edges into values that exist on no real surface -- a direct source of
         // edge speckle. The G-buffer is discrete per-pixel data; it should never be smoothed.
-        nearest_sampler_ = std::make_unique<util::Sampler>(
-            device, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
-        );
+        nearest_sampler_ = std::make_unique<util::Sampler>(device, nearest_clamp_desc());
 
         // 1. Create Offscreen Targets. target_/resolved_target_/history_image_ run at trace
         // resolution (full res, or half under ssr_half_res); composite_target_ always runs at
         // full screen resolution and bilaterally upsamples the resolved SSR buffer into it.
         target_ = std::make_unique<targets::OffscreenTarget>(
-            device, allocator, trace_width_, trace_height_, VK_FORMAT_R16G16B16A16_SFLOAT, VK_SAMPLE_COUNT_1_BIT
+            device, allocator, trace_width_, trace_height_, coopa::gfx::Format::RGBA16_Sfloat, coopa::gfx::SampleCount::X1
         );
         composite_target_ = std::make_unique<targets::OffscreenTarget>(
-            device, allocator, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, VK_SAMPLE_COUNT_1_BIT
+            device, allocator, width, height, coopa::gfx::Format::RGBA16_Sfloat, coopa::gfx::SampleCount::X1
         );
         // Temporal resolve output: the raymarch result (target_) blended with history, read
         // by the composite pass in place of the raw raymarch output.
         resolved_target_ = std::make_unique<targets::OffscreenTarget>(
-            device, allocator, trace_width_, trace_height_, VK_FORMAT_R16G16B16A16_SFLOAT, VK_SAMPLE_COUNT_1_BIT
+            device, allocator, trace_width_, trace_height_, coopa::gfx::Format::RGBA16_Sfloat, coopa::gfx::SampleCount::X1
         );
 
         // Spatial denoise output (see blur_frag_spv's doc) -- same shape/resolution as
         // resolved_target_, since it blurs that buffer in place, one pass later.
         if (blur_enabled_) {
             blurred_target_ = std::make_unique<targets::OffscreenTarget>(
-                device, allocator, trace_width_, trace_height_, VK_FORMAT_R16G16B16A16_SFLOAT, VK_SAMPLE_COUNT_1_BIT
+                device, allocator, trace_width_, trace_height_, coopa::gfx::Format::RGBA16_Sfloat, coopa::gfx::SampleCount::X1
             );
         }
 
@@ -229,61 +227,56 @@ public:
         // 3. Descriptor Set Layouts
         // G-Buffer layout (3 images: G0, G1, G2) for the SSR raymarch set -- it no longer reads
         // G_depth (Hi-Z supplies depth).
-        std::vector<VkDescriptorSetLayoutBinding> gbuf3_bindings;
-        for (uint32_t i = 0; i < 3; ++i) {
-            VkDescriptorSetLayoutBinding b{};
-            b.binding         = i;
-            b.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            b.descriptorCount = 1;
-            b.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
-            gbuf3_bindings.push_back(b);
-        }
-        gbuf3_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, gbuf3_bindings);
+        gbuf3_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
 
         // Composite G-buffer layout: same G0-G2 plus an SSAO sampler (binding 3), so the
         // composite can attenuate the SSR/env delta by the same ao * ssao term
         // deferred_lighting.frag applies to indirect_specular (see ssr_composite.frag).
-        std::vector<VkDescriptorSetLayoutBinding> comp_gbuf_bindings = gbuf3_bindings;
-        {
-            VkDescriptorSetLayoutBinding b{};
-            b.binding         = 3;
-            b.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            b.descriptorCount = 1;
-            b.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
-            comp_gbuf_bindings.push_back(b);
-        }
-        comp_gbuf_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, comp_gbuf_bindings);
+        comp_gbuf_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(3, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
 
         // Single image sampler layouts
-        std::vector<VkDescriptorSetLayoutBinding> single_img = {
-            {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
-        };
-        hiz_layout_         = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, single_img);
-        scene_color_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, single_img);
-        raw_ssr_layout_     = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, single_img);
+        hiz_layout_         = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder().combined_sampler(0, coopa::gfx::ShaderStage::Fragment).build(device));
+        scene_color_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder().combined_sampler(0, coopa::gfx::ShaderStage::Fragment).build(device));
+        raw_ssr_layout_     = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder().combined_sampler(0, coopa::gfx::ShaderStage::Fragment).build(device));
 
         // Secondary trace source (see set_secondary_source()) -- normal+position (2 bindings,
         // no albedo/AO: matches SsrPass::trace_gbuffer_layout()'s own trace-only subset, not
         // the full 3-binding G-buffer layout used elsewhere in this pass), plus its own Hi-Z
-        // and scene-colour-mip single-image layouts (same shape as single_img above, separate
+        // and scene-colour-mip single-image layouts (same shape as hiz_layout_ above, separate
         // instances since they're bound to a DIFFERENT image at runtime).
-        std::vector<VkDescriptorSetLayoutBinding> secondary_gbuf2_bindings = {
-            {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
-        };
-        secondary_gbuf2_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, secondary_gbuf2_bindings);
-        hiz_b_layout_           = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, single_img);
-        scene_color_b_layout_   = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, single_img);
+        secondary_gbuf2_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
+        hiz_b_layout_           = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder().combined_sampler(0, coopa::gfx::ShaderStage::Fragment).build(device));
+        scene_color_b_layout_   = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder().combined_sampler(0, coopa::gfx::ShaderStage::Fragment).build(device));
 
         // Blur pass layout: matches ssr_blur.frag's set 0 exactly -- 0 = the buffer being
         // blurred (resolved_target_), 1/2 = G-buffer normal/position for the edge-aware weights.
-        std::vector<VkDescriptorSetLayoutBinding> blur_bindings = {
-            {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
-        };
         if (blur_enabled_) {
-            blur_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, blur_bindings);
+            blur_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+                coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                    .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                    .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                    .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
+                    .build(device));
         }
 
         // Composite scene-colour layout: binding 0 = raw full-res scene colour (the surface
@@ -292,30 +285,33 @@ public:
         // simply never samples binding 1 -- Vulkan doesn't require every declared binding to be
         // read -- but the descriptor is still always written (see update_descriptors()), since
         // an unwritten descriptor in a bound set is undefined behaviour even if unsampled.
-        std::vector<VkDescriptorSetLayoutBinding> comp_scene_color_bindings = {
-            {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
-        };
-        comp_scene_color_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, comp_scene_color_bindings);
+        comp_scene_color_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
 
         // Resolve pass layout: 0 = current raymarch output, 1 = history, 2 = G2 world position
         // (the reprojection source -- G2 already stores world position, so no motion-vector
         // attachment is needed anywhere in the engine).
-        std::vector<VkDescriptorSetLayoutBinding> resolve_bindings = {
-            {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
-        };
-        resolve_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, resolve_bindings);
+        resolve_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
 
-        // 4. Descriptor Pool (10 sets / 19 combined-image-sampler descriptors used, 11/22 when
-        // blur_enabled_; sized with headroom either way)
-        desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device, 14,
-            std::vector<VkDescriptorPoolSize>{
-                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 30}
-            }
-        );
+        // 4. Descriptor Pool -- sizes derived from the layouts above (10 sets, 11 when
+        // blur_enabled_) rather than hand-computed headroom.
+        coopa::gfx::pipeline::DescriptorPoolBuilder pool_builder;
+        pool_builder.add_sets(*gbuf3_layout_, 1).add_sets(*hiz_layout_, 1).add_sets(*scene_color_layout_, 1)
+            .add_sets(*resolve_layout_, 1).add_sets(*comp_gbuf_layout_, 1).add_sets(*raw_ssr_layout_, 1)
+            .add_sets(*comp_scene_color_layout_, 1).add_sets(*secondary_gbuf2_layout_, 1)
+            .add_sets(*hiz_b_layout_, 1).add_sets(*scene_color_b_layout_, 1);
+        if (blur_enabled_) {
+            pool_builder.add_sets(*blur_layout_, 1);
+        }
+        desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(pool_builder.build(device));
 
         // Allocate Descriptor Sets
         ssr_gbuf_set_    = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *gbuf3_layout_);
@@ -355,111 +351,72 @@ public:
 
             uint16_t zero_half4[4] = {0, 0, 0, 0}; // IEEE-754 half-float zero bit pattern is all-zero bytes
             zero_rgba_ = coopa::gfx::memory::upload_image_2d(
-                device, allocator, one_shot_pool, zero_half4, 1, 1, VK_FORMAT_R16G16B16A16_SFLOAT, 8);
+                device, allocator, one_shot_pool, zero_half4, 1, 1, coopa::gfx::Format::RGBA16_Sfloat, 8);
 
             float far_depth = 1.0f;
             one_r32_ = coopa::gfx::memory::upload_image_2d(
-                device, allocator, one_shot_pool, &far_depth, 1, 1, VK_FORMAT_R32_SFLOAT, 4);
+                device, allocator, one_shot_pool, &far_depth, 1, 1, coopa::gfx::Format::R32_Sfloat, 4);
         }
-        neutral_sampler_ = std::make_unique<util::Sampler>(
-            device, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
-        );
-        secondary_gbuf2_set_->bind_image(0, zero_rgba_->view(), neutral_sampler_->handle());
-        secondary_gbuf2_set_->bind_image(1, zero_rgba_->view(), neutral_sampler_->handle());
-        hiz_b_set_->bind_image(0, one_r32_->view(), neutral_sampler_->handle());
-        scene_color_b_set_->bind_image(0, zero_rgba_->view(), neutral_sampler_->handle());
+        neutral_sampler_ = std::make_unique<util::Sampler>(device, nearest_clamp_desc());
+        secondary_gbuf2_set_->bind_image(0, zero_rgba_->view_typed(), *neutral_sampler_);
+        secondary_gbuf2_set_->bind_image(1, zero_rgba_->view_typed(), *neutral_sampler_);
+        hiz_b_set_->bind_image(0, one_r32_->view_typed(), *neutral_sampler_);
+        scene_color_b_set_->bind_image(0, zero_rgba_->view_typed(), *neutral_sampler_);
 
         // 5. SSR Pipeline Creation
-        coopa::gfx::pipeline::PipelineConfig cfg{};
-        cfg.cull_mode   = VK_CULL_MODE_NONE;
-        cfg.depth_test  = false;
-        cfg.depth_write = false;
+        coopa::gfx::pipeline::PipelineDesc common_desc;
+        common_desc.vertex = coopa::gfx::VertexLayout::none();
+        common_desc.raster.cull = coopa::gfx::CullMode::None;
+        common_desc.depth.test  = false;
+        common_desc.depth.write = false;
 
-        VkPushConstantRange pc_range{};
-        pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        pc_range.offset     = 0;
-        pc_range.size       = sizeof(SsrPushConstants);
-
-        std::vector<VkDescriptorSetLayout> ssr_layouts = {
-            camera_layout,
-            gbuf3_layout_->handle(),
-            hiz_layout_->handle(),
-            scene_color_layout_->handle(),
+        coopa::gfx::pipeline::PipelineDesc ssr_desc = common_desc;
+        ssr_desc.shaders = {ssr_vert_.get(), ssr_frag_.get()};
+        ssr_desc.descriptor_layouts = {
+            &camera_layout,
+            gbuf3_layout_.get(),
+            hiz_layout_.get(),
+            scene_color_layout_.get(),
             // Sets 4-6: secondary trace source -- matches ssr.frag's own set declarations.
-            secondary_gbuf2_layout_->handle(),
-            hiz_b_layout_->handle(),
-            scene_color_b_layout_->handle()
+            secondary_gbuf2_layout_.get(),
+            hiz_b_layout_.get(),
+            scene_color_b_layout_.get()
         };
-
-        ssr_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, target_->render_pass_object(),
-            std::vector<coopa::gfx::pipeline::Shader*>{ssr_vert_.get(), ssr_frag_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            ssr_layouts,
-            cfg,
-            std::vector<VkPushConstantRange>{pc_range}
-        );
+        ssr_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(SsrPushConstants)}};
+        ssr_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, target_->render_pass_object(), ssr_desc);
 
         // 6. SSR Composite Pipeline Creation
-        std::vector<VkDescriptorSetLayout> comp_layouts = {
-            camera_layout,
-            comp_gbuf_layout_->handle(),
-            raw_ssr_layout_->handle(),
-            comp_scene_color_layout_->handle()
+        std::vector<const coopa::gfx::pipeline::DescriptorSetLayout*> comp_layouts = {
+            &camera_layout,
+            comp_gbuf_layout_.get(),
+            raw_ssr_layout_.get(),
+            comp_scene_color_layout_.get()
         };
         // Never hardcode this index at the bind site -- it shifts if this pass ever gains
         // another owned set ahead of the caller's extras.
         comp_first_extra_set_ = static_cast<uint32_t>(comp_layouts.size());
         comp_layouts.insert(comp_layouts.end(), composite_extra_.layouts.begin(), composite_extra_.layouts.end());
 
-        VkPushConstantRange comp_pc_range{};
-        comp_pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        comp_pc_range.offset     = 0;
-        comp_pc_range.size       = sizeof(CompositePushConstants);
-
-        comp_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, composite_target_->render_pass_object(),
-            std::vector<coopa::gfx::pipeline::Shader*>{comp_vert_.get(), comp_frag_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            comp_layouts,
-            cfg,
-            std::vector<VkPushConstantRange>{comp_pc_range}
-        );
+        coopa::gfx::pipeline::PipelineDesc comp_desc = common_desc;
+        comp_desc.shaders = {comp_vert_.get(), comp_frag_.get()};
+        comp_desc.descriptor_layouts = comp_layouts;
+        comp_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(CompositePushConstants)}};
+        comp_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, composite_target_->render_pass_object(), comp_desc);
 
         // 7. Temporal Resolve Pipeline Creation
-        VkPushConstantRange resolve_pc_range{};
-        resolve_pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        resolve_pc_range.offset     = 0;
-        resolve_pc_range.size       = sizeof(ResolvePushConstants);
-
-        resolve_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, resolved_target_->render_pass_object(),
-            std::vector<coopa::gfx::pipeline::Shader*>{resolve_vert_.get(), resolve_frag_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            std::vector<VkDescriptorSetLayout>{resolve_layout_->handle()},
-            cfg,
-            std::vector<VkPushConstantRange>{resolve_pc_range}
-        );
+        coopa::gfx::pipeline::PipelineDesc resolve_desc = common_desc;
+        resolve_desc.shaders = {resolve_vert_.get(), resolve_frag_.get()};
+        resolve_desc.descriptor_layouts = {resolve_layout_.get()};
+        resolve_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(ResolvePushConstants)}};
+        resolve_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, resolved_target_->render_pass_object(), resolve_desc);
 
         // 8. Blur Pipeline Creation (optional -- see blur_frag_spv's ctor doc)
         if (blur_enabled_) {
-            VkPushConstantRange blur_pc_range{};
-            blur_pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-            blur_pc_range.offset     = 0;
-            blur_pc_range.size       = sizeof(BlurPushConstants);
-
-            blur_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-                device, blurred_target_->render_pass_object(),
-                std::vector<coopa::gfx::pipeline::Shader*>{blur_vert_.get(), blur_frag_.get()},
-                std::vector<VkVertexInputBindingDescription>{},
-                std::vector<VkVertexInputAttributeDescription>{},
-                std::vector<VkDescriptorSetLayout>{blur_layout_->handle()},
-                cfg,
-                std::vector<VkPushConstantRange>{blur_pc_range}
-            );
+            coopa::gfx::pipeline::PipelineDesc blur_desc = common_desc;
+            blur_desc.shaders = {blur_vert_.get(), blur_frag_.get()};
+            blur_desc.descriptor_layouts = {blur_layout_.get()};
+            blur_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(BlurPushConstants)}};
+            blur_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, blurred_target_->render_pass_object(), blur_desc);
         }
     }
 
@@ -486,19 +443,19 @@ public:
     }
 
     void update_descriptors(const targets::GBufferTarget& gbuffer,
-                            VkImageView hiz_view,
-                            VkSampler hiz_sampler,
-                            VkImageView scene_color_mip_view,
-                            VkSampler scene_color_mip_sampler,
-                            VkImageView scene_color_view,
+                            coopa::gfx::TextureView hiz_view,
+                            const util::Sampler& hiz_sampler,
+                            coopa::gfx::TextureView scene_color_mip_view,
+                            const util::Sampler& scene_color_mip_sampler,
+                            coopa::gfx::TextureView scene_color_view,
                             const util::Sampler& linear_sampler)
     {
         // SSR Raymarching descriptors. Nearest sampler: see constructor comment -- these are
         // read both at the texel-centered in_uv (where nearest == linear, no change) and at
         // arbitrary marched UVs during the hit tests (where nearest is required for correctness).
-        ssr_gbuf_set_->bind_image(0, gbuffer.g0_view(), nearest_sampler_->handle());
-        ssr_gbuf_set_->bind_image(1, gbuffer.g1_view(), nearest_sampler_->handle());
-        ssr_gbuf_set_->bind_image(2, gbuffer.g2_view(), nearest_sampler_->handle());
+        ssr_gbuf_set_->bind_image(0, gbuffer.g0_view_typed(), *nearest_sampler_);
+        ssr_gbuf_set_->bind_image(1, gbuffer.g1_view_typed(), *nearest_sampler_);
+        ssr_gbuf_set_->bind_image(2, gbuffer.g2_view_typed(), *nearest_sampler_);
 
         hiz_set_->bind_image(0, hiz_view, hiz_sampler);
         // The march samples the PREFILTERED chain (cone footprint -> textureLod), while the
@@ -510,34 +467,34 @@ public:
         // resolved history + G2 (the reprojection source). The current buffer is still sampled
         // at texel-centered in_uv, so nearest_sampler_ avoids implying this HDR data buffer
         // should ever be blurred.
-        resolve_set_->bind_image(0, target_->color_view(), nearest_sampler_->handle());
+        resolve_set_->bind_image(0, target_->color_view_typed(), *nearest_sampler_);
         // LINEAR, not nearest: reprojected UVs are no longer texel-centred, and point-sampling
         // them makes the accumulated reflection stair-step and crawl under camera motion.
-        resolve_set_->bind_image(1, history_image_->view(), linear_sampler.handle());
-        resolve_set_->bind_image(2, gbuffer.g2_view(), nearest_sampler_->handle());
+        resolve_set_->bind_image(1, history_image_->view_typed(), linear_sampler);
+        resolve_set_->bind_image(2, gbuffer.g2_view_typed(), *nearest_sampler_);
 
         // SSR Composite descriptors
-        comp_gbuf3_set_->bind_image(0, gbuffer.g0_view(), linear_sampler.handle());
-        comp_gbuf3_set_->bind_image(1, gbuffer.g1_view(), linear_sampler.handle());
-        comp_gbuf3_set_->bind_image(2, gbuffer.g2_view(), linear_sampler.handle());
+        comp_gbuf3_set_->bind_image(0, gbuffer.g0_view_typed(), linear_sampler);
+        comp_gbuf3_set_->bind_image(1, gbuffer.g1_view_typed(), linear_sampler);
+        comp_gbuf3_set_->bind_image(2, gbuffer.g2_view_typed(), linear_sampler);
 
         // Blur descriptors (optional -- see blur_frag_spv's ctor doc): the buffer being
         // blurred (resolved_target_'s temporally-resolved output, NEAREST -- same
         // texel-exact reasoning as every other in-shader G-buffer point-lookup in this
         // engine) plus the G-buffer normal/position the bilateral weights are computed from.
         if (blur_enabled_) {
-            blur_set_->bind_image(0, resolved_target_->color_view(), nearest_sampler_->handle());
-            blur_set_->bind_image(1, gbuffer.g1_view(), nearest_sampler_->handle());
-            blur_set_->bind_image(2, gbuffer.g2_view(), nearest_sampler_->handle());
+            blur_set_->bind_image(0, resolved_target_->color_view_typed(), *nearest_sampler_);
+            blur_set_->bind_image(1, gbuffer.g1_view_typed(), *nearest_sampler_);
+            blur_set_->bind_image(2, gbuffer.g2_view_typed(), *nearest_sampler_);
         }
 
         // Composite reads the BLURRED buffer when the blur stage is enabled (execute() draws
         // resolved_target_ -> blurred_target_ every frame before composite runs), or the
         // temporally-resolved buffer directly otherwise -- exactly this pass's original
         // behaviour before the blur stage existed.
-        comp_raw_ssr_set_->bind_image(0, blur_enabled_ ? blurred_target_->color_view() : resolved_target_->color_view(),
-                                      linear_sampler.handle());
-        comp_scene_color_set_->bind_image(0, scene_color_view, linear_sampler.handle());
+        comp_raw_ssr_set_->bind_image(0, blur_enabled_ ? blurred_target_->color_view_typed() : resolved_target_->color_view_typed(),
+                                      linear_sampler);
+        comp_scene_color_set_->bind_image(0, scene_color_view, linear_sampler);
         // Same prefiltered mip chain the raymarch's scene_color_set_ (binding 0 above) reads --
         // for the composite's SSGI diffuse-bounce sample, when the bound shader implements one.
         comp_scene_color_set_->bind_image(1, scene_color_mip_view, scene_color_mip_sampler);
@@ -560,12 +517,12 @@ public:
     /// Params::has_secondary in execute() -- calling this at all is optional; the constructor
     /// already leaves sets 4-6 bound to a permanent neutral fallback that produces a guaranteed
     /// miss, so a consumer with no secondary source never needs to call this.
-    void set_secondary_source(VkImageView normal_metallic_view, VkImageView position_roughness_view,
-                              VkImageView hiz_view, VkSampler hiz_sampler,
-                              VkImageView scene_color_view, VkSampler scene_color_sampler)
+    void set_secondary_source(coopa::gfx::TextureView normal_metallic_view, coopa::gfx::TextureView position_roughness_view,
+                              coopa::gfx::TextureView hiz_view, const util::Sampler& hiz_sampler,
+                              coopa::gfx::TextureView scene_color_view, const util::Sampler& scene_color_sampler)
     {
-        secondary_gbuf2_set_->bind_image(0, normal_metallic_view, nearest_sampler_->handle());
-        secondary_gbuf2_set_->bind_image(1, position_roughness_view, nearest_sampler_->handle());
+        secondary_gbuf2_set_->bind_image(0, normal_metallic_view, *nearest_sampler_);
+        secondary_gbuf2_set_->bind_image(1, position_roughness_view, *nearest_sampler_);
         hiz_b_set_->bind_image(0, hiz_view, hiz_sampler);
         scene_color_b_set_->bind_image(0, scene_color_view, scene_color_sampler);
     }
@@ -578,9 +535,9 @@ public:
     /// duplicating the images. See gfx/ssr_trace_body.glsl's required-before-include contract
     /// for the exact sampler/UBO names each set must resolve to.
     /// @{
-    VkDescriptorSetLayout trace_gbuffer_layout() const { return gbuf3_layout_->handle(); }
-    VkDescriptorSetLayout hiz_layout() const { return hiz_layout_->handle(); }
-    VkDescriptorSetLayout scene_color_layout() const { return scene_color_layout_->handle(); }
+    const coopa::gfx::pipeline::DescriptorSetLayout& trace_gbuffer_layout() const { return *gbuf3_layout_; }
+    const coopa::gfx::pipeline::DescriptorSetLayout& hiz_layout() const { return *hiz_layout_; }
+    const coopa::gfx::pipeline::DescriptorSetLayout& scene_color_layout() const { return *scene_color_layout_; }
     const coopa::gfx::pipeline::DescriptorSet& trace_gbuffer_set() const { return *ssr_gbuf_set_; }
     const coopa::gfx::pipeline::DescriptorSet& hiz_set() const { return *hiz_set_; }
     const coopa::gfx::pipeline::DescriptorSet& scene_color_set() const { return *scene_color_set_; }
@@ -637,15 +594,15 @@ public:
         pc.max_hiz_mip_b    = params.max_hiz_mip_b;
         pc.max_color_mip_b  = params.max_color_mip_b;
 
-        cmd.push_constants(ssr_pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SsrPushConstants), &pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
 
-        cmd.bind_descriptor_set(ssr_pipeline_->layout(), camera_set, 0);
-        cmd.bind_descriptor_set(ssr_pipeline_->layout(), *ssr_gbuf_set_, 1);
-        cmd.bind_descriptor_set(ssr_pipeline_->layout(), *hiz_set_, 2);
-        cmd.bind_descriptor_set(ssr_pipeline_->layout(), *scene_color_set_, 3);
-        cmd.bind_descriptor_set(ssr_pipeline_->layout(), *secondary_gbuf2_set_, 4);
-        cmd.bind_descriptor_set(ssr_pipeline_->layout(), *hiz_b_set_, 5);
-        cmd.bind_descriptor_set(ssr_pipeline_->layout(), *scene_color_b_set_, 6);
+        cmd.bind_descriptor_set(camera_set, 0);
+        cmd.bind_descriptor_set(*ssr_gbuf_set_, 1);
+        cmd.bind_descriptor_set(*hiz_set_, 2);
+        cmd.bind_descriptor_set(*scene_color_set_, 3);
+        cmd.bind_descriptor_set(*secondary_gbuf2_set_, 4);
+        cmd.bind_descriptor_set(*hiz_b_set_, 5);
+        cmd.bind_descriptor_set(*scene_color_b_set_, 6);
 
         cmd.draw(3);
         target_->end(cmd);
@@ -670,8 +627,8 @@ public:
         // sample from reading a stale/identity prev_view_proj.
         rpc.history_valid = (history_initialized_ && params.prev_view_proj_valid) ? 1 : 0;
 
-        cmd.push_constants(resolve_pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(ResolvePushConstants), &rpc);
-        cmd.bind_descriptor_set(resolve_pipeline_->layout(), *resolve_set_, 0);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, rpc);
+        cmd.bind_descriptor_set(*resolve_set_, 0);
 
         cmd.draw(3);
         resolved_target_->end(cmd);
@@ -689,8 +646,8 @@ public:
 
             BlurPushConstants bpc{};
             bpc.radius = params.ssr_blur_radius;
-            cmd.push_constants(blur_pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(BlurPushConstants), &bpc);
-            cmd.bind_descriptor_set(blur_pipeline_->layout(), *blur_set_, 0);
+            cmd.push_constants(coopa::gfx::ShaderStage::Fragment, bpc);
+            cmd.bind_descriptor_set(*blur_set_, 0);
 
             cmd.draw(3);
             blurred_target_->end(cmd);
@@ -711,14 +668,14 @@ public:
         cpc.sky_intensity     = params.sky_intensity;
         cpc.ssgi_intensity    = params.ssgi_intensity;
         cpc.ssgi_distance     = params.ssgi_distance;
-        cmd.push_constants(comp_pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(CompositePushConstants), &cpc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, cpc);
 
-        cmd.bind_descriptor_set(comp_pipeline_->layout(), camera_set, 0);
-        cmd.bind_descriptor_set(comp_pipeline_->layout(), *comp_gbuf3_set_, 1);
-        cmd.bind_descriptor_set(comp_pipeline_->layout(), *comp_raw_ssr_set_, 2);
-        cmd.bind_descriptor_set(comp_pipeline_->layout(), *comp_scene_color_set_, 3);
+        cmd.bind_descriptor_set(camera_set, 0);
+        cmd.bind_descriptor_set(*comp_gbuf3_set_, 1);
+        cmd.bind_descriptor_set(*comp_raw_ssr_set_, 2);
+        cmd.bind_descriptor_set(*comp_scene_color_set_, 3);
         if (composite_extra_.bind) {
-            composite_extra_.bind(cmd, comp_pipeline_->layout(), comp_first_extra_set_);
+            composite_extra_.bind(cmd, comp_first_extra_set_);
         }
 
         cmd.draw(3);
@@ -729,9 +686,21 @@ public:
     }
 
     VkImageView output_view() const { return composite_target_->color_view(); }
+    coopa::gfx::TextureView output_view_typed() const { return composite_target_->color_view_typed(); }
     targets::OffscreenTarget& composite_target() { return *composite_target_; }
 
 private:
+    /// NEAREST + ClampToEdge, matching the raw ctor's default mipmap_mode (NEAREST) too -- see
+    /// nearest_sampler_/neutral_sampler_'s uses. All of this pass's own samplers (aside from the
+    /// caller-supplied linear_sampler passed into update_descriptors()) share this exact config.
+    static coopa::gfx::SamplerDesc nearest_clamp_desc() {
+        coopa::gfx::SamplerDesc d;
+        d.min = d.mag = coopa::gfx::Filter::Nearest;
+        d.mipmap  = coopa::gfx::MipmapMode::Nearest;
+        d.address = coopa::gfx::AddressMode::ClampToEdge;
+        return d;
+    }
+
     // Copies resolved_target_'s color image into history_image_ (same barrier/copy/barrier
     // pattern as TaaPass::update_history), so the next frame's resolve pass has something to
     // blend against.

@@ -24,6 +24,9 @@
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/util/error.h>
+#include <gfxcoopa/types/format.h>
+#include <gfxcoopa/types/enums.h>
+#include <gfxcoopa/detail/vk_convert.h>
 
 namespace coopa {
 namespace gfx {
@@ -63,12 +66,12 @@ public:
      * @param color_format Color attachment pixel format.
      * @param samples      MSAA sample count.
      */
-    OffscreenTarget(core::Device&         device,
-                    memory::Allocator&    allocator,
-                    uint32_t              width,
-                    uint32_t              height,
-                    VkFormat              color_format = VK_FORMAT_R8G8B8A8_UNORM,
-                    VkSampleCountFlagBits samples      = VK_SAMPLE_COUNT_1_BIT)
+    OffscreenTarget(core::Device&      device,
+                    memory::Allocator& allocator,
+                    uint32_t           width,
+                    uint32_t           height,
+                    Format             color_format = Format::RGBA8_Unorm,
+                    SampleCount        samples      = SampleCount::X1)
         : device_(device), allocator_(allocator),
           width_(width), height_(height),
           color_format_(color_format), samples_(samples)
@@ -153,18 +156,26 @@ public:
 
     /** @brief Returns the color image view for sampling in subsequent passes. */
     VkImageView color_view() const {
-        return (samples_ > VK_SAMPLE_COUNT_1_BIT && resolve_image_)
+        return (samples_ != SampleCount::X1 && resolve_image_)
             ? resolve_image_->view()
             : color_image_->view();
     }
+    /** @brief Sealed sibling of color_view(). */
+    coopa::gfx::TextureView color_view_typed() const {
+        return (samples_ != SampleCount::X1 && resolve_image_)
+            ? resolve_image_->view_typed()
+            : color_image_->view_typed();
+    }
     /** @brief Returns the color memory::Image object (resolved if MSAA). */
     memory::Image* color_image_object() const {
-        return (samples_ > VK_SAMPLE_COUNT_1_BIT && resolve_image_)
+        return (samples_ != SampleCount::X1 && resolve_image_)
             ? resolve_image_.get()
             : color_image_.get();
     }
     /** @brief Returns the depth image view (for edge detection shaders). */
     VkImageView depth_view() const { return depth_image_->view(); }
+    /** @brief Sealed sibling of depth_view(). */
+    coopa::gfx::TextureView depth_view_typed() const { return depth_image_->view_typed(); }
 
     /** @brief Returns the render pass handle. */
     VkRenderPass render_pass() const { return render_pass_->handle(); }
@@ -177,12 +188,12 @@ private:
      * @brief Creates all resources: color image, resolve image (if MSAA), depth image, render pass, framebuffer.
      */
     void create_resources_() {
-        bool is_msaa = samples_ > VK_SAMPLE_COUNT_1_BIT;
+        bool is_msaa = samples_ != SampleCount::X1;
 
         // Color attachment: used as color attachment (+ sampled if not MSAA).
-        VkImageUsageFlags color_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        ImageUsage color_usage = ImageUsage::ColorAttachment | ImageUsage::TransferSrc;
         if (!is_msaa) {
-            color_usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+            color_usage = color_usage | ImageUsage::Sampled;
         }
 
         color_image_ = std::make_unique<memory::Image>(
@@ -190,8 +201,7 @@ private:
             width_, height_,
             color_format_,
             color_usage,
-            VK_IMAGE_ASPECT_COLOR_BIT,
-            VMA_MEMORY_USAGE_AUTO,
+            MemoryResidency::GpuOnly,
             samples_
         );
 
@@ -201,31 +211,29 @@ private:
                 device_, allocator_,
                 width_, height_,
                 color_format_,
-                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                VK_IMAGE_ASPECT_COLOR_BIT,
-                VMA_MEMORY_USAGE_AUTO,
-                VK_SAMPLE_COUNT_1_BIT
+                ImageUsage::ColorAttachment | ImageUsage::Sampled | ImageUsage::TransferSrc,
+                MemoryResidency::GpuOnly,
+                SampleCount::X1
             );
         }
 
-        // Depth attachment: D32_SFLOAT.
+        // Depth attachment.
         depth_image_ = std::make_unique<memory::Image>(
             device_, allocator_,
             width_, height_,
-            VK_FORMAT_D32_SFLOAT,
-            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            VK_IMAGE_ASPECT_DEPTH_BIT,
-            VMA_MEMORY_USAGE_AUTO,
+            Format::D32_Sfloat,
+            ImageUsage::DepthAttachment | ImageUsage::Sampled,
+            MemoryResidency::GpuOnly,
             samples_
         );
 
         render_pass_ = std::make_unique<pipeline::RenderPass>(
             device_,
-            color_format_,
+            detail::to_vk(color_format_),
             VK_FORMAT_D32_SFLOAT,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   // color final
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   // depth final
-            samples_
+            detail::to_vk(samples_)
         );
 
         create_framebuffer_();
@@ -238,7 +246,7 @@ private:
         std::vector<VkImageView> attachments;
         attachments.push_back(color_image_->view());
         attachments.push_back(depth_image_->view());
-        if (samples_ > VK_SAMPLE_COUNT_1_BIT && resolve_image_) {
+        if (samples_ != SampleCount::X1 && resolve_image_) {
             attachments.push_back(resolve_image_->view());
         }
 
@@ -268,8 +276,8 @@ private:
     memory::Allocator& allocator_; /**< VMA allocator (not owned). */
     uint32_t           width_;     /**< Render width in pixels. */
     uint32_t           height_;    /**< Render height in pixels. */
-    VkFormat           color_format_ = VK_FORMAT_R8G8B8A8_UNORM;
-    VkSampleCountFlagBits samples_   = VK_SAMPLE_COUNT_1_BIT;
+    Format             color_format_ = Format::RGBA8_Unorm;
+    SampleCount        samples_      = SampleCount::X1;
 
     std::unique_ptr<memory::Image>          color_image_;   /**< Color attachment. */
     std::unique_ptr<memory::Image>          resolve_image_; /**< MSAA resolve attachment. */

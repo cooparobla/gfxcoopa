@@ -39,26 +39,32 @@ public:
         create_search_texture_(cmd_pool);
         create_area_texture_(cmd_pool);
 
-        sampler_ = std::make_unique<Sampler>(
-            device, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
-        );
+        // Linear + clamp-to-edge, matching the raw ctor this replaces (its default mipmap_mode
+        // was NEAREST, moot here since both textures are single-mip -- max_lod=0).
+        coopa::gfx::SamplerDesc desc;
+        desc.min = desc.mag = coopa::gfx::Filter::Linear;
+        desc.mipmap  = coopa::gfx::MipmapMode::Nearest;
+        desc.address = coopa::gfx::AddressMode::ClampToEdge;
+        sampler_ = std::make_unique<Sampler>(device, desc);
     }
 
     VkImageView search_view() const { return search_image_->view(); }
+    coopa::gfx::TextureView search_view_typed() const { return search_image_->view_typed(); }
     VkImageView area_view()   const { return area_image_->view(); }
+    coopa::gfx::TextureView area_view_typed() const { return area_image_->view_typed(); }
     const Sampler& sampler() const { return *sampler_; }
 
 private:
     void create_search_texture_(coopa::gfx::command::CommandPool& cmd_pool) {
         search_image_ = coopa::gfx::memory::upload_image_2d(
             device_, allocator_, cmd_pool, searchTexBytes,
-            SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, VK_FORMAT_R8_UNORM, 1);
+            SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, coopa::gfx::Format::R8_Unorm, 1);
     }
 
     void create_area_texture_(coopa::gfx::command::CommandPool& cmd_pool) {
         area_image_ = coopa::gfx::memory::upload_image_2d(
             device_, allocator_, cmd_pool, areaTexBytes,
-            AREATEX_WIDTH, AREATEX_HEIGHT, VK_FORMAT_R8G8_UNORM, 2);
+            AREATEX_WIDTH, AREATEX_HEIGHT, coopa::gfx::Format::RG8_Unorm, 2);
     }
 
     coopa::gfx::core::Device&      device_;

@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/sampler.h>
 /**
  * @file ssao_kernel.h
  * @brief SSAO hemisphere sample kernel (UBO) and tiled rotation-noise texture.
@@ -92,20 +91,24 @@ public:
         upload_texture_(cmd_pool, texels.data());
 
         // REPEAT so the 4x4 tile covers the full screen (ssao.frag samples it at
-        // in_uv * (screen_size / 4)); NEAREST because each texel is a discrete rotation vector,
-        // not something to blend between.
-        sampler_ = std::make_unique<Sampler>(
-            device, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT
-        );
+        // in_uv * (screen_size / 4)); NEAREST (both filter and mipmap -- the raw ctor this
+        // replaces defaulted mipmap_mode to NEAREST too, though it's moot at max_lod=0) because
+        // each texel is a discrete rotation vector, not something to blend between.
+        coopa::gfx::SamplerDesc desc;
+        desc.min = desc.mag = coopa::gfx::Filter::Nearest;
+        desc.mipmap  = coopa::gfx::MipmapMode::Nearest;
+        desc.address = coopa::gfx::AddressMode::Repeat;
+        sampler_ = std::make_unique<Sampler>(device, desc);
     }
 
     VkImageView view() const { return image_->view(); }
+    coopa::gfx::TextureView view_typed() const { return image_->view_typed(); }
     const Sampler& sampler() const { return *sampler_; }
 
 private:
     void upload_texture_(coopa::gfx::command::CommandPool& cmd_pool, const void* data) {
         image_ = coopa::gfx::memory::upload_image_2d(
-            device_, allocator_, cmd_pool, data, kSize, kSize, VK_FORMAT_R8G8_UNORM, 2);
+            device_, allocator_, cmd_pool, data, kSize, kSize, coopa::gfx::Format::RG8_Unorm, 2);
     }
 
     coopa::gfx::core::Device&      device_;

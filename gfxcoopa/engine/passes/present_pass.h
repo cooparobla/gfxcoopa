@@ -39,49 +39,37 @@ public:
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding         = 0;
-        binding.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        binding.descriptorCount = 1;
-        binding.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
-
         desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            device,
-            std::vector<VkDescriptorSetLayoutBinding>{binding}
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .build(device)
         );
 
         desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device,
-            1,
-            std::vector<VkDescriptorPoolSize>{
-                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}
-            }
+            coopa::gfx::pipeline::DescriptorPoolBuilder()
+                .add_sets(*desc_layout_, 1)
+                .build(device)
         );
 
         desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(
             device, *desc_pool_, *desc_layout_
         );
 
-        coopa::gfx::pipeline::PipelineConfig cfg{};
-        cfg.cull_mode   = VK_CULL_MODE_NONE;
-        cfg.depth_test  = false;
-        cfg.depth_write = false;
+        coopa::gfx::pipeline::PipelineDesc desc;
+        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
+        desc.vertex  = coopa::gfx::VertexLayout::none();
+        desc.raster.cull = coopa::gfx::CullMode::None;
+        desc.depth.test  = false;
+        desc.depth.write = false;
+        desc.descriptor_layouts = {desc_layout_.get()};
 
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, swapchain_pass,
-            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), frag_shader_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            std::vector<VkDescriptorSetLayout>{desc_layout_->handle()},
-            cfg,
-            std::vector<VkPushConstantRange>{}
-        );
+        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, swapchain_pass, desc);
 
         (void)linear_sampler;
     }
 
-    void set_source_image(VkImageView image_view, const util::Sampler& linear_sampler) {
-        desc_set_->bind_image(0, image_view, linear_sampler.handle());
+    void set_source_image(coopa::gfx::TextureView image_view, const util::Sampler& linear_sampler) {
+        desc_set_->bind_image(0, image_view, linear_sampler);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd, uint32_t viewport_w, uint32_t viewport_h) const {
@@ -89,7 +77,7 @@ public:
         cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
         cmd.set_scissor(0, 0, viewport_w, viewport_h);
 
-        cmd.bind_descriptor_set(pipeline_->layout(), *desc_set_, 0);
+        cmd.bind_descriptor_set(*desc_set_, 0);
         cmd.draw(3); // Fullscreen triangle
     }
 

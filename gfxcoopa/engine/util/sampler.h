@@ -13,6 +13,8 @@
 #include <stdexcept>
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/util/error.h>
+#include <gfxcoopa/types/sampler_desc.h>
+#include <gfxcoopa/detail/vk_convert.h>
 
 namespace coopa {
 namespace gfx {
@@ -78,6 +80,26 @@ public:
 
         GFX_VK_CHECK(vkCreateSampler(device_.handle(), &info, nullptr, &sampler_));
     }
+
+    /**
+     * @brief Creates a VkSampler from a sealed SamplerDesc -- the sealed sibling of the raw
+     * ctor above, for callers that don't need the raw ctor's max_lod/mip-chain support
+     * (SamplerDesc has no max_lod field; a mip-chain sampler, e.g. a prefiltered cubemap or
+     * Hi-Z pyramid, still needs the raw ctor).
+     * @param device Logical device.
+     * @param desc   Sealed filter/address/mipmap/compare/anisotropy configuration.
+     */
+    // desc.min (minification filter) is folded into the delegated ctor's single `filter`
+    // param via desc.mag below -- every existing caller of the raw ctor already uses the
+    // same VkFilter for both min and mag, and no SamplerDesc preset sets min != mag.
+    Sampler(core::Device& device, const SamplerDesc& desc)
+        : Sampler(device,
+                  detail::to_vk(desc.mag),
+                  detail::to_vk(desc.address),
+                  0.0f,
+                  detail::to_vk(desc.mipmap),
+                  detail::to_vk(desc.compare))
+    {}
 
     ~Sampler() {
         if (sampler_ != VK_NULL_HANDLE) {

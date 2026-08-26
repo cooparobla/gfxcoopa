@@ -80,9 +80,9 @@ public:
      */
     TransparentPass(coopa::gfx::core::Device& device,
                     VkFormat color_format,
-                    VkDescriptorSetLayout camera_layout,
-                    VkDescriptorSetLayout light_layout,
-                    VkDescriptorSetLayout shadow_layout,
+                    const coopa::gfx::pipeline::DescriptorSetLayout& camera_layout,
+                    const coopa::gfx::pipeline::DescriptorSetLayout& light_layout,
+                    const coopa::gfx::pipeline::DescriptorSetLayout& shadow_layout,
                     const std::string& vert_spv,
                     const std::string& frag_spv,
                     ExtraSets extra = {},
@@ -95,43 +95,34 @@ public:
 
         create_render_pass_();
 
-        std::vector<VkDescriptorSetLayout> layouts = { camera_layout, light_layout, shadow_layout };
+        std::vector<const coopa::gfx::pipeline::DescriptorSetLayout*> layouts = { &camera_layout, &light_layout, &shadow_layout };
         extra_first_set_ = static_cast<uint32_t>(layouts.size());
         layouts.insert(layouts.end(), extra_.layouts.begin(), extra_.layouts.end());
 
-        VkPushConstantRange pc_range{};
-        pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        pc_range.offset     = 0;
-        pc_range.size       = sizeof(PushConstants) + extra_pc_bytes;
-
-        std::vector<VkPushConstantRange> pc_ranges{pc_range};
-
-        auto binding          = coopa::gfx::engine::data::Vertex::binding_description();
-        auto instance_binding = coopa::gfx::engine::data::InstanceData::binding_description();
-        std::vector<VkVertexInputBindingDescription> binding_vec = {binding, instance_binding};
-
-        auto attrs = coopa::gfx::engine::data::Vertex::attribute_descriptions();
-        std::vector<VkVertexInputAttributeDescription> attr_vec(attrs.begin(), attrs.end());
-        auto instance_attrs = coopa::gfx::engine::data::InstanceData::attribute_descriptions();
-        attr_vec.insert(attr_vec.end(), instance_attrs.begin(), instance_attrs.end());
-
-        coopa::gfx::pipeline::PipelineConfig cfg{};
-        cfg.cull_mode        = VK_CULL_MODE_BACK_BIT;
-        cfg.front_face       = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        cfg.depth_test       = true;               // test against the opaque G-Buffer depth
-        cfg.depth_write      = false;              // never occlude other transparents
-        cfg.depth_compare_op = VK_COMPARE_OP_LESS; // a coplanar decal fails cleanly, no flicker
-        cfg.blending         = true;               // src-alpha-over (pipeline.h)
+        // render_pass_ is a hand-built raw VkRenderPass (LOAD_OP_LOAD on both attachments,
+        // externally-owned depth -- see this class's file doc for why pipeline::RenderPass can't
+        // express it), so the sealed Pipeline ctor's detail::RawRenderPass escape hatch is used
+        // here instead of the normal pipeline::RenderPass overload.
+        coopa::gfx::pipeline::PipelineDesc desc;
+        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
+        desc.vertex  = coopa::gfx::engine::data::Vertex::layout().append(coopa::gfx::engine::data::InstanceData::layout());
+        desc.descriptor_layouts = layouts;
+        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0,
+                                static_cast<uint32_t>(sizeof(PushConstants) + extra_pc_bytes)}};
+        desc.raster.cull  = coopa::gfx::CullMode::Back;
+        desc.raster.front = coopa::gfx::FrontFace::CounterClockwise;
+        desc.depth.test    = true;                                        // test against the opaque G-Buffer depth
+        desc.depth.write   = false;                                       // never occlude other transparents
+        desc.depth.compare = coopa::gfx::CompareOp::Less;                // a coplanar decal fails cleanly, no flicker
+        desc.blend.mode    = coopa::gfx::pipeline::BlendMode::Alpha;     // src-alpha-over (pipeline.h)
+        // detail::RawRenderPass's Pipeline ctor has no RenderPass to read samples()/
+        // color_attachment_count() from (see pipeline.h) -- this pass is always single-sampled,
+        // single-color-attachment, so BlendState's defaults (0 => derive from RenderPass) don't
+        // apply; set it explicitly.
+        desc.blend.color_attachment_count = 1;
 
         pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, render_pass_,
-            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), frag_shader_.get()},
-            binding_vec,
-            attr_vec,
-            layouts,
-            cfg,
-            pc_ranges
-        );
+            device, coopa::gfx::detail::RawRenderPass{render_pass_}, desc);
     }
 
     ~TransparentPass() {
@@ -239,13 +230,13 @@ public:
     /// after bind(), alongside binding sets 0-2, before draws. A no-op when `extra` was empty.
     void bind_extra(coopa::gfx::command::CommandBuffer& cmd) {
         if (extra_.bind) {
-            extra_.bind(cmd, pipeline_->layout(), extra_first_set_);
+            extra_.bind(cmd, extra_first_set_);
         }
     }
 
     /** @brief Uploads per-batch material push constants. */
     void push(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& pc) {
-        cmd.push_constants(pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
     }
 
     /** @brief Ends the render pass. */

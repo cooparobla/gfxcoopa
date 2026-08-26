@@ -82,37 +82,34 @@ public:
         capture_camera_ = std::make_unique<data::CameraUBO>(device, allocator);
         capture_lights_ = std::make_unique<data::LightData>(device, allocator);
 
-        auto make_binding = [](VkDescriptorType type, VkShaderStageFlags stages) {
-            VkDescriptorSetLayoutBinding b{};
-            b.binding            = 0;
-            b.descriptorType     = type;
-            b.descriptorCount    = 1;
-            b.stageFlags         = stages;
-            b.pImmutableSamplers = nullptr;
-            return b;
-        };
         cap_camera_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            device, std::vector<VkDescriptorSetLayoutBinding>{
-                make_binding(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)});
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .uniform_buffer(0, coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment)
+                .build(device));
         cap_light_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            device, std::vector<VkDescriptorSetLayoutBinding>{
-                make_binding(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_FRAGMENT_BIT)});
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .uniform_buffer(0, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
         cap_brdf_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            device, std::vector<VkDescriptorSetLayoutBinding>{
-                make_binding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)});
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
         cap_source_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            device, std::vector<VkDescriptorSetLayoutBinding>{
-                make_binding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)});
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
 
         // Pool sized for camera+light+brdf (1 each, reused across every probe
         // bake) plus up to MAX_REFLECTION_PROBES prefilter-source sets (one
-        // per cubemap, since each is bound to a specific mip0_cube_view()).
+        // per cubemap, since each is bound to a specific mip0_cube_view()) --
+        // sizes derived from the layouts above rather than hand-computed.
         cap_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device, 3 + MAX_REFLECTION_PROBES,
-            std::vector<VkDescriptorPoolSize>{
-                { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         2 },
-                { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 + MAX_REFLECTION_PROBES }
-            });
+            coopa::gfx::pipeline::DescriptorPoolBuilder()
+                .add_sets(*cap_camera_layout_, 1)
+                .add_sets(*cap_light_layout_, 1)
+                .add_sets(*cap_brdf_layout_, 1)
+                .add_sets(*cap_source_layout_, MAX_REFLECTION_PROBES)
+                .build(device));
 
         cap_camera_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *cap_pool_, *cap_camera_layout_);
         cap_light_set_  = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *cap_pool_, *cap_light_layout_);
@@ -120,7 +117,7 @@ public:
 
         cap_camera_set_->bind_buffer(0, capture_camera_->buffer());
         cap_light_set_->bind_buffer(0, capture_lights_->buffer());
-        cap_brdf_set_->bind_image(0, brdf_lut_->view(), brdf_lut_->sampler());
+        cap_brdf_set_->bind_image(0, brdf_lut_->view_typed(), brdf_lut_->sampler_object());
 
         // Pre-allocate all MAX_REFLECTION_PROBES source sets up front (fixed
         // pool capacity, matching cap_pool_'s sizing above). Each gets bound
@@ -140,64 +137,32 @@ public:
         create_cubemap_target_(0, 256);
         ensure_capture_pipelines_();
 
-        VkCommandBuffer raw_cmd = cmd_pool.begin_single_use();
-        coopa::gfx::command::CommandBuffer cmd(raw_cmd);
-        cubemap_targets_[0]->transition_to_shader_read(cmd, VK_IMAGE_LAYOUT_UNDEFINED);
-        cmd_pool.end_single_use(raw_cmd, device.graphics_queue());
+        cmd_pool.submit_once([&](coopa::gfx::command::CommandBuffer& cmd) {
+            cubemap_targets_[0]->transition_to_shader_read(cmd, VK_IMAGE_LAYOUT_UNDEFINED);
+        });
 
-        // 4. Create Descriptor Set Layout for Set 3
-        std::vector<VkDescriptorSetLayoutBinding> bindings(8);
-
-        // Binding 0: GiUniforms (UBO)
-        bindings[0].binding            = 0;
-        bindings[0].descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        bindings[0].descriptorCount    = 1;
-        bindings[0].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[0].pImmutableSamplers = nullptr;
-
-        // Binding 1: gi::SHProbes (SSBO)
-        bindings[1].binding            = 1;
-        bindings[1].descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[1].descriptorCount    = 1;
-        bindings[1].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[1].pImmutableSamplers = nullptr;
-
-        // Binding 2: BRDF LUT (Combined Image Sampler)
-        bindings[2].binding            = 2;
-        bindings[2].descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[2].descriptorCount    = 1;
-        bindings[2].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[2].pImmutableSamplers = nullptr;
-
+        // 4. Create Descriptor Set Layout for Set 3.
         // Bindings 3-6: reflectionMap_0..3 (Combined Image Samplers). Four
         // separately-named bindings, not a samplerCube[] array -- this device
         // does not enable shaderSampledImageArrayDynamicIndexing, so a
         // dynamically-indexed sampler array would be illegal. Mirrors
         // point_shadow_map_0..3 in deferred_lighting.frag/pbr.frag.
+        coopa::gfx::pipeline::DescriptorLayoutBuilder gi_layout_builder;
+        gi_layout_builder.uniform_buffer(0, coopa::gfx::ShaderStage::Fragment);   // GiUniforms (UBO)
+        gi_layout_builder.storage_buffer(1, coopa::gfx::ShaderStage::Fragment);  // gi::SHProbes (SSBO)
+        gi_layout_builder.combined_sampler(2, coopa::gfx::ShaderStage::Fragment); // BRDF LUT
         for (uint32_t i = 0; i < MAX_REFLECTION_PROBES; ++i) {
-            bindings[3 + i].binding            = 3 + i;
-            bindings[3 + i].descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            bindings[3 + i].descriptorCount    = 1;
-            bindings[3 + i].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
-            bindings[3 + i].pImmutableSamplers = nullptr;
+            gi_layout_builder.combined_sampler(3 + i, coopa::gfx::ShaderStage::Fragment);
         }
-
-        // Binding 7: ReflectionProbeUBO { ReflectionProbeData probes[MAX_REFLECTION_PROBES]; }
-        bindings[7].binding            = 7;
-        bindings[7].descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        bindings[7].descriptorCount    = 1;
-        bindings[7].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[7].pImmutableSamplers = nullptr;
-
-        gi_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, bindings);
+        // ReflectionProbeUBO { ReflectionProbeData probes[MAX_REFLECTION_PROBES]; }
+        gi_layout_builder.uniform_buffer(7, coopa::gfx::ShaderStage::Fragment);
+        gi_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(gi_layout_builder.build(device));
 
         // 5. Create Descriptor Pool
-        std::vector<VkDescriptorPoolSize> pool_sizes = {
-            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 },
-            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 + MAX_REFLECTION_PROBES }
-        };
-        gi_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(device, 1, pool_sizes);
+        gi_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
+            coopa::gfx::pipeline::DescriptorPoolBuilder()
+                .add_sets(*gi_layout_, 1)
+                .build(device));
 
         // 6. Allocate Descriptor Set
         gi_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *gi_pool_, *gi_layout_);
@@ -331,15 +296,16 @@ public:
         }
     }
 
-    void bind(coopa::gfx::command::CommandBuffer& cmd, VkPipelineLayout layout) const {
-        bind_at_set(cmd, layout, 3);
+    /// @brief Binds gi_set_ at set index 3. Relies on the caller having
+    /// already called cmd.bind_pipeline() for this draw (true at every
+    /// ExtraSets::bind call site -- see extra_sets.h).
+    void bind(coopa::gfx::command::CommandBuffer& cmd) const {
+        bind_at_set(cmd, 3);
     }
 
-    void bind_at_set(coopa::gfx::command::CommandBuffer& cmd, VkPipelineLayout layout, uint32_t set_index) const {
+    void bind_at_set(coopa::gfx::command::CommandBuffer& cmd, uint32_t set_index) const {
         if (gi_set_) {
-            VkDescriptorSet raw_set = gi_set_->handle();
-            vkCmdBindDescriptorSets(cmd.handle(), VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    layout, set_index, 1, &raw_set, 0, nullptr);
+            cmd.bind_descriptor_set(*gi_set_, set_index);
         }
     }
 
@@ -347,6 +313,9 @@ public:
     const coopa::gfx::pipeline::DescriptorSetLayout& layout() const { return *gi_layout_; }
 
     VkImageView brdf_lut_view() const { return brdf_lut_ ? brdf_lut_->view() : VK_NULL_HANDLE; }
+    coopa::gfx::TextureView brdf_lut_view_typed() const {
+        return brdf_lut_ ? brdf_lut_->view_typed() : coopa::gfx::TextureView::null();
+    }
     VkSampler brdf_lut_sampler() const { return brdf_lut_ ? brdf_lut_->sampler() : VK_NULL_HANDLE; }
 
     bool is_active() const { return gi_active_; }
@@ -402,12 +371,12 @@ private:
             device_, cubemap_targets_[0]->prefilter_render_pass(),
             shaders_("env_prefilter.vert"),
             shaders_("env_prefilter.frag"),
-            cap_source_layout_->handle()
+            *cap_source_layout_
         );
 
         probe_capture_ = std::make_unique<ProbeCapturePass>(
             device_, cubemap_targets_[0]->render_pass(),
-            cap_camera_layout_->handle(), cap_light_layout_->handle(), cap_brdf_layout_->handle(),
+            *cap_camera_layout_, *cap_light_layout_, *cap_brdf_layout_,
             shaders_
         );
     }
@@ -513,40 +482,38 @@ private:
                 CubemapTarget::get_face_view(face, probe_pos),
                 face_proj, probe_pos, 0.0f);
 
-            VkCommandBuffer raw = cmd_pool_.begin_single_use();
-            coopa::gfx::command::CommandBuffer cmd(raw);
+            cmd_pool_.submit_once([&](coopa::gfx::command::CommandBuffer& cmd) {
+                // Colour attachment loadOp is hardcoded CLEAR, so the sky must be
+                // drawn INSIDE this same pass instance -- a separate pre-fill
+                // pass would just be cleared away by this one.
+                target.begin_face_pass(cmd, face);
 
-            // Colour attachment loadOp is hardcoded CLEAR, so the sky must be
-            // drawn INSIDE this same pass instance -- a separate pre-fill
-            // pass would just be cleared away by this one.
-            target.begin_face_pass(cmd, face);
+                probe_capture_->draw_sky_background(cmd, face); // depth off, fills every texel
 
-            probe_capture_->draw_sky_background(cmd, face); // depth off, fills every texel
+                probe_capture_->bind_geometry(cmd); // depth on, LESS, writes
+                cmd.bind_descriptor_set(*cap_camera_set_, 0);
+                cmd.bind_descriptor_set(*cap_light_set_,  1);
+                cmd.bind_descriptor_set(*cap_brdf_set_,   2);
 
-            probe_capture_->bind_geometry(cmd); // depth on, LESS, writes
-            cmd.bind_descriptor_set(probe_capture_->geometry_layout(), *cap_camera_set_, 0);
-            cmd.bind_descriptor_set(probe_capture_->geometry_layout(), *cap_light_set_,  1);
-            cmd.bind_descriptor_set(probe_capture_->geometry_layout(), *cap_brdf_set_,   2);
+                batcher.bind(cmd);
+                for (const auto& b : batcher.batches()) {
+                    const auto& mat = items[b.item_index].mr->material;
+                    ProbeCapturePass::PushConstants pc{};
+                    // Probe captures always render fully opaque -- mat.alpha/alpha_mode are not
+                    // forwarded here. Transparent renderers are still baked in as opaque geometry
+                    // (not excluded); see the "known limitations" note in the transparency plan.
+                    pc.albedo       = glm::vec4(mat.albedo, 1.0f);
+                    pc.metallic     = mat.metallic;
+                    pc.roughness    = mat.roughness;
+                    pc.ao           = mat.ao;
+                    pc.alpha_cutoff = 0.0f;
+                    probe_capture_->push(cmd, pc);
+                    b.mesh->bind(cmd);
+                    b.mesh->draw(cmd, b.instance_count, b.first_instance);
+                }
 
-            batcher.bind(cmd);
-            for (const auto& b : batcher.batches()) {
-                const auto& mat = items[b.item_index].mr->material;
-                ProbeCapturePass::PushConstants pc{};
-                // Probe captures always render fully opaque -- mat.alpha/alpha_mode are not
-                // forwarded here. Transparent renderers are still baked in as opaque geometry
-                // (not excluded); see the "known limitations" note in the transparency plan.
-                pc.albedo       = glm::vec4(mat.albedo, 1.0f);
-                pc.metallic     = mat.metallic;
-                pc.roughness    = mat.roughness;
-                pc.ao           = mat.ao;
-                pc.alpha_cutoff = 0.0f;
-                probe_capture_->push(cmd, pc);
-                b.mesh->bind(cmd);
-                b.mesh->draw(cmd, b.instance_count, b.first_instance);
-            }
-
-            target.end_face_pass(cmd);
-            cmd_pool_.end_single_use(raw, device_.graphics_queue());
+                target.end_face_pass(cmd);
+            });
         }
 
         // --- (4) Two-stage barrier + prefilter of mips 1..N-1 from the
@@ -555,28 +522,26 @@ private:
                   << " mips from captured mip 0..." << std::endl;
 
         const uint32_t mips = target.mip_levels();
-        VkCommandBuffer raw = cmd_pool_.begin_single_use();
-        coopa::gfx::command::CommandBuffer cmd(raw);
+        cmd_pool_.submit_once([&](coopa::gfx::command::CommandBuffer& cmd) {
+            // mip 0 becomes the prefilter's SOURCE, so it must be readable first.
+            target.transition_mip_range_to_shader_read(cmd, 0, 1);
 
-        // mip 0 becomes the prefilter's SOURCE, so it must be readable first.
-        target.transition_mip_range_to_shader_read(cmd, 0, 1);
-
-        if (mips > 1) {
-            // Legal simultaneously: mip 0 in SHADER_READ_ONLY (sampled via
-            // mip0_cube_view) while mips 1..N-1 are still color attachments --
-            // layouts are per-subresource and these ranges are disjoint, so
-            // there is no feedback loop.
-            env_prefilter_->execute(cmd, target, source_set);
-            target.transition_mip_range_to_shader_read(cmd, 1, mips - 1);
-        }
-        cmd_pool_.end_single_use(raw, device_.graphics_queue());
+            if (mips > 1) {
+                // Legal simultaneously: mip 0 in SHADER_READ_ONLY (sampled via
+                // mip0_cube_view) while mips 1..N-1 are still color attachments --
+                // layouts are per-subresource and these ranges are disjoint, so
+                // there is no feedback loop.
+                env_prefilter_->execute(cmd, target, source_set);
+                target.transition_mip_range_to_shader_read(cmd, 1, mips - 1);
+            }
+        });
     }
 
     void update_descriptors_() {
         if (!gi_set_ || cubemap_targets_.empty() || !cubemap_targets_[0] || !cubemap_samplers_[0]) return;
         gi_set_->bind_buffer(0, gi_data_->uniforms_buffer());
         gi_set_->bind_storage_buffer(1, gi_data_->probes_buffer());
-        gi_set_->bind_image(2, brdf_lut_->view(), brdf_lut_->sampler());
+        gi_set_->bind_image(2, brdf_lut_->view_typed(), brdf_lut_->sampler_object());
         // Bind every reflectionMap_0..3 slot. Slots beyond how many cubemaps
         // actually exist yet fall back to slot 0 as a harmless placeholder --
         // never sampled with nonzero weight since the shader gates on

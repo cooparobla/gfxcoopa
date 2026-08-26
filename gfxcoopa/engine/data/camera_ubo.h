@@ -12,7 +12,6 @@
 #ifndef GFXCOOPA_ENGINE_DATA_CAMERA_UBO_H
 #define GFXCOOPA_ENGINE_DATA_CAMERA_UBO_H
 
-#include <volk/volk.h>
 #include <glm/glm.hpp>
 #include <cmath>
 

@@ -25,6 +25,8 @@
 #include <gfxcoopa/memory/buffer.h>
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/command/command_pool.h>
+#include <gfxcoopa/types/vertex_layout.h>
+#include <gfxcoopa/types/format.h>
 
 #include <vector>
 #include <array>
@@ -90,6 +92,19 @@ struct Vertex {
 
         return attrs;
     }
+
+    /**
+     * @brief Sealed vertex input layout for binding 0 (position/normal/uv/tangent),
+     * replacing binding_description()/attribute_descriptions() above.
+     */
+    static VertexLayout layout() {
+        return VertexLayout{}
+            .binding(0, sizeof(Vertex))
+            .attribute(0, Format::RGB32_Sfloat,  static_cast<uint32_t>(offsetof(Vertex, position)))
+            .attribute(1, Format::RGB32_Sfloat,  static_cast<uint32_t>(offsetof(Vertex, normal)))
+            .attribute(2, Format::RG32_Sfloat,   static_cast<uint32_t>(offsetof(Vertex, uv)))
+            .attribute(3, Format::RGBA32_Sfloat, static_cast<uint32_t>(offsetof(Vertex, tangent)));
+    }
 };
 
 /**
@@ -132,6 +147,22 @@ struct InstanceData {
             attrs[i].offset   = static_cast<uint32_t>(offsetof(InstanceData, model) + i * sizeof(glm::vec4));
         }
         return attrs;
+    }
+
+    /**
+     * @brief Sealed vertex input layout for binding 1 (per-instance model matrix,
+     * locations 4-7), replacing binding_description()/attribute_descriptions() above.
+     * Combine with Vertex::layout() via `Vertex::layout().append(InstanceData::layout())`
+     * for a pipeline that reads both streams.
+     */
+    static VertexLayout layout() {
+        VertexLayout vl;
+        vl.binding(1, sizeof(InstanceData), VertexRate::Instance);
+        for (uint32_t i = 0; i < 4; ++i) {
+            vl.attribute(4 + i, Format::RGBA32_Sfloat,
+                        static_cast<uint32_t>(offsetof(InstanceData, model) + i * sizeof(glm::vec4)));
+        }
+        return vl;
     }
 };
 

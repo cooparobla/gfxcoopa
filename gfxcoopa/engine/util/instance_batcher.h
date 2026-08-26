@@ -11,7 +11,6 @@
 #ifndef GFXCOOPA_ENGINE_UTIL_INSTANCE_BATCHER_H
 #define GFXCOOPA_ENGINE_UTIL_INSTANCE_BATCHER_H
 
-#include <volk/volk.h>
 #include <glm/glm.hpp>
 
 #include <gfxcoopa/core/device.h>

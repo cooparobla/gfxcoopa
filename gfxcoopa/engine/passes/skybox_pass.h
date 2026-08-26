@@ -36,7 +36,7 @@ public:
 
     SkyboxPass(coopa::gfx::core::Device& device,
                coopa::gfx::pipeline::RenderPass& offscreen_pass,
-               VkDescriptorSetLayout camera_layout,
+               const coopa::gfx::pipeline::DescriptorSetLayout& camera_layout,
                const std::string& vert_spv,
                const std::string& frag_spv)
         : device_(device)
@@ -45,56 +45,36 @@ public:
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
         // Descriptor set layout (Set 1): G-Buffer normal/metallic sampler
-        std::vector<VkDescriptorSetLayoutBinding> normal_bindings(1);
-        normal_bindings[0].binding            = 0;
-        normal_bindings[0].descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        normal_bindings[0].descriptorCount    = 1;
-        normal_bindings[0].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
-        normal_bindings[0].pImmutableSamplers = nullptr;
-
         normal_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            device, normal_bindings
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .build(device)
         );
 
         normal_desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device, 1,
-            std::vector<VkDescriptorPoolSize>{
-                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}
-            }
+            coopa::gfx::pipeline::DescriptorPoolBuilder()
+                .add_sets(*normal_desc_layout_, 1)
+                .build(device)
         );
 
         normal_desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(
             device, *normal_desc_pool_, *normal_desc_layout_
         );
 
-        coopa::gfx::pipeline::PipelineConfig cfg{};
-        cfg.cull_mode   = VK_CULL_MODE_NONE;
-        cfg.depth_test  = false;
-        cfg.depth_write = false;
+        coopa::gfx::pipeline::PipelineDesc desc;
+        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
+        desc.vertex  = coopa::gfx::VertexLayout::none();
+        desc.raster.cull = coopa::gfx::CullMode::None;
+        desc.depth.test  = false;
+        desc.depth.write = false;
+        desc.descriptor_layouts = {&camera_layout, normal_desc_layout_.get()};
+        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(SkyboxPushConstants)}};
 
-        VkPushConstantRange pc_range{};
-        pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        pc_range.offset     = 0;
-        pc_range.size       = sizeof(SkyboxPushConstants);
-
-        std::vector<VkDescriptorSetLayout> layouts = {
-            camera_layout,
-            normal_desc_layout_->handle()
-        };
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, offscreen_pass,
-            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), frag_shader_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            layouts,
-            cfg,
-            std::vector<VkPushConstantRange>{pc_range}
-        );
+        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, offscreen_pass, desc);
     }
 
-    void set_gbuffer_normal_image(VkImageView g1_view, const util::Sampler& linear_sampler) {
-        normal_desc_set_->bind_image(0, g1_view, linear_sampler.handle());
+    void set_gbuffer_normal_image(coopa::gfx::TextureView g1_view, const util::Sampler& linear_sampler) {
+        normal_desc_set_->bind_image(0, g1_view, linear_sampler);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd,
@@ -109,10 +89,10 @@ public:
 
         SkyboxPushConstants pc{};
         pc.inv_view_proj = glm::inverse(proj * view);
-        cmd.push_constants(pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SkyboxPushConstants), &pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
 
-        cmd.bind_descriptor_set(pipeline_->layout(), camera_set, 0);
-        cmd.bind_descriptor_set(pipeline_->layout(), *normal_desc_set_, 1);
+        cmd.bind_descriptor_set(camera_set, 0);
+        cmd.bind_descriptor_set(*normal_desc_set_, 1);
 
         cmd.draw(3); // Fullscreen triangle
     }

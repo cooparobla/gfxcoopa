@@ -83,6 +83,18 @@ struct VertexLayout {
     /// @brief An empty layout, for vertex-less fullscreen-triangle passes
     /// whose vertices are generated entirely in the vertex shader.
     static VertexLayout none() { return VertexLayout{}; }
+
+    /// @brief Appends another layout's bindings/attributes onto this one --
+    /// e.g. `Vertex::layout().append(InstanceData::layout())` for a pipeline
+    /// that reads a per-vertex stream at binding 0 and a per-instance stream
+    /// at binding 1. Binding/location indices are taken as-is from `other`,
+    /// not renumbered, so the two layouts must already use disjoint indices.
+    /// @return *this, for chaining.
+    VertexLayout& append(const VertexLayout& other) {
+        bindings.insert(bindings.end(), other.bindings.begin(), other.bindings.end());
+        attributes.insert(attributes.end(), other.attributes.begin(), other.attributes.end());
+        return *this;
+    }
 };
 
 } // namespace gfx

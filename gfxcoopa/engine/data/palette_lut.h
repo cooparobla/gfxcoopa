@@ -59,8 +59,8 @@ public:
             uint8_t dummy[4] = {255, 255, 255, 255};
             return PaletteLut(
                 coopa::gfx::engine::data::Texture::upload(device, allocator, cmd_pool, dummy, 1, 1,
-                                                          /*srgb=*/false, VK_FILTER_NEAREST,
-                                                          VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE),
+                                                          coopa::gfx::Format::RGBA8_Unorm,
+                                                          coopa::gfx::SamplerDesc::pixel_art()),
                 0);
         }
 
@@ -100,12 +100,14 @@ public:
         uint32_t count = static_cast<uint32_t>(entries.size() / 4);
         auto texture = coopa::gfx::engine::data::Texture::upload(
             device, allocator, cmd_pool, entries.data(), count, 1,
-            /*srgb=*/false, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+            coopa::gfx::Format::RGBA8_Unorm, coopa::gfx::SamplerDesc::pixel_art());
         return PaletteLut(std::move(texture), count);
     }
 
     VkImageView view() const { return texture_.view(); }
+    coopa::gfx::TextureView view_typed() const { return texture_.view_typed(); }
     VkSampler   sampler() const { return texture_.sampler(); }
+    const coopa::gfx::engine::util::Sampler& sampler_object() const { return texture_.sampler_object(); }
     uint32_t    count() const { return count_; }
 
 private:

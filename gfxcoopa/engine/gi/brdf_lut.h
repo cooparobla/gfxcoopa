@@ -67,7 +67,9 @@ public:
     BRDFLUT& operator=(const BRDFLUT&) = delete;
 
     VkImageView view() const { return lut_image_->view(); }
+    coopa::gfx::TextureView view_typed() const { return lut_image_->view_typed(); }
     VkSampler sampler() const { return lut_sampler_->handle(); }
+    const util::Sampler& sampler_object() const { return *lut_sampler_; }
     const memory::Image& image() const { return *lut_image_; }
 
 private:
@@ -109,27 +111,24 @@ private:
             {}, {}, {}, cfg, {}
         );
 
-        VkCommandBuffer raw_cmd = cmd_pool.begin_single_use();
-        command::CommandBuffer cmd(raw_cmd);
+        cmd_pool.submit_once([&](command::CommandBuffer& cmd) {
+            VkClearValue clear_color = {{{0.0f, 0.0f, 0.0f, 0.0f}}};
+            VkRenderPassBeginInfo pass_begin{};
+            pass_begin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            pass_begin.renderPass        = render_pass.handle();
+            pass_begin.framebuffer       = framebuffer;
+            pass_begin.renderArea.offset = {0, 0};
+            pass_begin.renderArea.extent = {512, 512};
+            pass_begin.clearValueCount   = 1;
+            pass_begin.pClearValues      = &clear_color;
 
-        VkClearValue clear_color = {{{0.0f, 0.0f, 0.0f, 0.0f}}};
-        VkRenderPassBeginInfo pass_begin{};
-        pass_begin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        pass_begin.renderPass        = render_pass.handle();
-        pass_begin.framebuffer       = framebuffer;
-        pass_begin.renderArea.offset = {0, 0};
-        pass_begin.renderArea.extent = {512, 512};
-        pass_begin.clearValueCount   = 1;
-        pass_begin.pClearValues      = &clear_color;
-
-        vkCmdBeginRenderPass(cmd.handle(), &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
-        cmd.bind_pipeline(lut_pipeline);
-        cmd.set_viewport(0.0f, 0.0f, 512.0f, 512.0f);
-        cmd.set_scissor(0, 0, 512, 512);
-        cmd.draw(3);
-        cmd.end_render_pass();
-
-        cmd_pool.end_single_use(raw_cmd, device.graphics_queue());
+            vkCmdBeginRenderPass(cmd.handle(), &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+            cmd.bind_pipeline(lut_pipeline);
+            cmd.set_viewport(0.0f, 0.0f, 512.0f, 512.0f);
+            cmd.set_scissor(0, 0, 512, 512);
+            cmd.draw(3);
+            cmd.end_render_pass();
+        });
 
         vkDestroyFramebuffer(device.handle(), framebuffer, nullptr);
     }

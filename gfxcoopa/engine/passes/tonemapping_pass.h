@@ -56,23 +56,16 @@ public:
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
         // Descriptor set layout: Binding 0 = sampler2D (HDR image)
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding         = 0;
-        binding.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        binding.descriptorCount = 1;
-        binding.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
-
         desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            device,
-            std::vector<VkDescriptorSetLayoutBinding>{binding}
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .build(device)
         );
 
         desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device,
-            1,
-            std::vector<VkDescriptorPoolSize>{
-                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}
-            }
+            coopa::gfx::pipeline::DescriptorPoolBuilder()
+                .add_sets(*desc_layout_, 1)
+                .build(device)
         );
 
         desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(
@@ -80,31 +73,22 @@ public:
         );
 
         // Pipeline config: backface cull off, no depth test, no blending
-        coopa::gfx::pipeline::PipelineConfig cfg{};
-        cfg.cull_mode   = VK_CULL_MODE_NONE;
-        cfg.depth_test  = false;
-        cfg.depth_write = false;
+        coopa::gfx::pipeline::PipelineDesc desc;
+        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
+        desc.vertex  = coopa::gfx::VertexLayout::none();
+        desc.raster.cull = coopa::gfx::CullMode::None;
+        desc.depth.test  = false;
+        desc.depth.write = false;
+        desc.descriptor_layouts = {desc_layout_.get()};
+        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
 
-        VkPushConstantRange pc_range{};
-        pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        pc_range.offset     = 0;
-        pc_range.size       = sizeof(PushConstants);
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, swapchain_pass,
-            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), frag_shader_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            std::vector<VkDescriptorSetLayout>{desc_layout_->handle()},
-            cfg,
-            std::vector<VkPushConstantRange>{pc_range}
-        );
+        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, swapchain_pass, desc);
 
         (void)linear_sampler;
     }
 
-    void set_source_image(VkImageView hdr_view, const util::Sampler& linear_sampler) {
-        desc_set_->bind_image(0, hdr_view, linear_sampler.handle());
+    void set_source_image(coopa::gfx::TextureView hdr_view, const util::Sampler& linear_sampler) {
+        desc_set_->bind_image(0, hdr_view, linear_sampler);
     }
 
     void set_exposure(float exposure) {
@@ -127,7 +111,7 @@ public:
         cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
         cmd.set_scissor(0, 0, viewport_w, viewport_h);
 
-        cmd.bind_descriptor_set(pipeline_->layout(), *desc_set_, 0);
+        cmd.bind_descriptor_set(*desc_set_, 0);
 
         PushConstants pc{
             exposure_,
@@ -138,7 +122,7 @@ public:
             edge_threshold_,
             edge_threshold_min_
         };
-        cmd.push_constants(pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
 
         cmd.draw(3); // Fullscreen triangle
     }

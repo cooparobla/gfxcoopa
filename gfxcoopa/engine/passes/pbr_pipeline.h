@@ -40,52 +40,35 @@ public:
 
     PbrPipeline(coopa::gfx::core::Device& device,
                 coopa::gfx::pipeline::RenderPass& render_pass,
-                VkDescriptorSetLayout camera_layout,
-                VkDescriptorSetLayout light_layout,
-                VkDescriptorSetLayout shadow_layout,
-                VkDescriptorSetLayout material_layout,
+                const coopa::gfx::pipeline::DescriptorSetLayout& camera_layout,
+                const coopa::gfx::pipeline::DescriptorSetLayout& light_layout,
+                const coopa::gfx::pipeline::DescriptorSetLayout& shadow_layout,
+                const coopa::gfx::pipeline::DescriptorSetLayout* material_layout,
                 const std::string& vert_spv,
-                const std::string& frag_spv,
-                VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_4_BIT)
+                const std::string& frag_spv)
         : device_(device)
     {
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        auto binding = coopa::gfx::engine::data::Vertex::binding_description();
-        auto attrs   = coopa::gfx::engine::data::Vertex::attribute_descriptions();
-        std::vector<VkVertexInputAttributeDescription> attr_vec(attrs.begin(), attrs.end());
+        coopa::gfx::pipeline::PipelineDesc desc;
+        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
+        desc.vertex  = coopa::gfx::engine::data::Vertex::layout();
+        desc.raster.cull  = coopa::gfx::CullMode::Back;
+        desc.raster.front = coopa::gfx::FrontFace::CounterClockwise;
+        desc.depth.test  = true;
+        desc.depth.write = true;
+        // samples: no longer a caller-set param -- the sealed Pipeline ctor reads it from
+        // `render_pass` itself (RenderPass::samples()), which can never disagree.
 
-        coopa::gfx::pipeline::PipelineConfig cfg{};
-        cfg.cull_mode   = VK_CULL_MODE_BACK_BIT;
-        cfg.front_face  = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        cfg.depth_test  = true;
-        cfg.depth_write = true;
-        cfg.samples     = samples;
-
-        VkPushConstantRange pc_range{};
-        pc_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        pc_range.offset     = 0;
-        pc_range.size       = sizeof(PushConstants);
-
-        std::vector<VkDescriptorSetLayout> layouts = {
-            camera_layout,
-            light_layout,
-            shadow_layout
-        };
-        if (material_layout != VK_NULL_HANDLE) {
-            layouts.push_back(material_layout);
+        desc.descriptor_layouts = {&camera_layout, &light_layout, &shadow_layout};
+        if (material_layout) {
+            desc.descriptor_layouts.push_back(material_layout);
         }
+        desc.push_constants = {{coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment,
+                                0, sizeof(PushConstants)}};
 
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, render_pass,
-            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), frag_shader_.get()},
-            std::vector<VkVertexInputBindingDescription>{binding},
-            attr_vec,
-            layouts,
-            cfg,
-            std::vector<VkPushConstantRange>{pc_range}
-        );
+        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, render_pass, desc);
     }
 
     void bind(coopa::gfx::command::CommandBuffer& cmd) const {
@@ -93,9 +76,7 @@ public:
     }
 
     void push(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& pc) const {
-        cmd.push_constants(pipeline_->layout(),
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(PushConstants), &pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, pc);
     }
 
     VkPipelineLayout layout() const {

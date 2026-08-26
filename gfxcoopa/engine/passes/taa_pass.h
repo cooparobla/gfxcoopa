@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <glm/glm.hpp>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
@@ -58,42 +59,31 @@ public:
 
         // Clear history immediately? Not strictly necessary as it will be initialized soon,
         // but it's good practice. (We assume it's just zeroed or we ignore the first frame).
-        
-        std::vector<VkDescriptorSetLayoutBinding> bindings = {
-            {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
-        };
-        
-        layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, bindings);
+
+        layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
 
         desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device, 1, std::vector<VkDescriptorPoolSize>{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2}}
-        );
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*layout_, 1).build(device));
 
         set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *layout_);
 
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_path, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_path, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        coopa::gfx::pipeline::PipelineConfig cfg{};
-        cfg.cull_mode   = VK_CULL_MODE_NONE;
-        cfg.depth_test  = false;
-        cfg.depth_write = false;
+        coopa::gfx::pipeline::PipelineDesc desc;
+        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
+        desc.vertex  = coopa::gfx::VertexLayout::none();
+        desc.raster.cull = coopa::gfx::CullMode::None;
+        desc.depth.test  = false;
+        desc.depth.write = false;
+        desc.descriptor_layouts = {layout_.get()};
+        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
 
-        VkPushConstantRange pc_range{};
-        pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        pc_range.offset     = 0;
-        pc_range.size       = sizeof(PushConstants);
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, render_pass,
-            std::vector<coopa::gfx::pipeline::Shader*>{vert_shader_.get(), frag_shader_.get()},
-            std::vector<VkVertexInputBindingDescription>{},
-            std::vector<VkVertexInputAttributeDescription>{},
-            std::vector<VkDescriptorSetLayout>{layout_->handle()},
-            cfg,
-            std::vector<VkPushConstantRange>{pc_range}
-        );
+        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, render_pass, desc);
     }
 
     void recreate(uint32_t width, uint32_t height) {
@@ -109,15 +99,15 @@ public:
         history_initialized_ = false;
 
         // Need to re-bind because views changed
-        if (last_scene_view_ != VK_NULL_HANDLE) {
+        if (last_scene_view_ != coopa::gfx::TextureView::null()) {
             set_source_image(last_scene_view_);
         }
     }
 
-    void set_source_image(VkImageView scene_view) {
+    void set_source_image(coopa::gfx::TextureView scene_view) {
         last_scene_view_ = scene_view;
-        set_->bind_image(0, scene_view, sampler_.handle());
-        set_->bind_image(1, history_image_->view(), sampler_.handle());
+        set_->bind_image(0, scene_view, sampler_);
+        set_->bind_image(1, history_image_->view_typed(), sampler_);
     }
 
     void set_taa_config(float blend_factor, float weight_scale) {
@@ -158,8 +148,8 @@ public:
         cmd.set_viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
         cmd.set_scissor(0, 0, width, height);
         
-        cmd.bind_descriptor_set(pipeline_->layout(), *set_, 0);
-        cmd.push_constants(pipeline_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
+        cmd.bind_descriptor_set(*set_, 0);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
 
         cmd.draw(3);
     }
@@ -241,7 +231,7 @@ private:
     float blend_factor_ = 0.9f;
     float weight_scale_ = 30.0f;
     
-    VkImageView last_scene_view_ = VK_NULL_HANDLE;
+    coopa::gfx::TextureView last_scene_view_ = coopa::gfx::TextureView::null();
 
     std::unique_ptr<coopa::gfx::memory::Image>                 history_image_;
 

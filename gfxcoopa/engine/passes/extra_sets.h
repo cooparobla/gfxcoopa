@@ -6,13 +6,13 @@
 #ifndef GFXCOOPA_ENGINE_PASSES_EXTRA_SETS_H
 #define GFXCOOPA_ENGINE_PASSES_EXTRA_SETS_H
 
-#include <volk/volk.h>
 #include <functional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include <gfxcoopa/command/command_buffer.h>
+#include <gfxcoopa/pipeline/descriptor.h>
 
 namespace coopa {
 namespace gfx {
@@ -37,20 +37,26 @@ namespace passes {
  * apart, so the type makes them travel together and validate() turns a
  * mismatch into a startup exception instead of a validation-layer warning
  * discovered at draw time.
+ *
+ * `bind` takes no VkPipelineLayout: every call site invokes it after the
+ * pass's own cmd.bind_pipeline(), which already caches that pipeline's
+ * layout on CommandBuffer for the sealed bind_descriptor_set()/
+ * push_constants() overloads to use -- see command_buffer.h's bound_pipeline_.
  */
 struct ExtraSets {
     /// Appended in order after a pass's own layouts. Empty (the default)
     /// yields a pipeline layout with no trailing sets at all -- what makes
     /// "no GI" (or no anything else) a real configuration, not a cosmetic
     /// runtime branch against a layout that still declares the set.
-    std::vector<VkDescriptorSetLayout> layouts;
+    std::vector<const coopa::gfx::pipeline::DescriptorSetLayout*> layouts;
 
-    /// Invoked once per draw that uses this pass's pipeline layout.
-    /// `first_set` is the index of layouts[0] in that pipeline layout --
-    /// never hardcode it at the call site, since it shifts if the pass
-    /// gains or loses an owned set. Must be set iff `layouts` is non-empty
-    /// (see validate()). The callback must outlive the pass it's given to.
-    std::function<void(coopa::gfx::command::CommandBuffer&, VkPipelineLayout, uint32_t first_set)> bind;
+    /// Invoked once per draw that uses this pass's pipeline layout, AFTER
+    /// that pass has called cmd.bind_pipeline(). `first_set` is the index of
+    /// layouts[0] in that pipeline layout -- never hardcode it at the call
+    /// site, since it shifts if the pass gains or loses an owned set. Must
+    /// be set iff `layouts` is non-empty (see validate()). The callback must
+    /// outlive the pass it's given to.
+    std::function<void(coopa::gfx::command::CommandBuffer&, uint32_t first_set)> bind;
 
     bool empty() const { return layouts.empty(); }
 
