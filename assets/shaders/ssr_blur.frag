@@ -1,0 +1,88 @@
+#version 450
+
+// gfx-shared SSR bilateral blur -- spatial denoise for the temporally-resolved SSR buffer,
+// structurally identical to ssao_blur.frag's own edge-aware blur (same 5x5 footprint, same
+// normal/plane-distance weighting sourced from the G-buffer), adapted to blur a vec4
+// (premultiplied color + confidence, GfxSsrHit's own convention -- see gfx/ssr_trace_body.glsl)
+// instead of a scalar AO value.
+//
+// Why this exists: SsrPass's raymarch (ssr.frag) produces a single sample per pixel per frame;
+// temporal resolve blends that against history, but the reflection's confidence fades
+// (roughness_fade/grazing_fade/dist_fade, plus the underlying Hi-Z hit/miss test itself) create
+// a genuinely noisy hit/miss BOUNDARY near silhouettes and grazing angles that temporal
+// accumulation alone never fully converges on -- especially under continuous camera motion,
+// where the boundary itself keeps moving frame to frame. SsaoPass solved the analogous problem
+// (single-sample raw AO noise) with exactly this kind of spatial blur; SSR had no equivalent
+// stage until now.
+
+layout(location = 0) in vec2 in_uv;
+layout(location = 0) out vec4 out_ssr;
+
+layout(set = 0, binding = 0) uniform sampler2D u_ssr;                 // resolved SSR (post temporal)
+layout(set = 0, binding = 1) uniform sampler2D g_normal_metallic;
+layout(set = 0, binding = 2) uniform sampler2D g_position_roughness;
+
+layout(push_constant) uniform BlurPushConstants {
+    float radius;  // ssr_blur_radius -- sigma for the plane-distance weight scales with it
+} pc;
+
+void main() {
+    // u_ssr is sampled at ITS OWN native resolution (texelFetch, pixel-exact -- this is the
+    // buffer actually being blurred). g_normal_metallic/g_position_roughness are sampled by
+    // NORMALIZED UV instead, not texelFetch: unlike ssao_blur.frag (which always runs at full
+    // G-buffer resolution, no mismatch possible), SsrPass's trace/resolve/blur chain can run at
+    // HALF the G-buffer's resolution (the half_res ctor param -- unused by toyengine today, but
+    // this file is shared gfxcoopa code another consumer may enable). UV sampling scales
+    // proportionally regardless of the two textures' relative sizes; a NEAREST sampler (bound by
+    // the caller, matching every other in-shader G-buffer point-lookup in this engine -- see
+    // ssr.frag's own nearest_sampler_ doc) keeps this exactly as point-sampled as texelFetch
+    // would be when the resolutions DO match, which is toyengine's actual case today.
+    ivec2 size = textureSize(u_ssr, 0);
+    ivec2 center_px = clamp(ivec2(gl_FragCoord.xy), ivec2(0), size - 1);
+    vec2  texel_uv = 1.0 / vec2(size);
+
+    vec3 Nc = texture(g_normal_metallic, in_uv).rgb;
+    vec4 center = texelFetch(u_ssr, center_px, 0);
+
+    // Background: nothing to weight against (G2 holds no real surface here) -- pass through,
+    // matching ssao_blur.frag's own early-out for the same case.
+    if (dot(Nc, Nc) < 0.001) {
+        out_ssr = center;
+        return;
+    }
+    Nc = normalize(Nc);
+    vec3 Pc = texture(g_position_roughness, in_uv).rgb;
+
+    // Plane-distance sigma scales with the blur radius -- same scale-relative philosophy as
+    // ssao_blur.frag / ssr_common.glsl (world-space tuning survives the scene/camera being
+    // authored at a different scale), rather than a fixed-in-world-units constant.
+    float sigma = max(pc.radius * 0.5, 1e-4);
+
+    // Symmetric 5x5 footprint, identical to ssao_blur.frag's own -- see that file's doc for why
+    // symmetric (not the old asymmetric box-blur footprint) is correct once the source is
+    // already temporally denoised before this runs.
+    vec4  sum  = vec4(0.0);
+    float wsum = 0.0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            vec2  tap_uv = clamp(in_uv + vec2(x, y) * texel_uv, vec2(0.0), vec2(1.0));
+            ivec2 tap_px = clamp(center_px + ivec2(x, y), ivec2(0), size - 1);
+
+            vec3 Nt = texture(g_normal_metallic, tap_uv).rgb;
+            if (dot(Nt, Nt) < 0.001) continue; // background tap -- skip, don't drag the buffer toward 0
+
+            Nt = normalize(Nt);
+            vec3 Pt = texture(g_position_roughness, tap_uv).rgb;
+
+            float wn = pow(max(dot(Nc, Nt), 0.0), 16.0);
+            float d  = dot(Nc, Pt - Pc);
+            float wd = exp(-(d * d) / (2.0 * sigma * sigma));
+            float w  = wn * wd;
+
+            sum  += texelFetch(u_ssr, tap_px, 0) * w;
+            wsum += w;
+        }
+    }
+
+    out_ssr = (wsum > 1e-5) ? (sum / wsum) : center;
+}
