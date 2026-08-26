@@ -20,6 +20,7 @@
 #include <gfxcoopa/memory/buffer.h>
 #include <gfxcoopa/memory/image.h>
 #include <gfxcoopa/command/command_pool.h>
+#include <gfxcoopa/types/enums.h>
 
 #include <memory>
 #include <cstdint>
@@ -139,6 +140,12 @@ inline std::unique_ptr<Image> upload_image_2d(core::Device&         device,
     vkQueueWaitIdle(device.graphics_queue());
 
     vkFreeCommandBuffers(device.handle(), cmd_pool.handle(), 1, &cmd_handle);
+
+    // This function predates command::CommandBuffer::transition() and
+    // records its own raw barriers above rather than using it, but the
+    // image it returns should still report its true usage to later
+    // transition() calls -- see Image::mark_transitioned()'s docs.
+    image->mark_transitioned(TextureUsage::ShaderRead);
 
     return image;
 }

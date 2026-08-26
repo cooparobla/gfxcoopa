@@ -24,6 +24,9 @@
 #include <gfxcoopa/memory/buffer.h>
 #include <gfxcoopa/util/error.h>
 #include <gfxcoopa/util/format.h>
+#include <gfxcoopa/types/enums.h>
+#include <gfxcoopa/types/texture_view.h>
+#include <gfxcoopa/detail/vk_convert.h>
 
 namespace coopa {
 namespace gfx {
@@ -68,6 +71,32 @@ public:
     }
 
     /**
+     * @brief Creates a 2D image using gfxcoopa's sealed Format/ImageUsage/
+     * MemoryResidency/SampleCount vocabulary instead of raw Vulkan/VMA types.
+     *
+     * The aspect mask (color vs. depth[+stencil]) is derived automatically
+     * from `format` -- callers never pass VK_IMAGE_ASPECT_COLOR_BIT by hand,
+     * which is exactly the hardcoded-to-COLOR assumption that forced the
+     * pre-seal depth-image barrier workarounds downstream.
+     *
+     * @param device    The logical device.
+     * @param allocator The VMA allocator.
+     * @param width     Image width in pixels.
+     * @param height    Image height in pixels.
+     * @param format    Pixel format.
+     * @param usage     Every role this image may be used in (bitmask).
+     * @param residency Where the memory lives; GpuOnly for render targets.
+     * @param samples   MSAA sample count.
+     */
+    Image(core::Device& device, Allocator& allocator, uint32_t width, uint32_t height,
+          Format format, ImageUsage usage,
+          MemoryResidency residency = MemoryResidency::GpuOnly,
+          SampleCount samples = SampleCount::X1)
+        : Image(device, allocator, width, height, detail::to_vk(format), detail::to_vk(usage),
+                detail::aspect_mask_for(format), detail::to_vma(residency).usage, detail::to_vk(samples))
+    {}
+
+    /**
      * @brief Destroys the image view, then the image and its allocation.
      */
     ~Image() {
@@ -95,10 +124,21 @@ public:
     VkImageView view() const { return view_; }
 
     /**
+     * @brief Returns a sealed TextureView identity for this image's view.
+     *
+     * The sibling of view() that public gfxcoopa signatures should return
+     * going forward -- see gfxcoopa/types/texture_view.h for why.
+     */
+    TextureView view_typed() const { return detail::wrap(view_); }
+
+    /**
      * @brief Returns the image format.
      * @return VkFormat of this image.
      */
     VkFormat format() const { return format_; }
+
+    /// @brief Returns the sealed Format sibling of format().
+    Format format_typed() const { return detail::from_vk(format_); }
 
     /**
      * @brief Returns the image width in pixels.
@@ -174,7 +214,37 @@ public:
                              1, &barrier);
     }
 
+    /**
+     * @brief Returns the TextureUsage this image was last transitioned to
+     * via command::CommandBuffer::transition(), or TextureUsage::Undefined
+     * if it has never been transitioned that way (including images only
+     * ever touched via the raw transition_layout() above).
+     *
+     * This is what lets CommandBuffer::transition() drop the "from"
+     * argument entirely: the Image remembers its own current usage, so a
+     * caller never has to separately track (and risk getting wrong) what
+     * layout an image was last left in.
+     */
+    TextureUsage current_usage() const { return current_usage_; }
+
+    /**
+     * @brief Records that this image has been transitioned to `usage` by
+     * some means OTHER than command::CommandBuffer::transition() (which
+     * calls this internally already).
+     *
+     * Advanced/internal: only needed by code that records its own raw
+     * `vkCmdPipelineBarrier` outside CommandBuffer::transition() -- e.g.
+     * memory::upload_image_2d(), a pre-seal free function that predates
+     * this tracking and is not being rewritten to use CommandBuffer here.
+     * Ordinary application code should never need this; call transition()
+     * instead, which keeps this in sync automatically.
+     *
+     * @param usage The usage this image has actually just been left in.
+     */
+    void mark_transitioned(TextureUsage usage) { current_usage_ = usage; }
+
 private:
+
     /**
      * @brief Creates the VkImage and VMA allocation.
      * @param usage        Image usage flags.
@@ -234,6 +304,7 @@ private:
     uint32_t      width_     = 0;                 /**< Image width in pixels. */
     uint32_t      height_    = 0;                 /**< Image height in pixels. */
     VkFormat      format_    = VK_FORMAT_UNDEFINED;/**< Pixel format. */
+    TextureUsage  current_usage_ = TextureUsage::Undefined; /**< See current_usage(). */
 };
 
 } // namespace memory

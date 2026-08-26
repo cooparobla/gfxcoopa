@@ -11,6 +11,11 @@
 #include <vector>
 #include <stdexcept>
 #include <cstring>
+#include <cstdlib>
+#include <cstdio>
+
+// Declarations only -- STB_IMAGE_IMPLEMENTATION is compiled once in src/gfx_impl.cpp.
+#include <stb/stb_image.h>
 
 // --- gfxcoopa headers ---
 #include <gfxcoopa/util/error.h>
@@ -33,6 +38,8 @@
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/command/sync.h>
 #include <gfxcoopa/presentation/renderer.h>
+#include <gfxcoopa/util/image_readback.h>
+#include <gfxcoopa/app/context.h>
 
 // ANSI colors — identical to libcoopa test.cpp
 #define ANSI_COLOR_RED     "\x1b[31m"
@@ -350,6 +357,225 @@ void test_descriptor_set() {
     set.bind_buffer(0, buf); // Should not throw.
 }
 
+// --- Sealed API (gfxcoopa/types/*, gfxcoopa/pipeline builders,
+//     gfxcoopa/command/command_buffer.h's transition/copy additions) ---
+//
+// The tests above exercise the raw Vk*-typed API surface, which every
+// pre-seal downstream consumer had to speak directly. This test exercises
+// the sealed replacement end-to-end against a live device+validation
+// layers, not just compiling it -- proving the barrier access/stage masks
+// in detail::barrier_masks_for() and the descriptor pool sizing in
+// DescriptorPoolBuilder are actually correct at runtime, not merely
+// type-correct.
+void test_sealed_api() {
+    using namespace coopa::gfx;
+
+    // --- Sealed Buffer/Image construction ---
+    memory::Buffer sealed_buf(*g_device, *g_allocator, 256,
+                              BufferUsage::Uniform, MemoryResidency::CpuToGpu);
+    ASSERT_TRUE(sealed_buf.handle() != VK_NULL_HANDLE);
+
+    memory::Image sealed_img(*g_device, *g_allocator, 4, 4, Format::RGBA8_Unorm,
+                             ImageUsage::Sampled | ImageUsage::TransferDst | ImageUsage::TransferSrc);
+    ASSERT_TRUE(sealed_img.handle() != VK_NULL_HANDLE);
+    ASSERT_TRUE(sealed_img.view_typed().valid());
+    ASSERT_TRUE(sealed_img.current_usage() == TextureUsage::Undefined);
+    ASSERT_EQ(static_cast<int>(sealed_img.format_typed()), static_cast<int>(Format::RGBA8_Unorm));
+
+    // --- TextureView identity: null vs. real, hashable, test-fabricable ---
+    ASSERT_TRUE(!TextureView::null().valid());
+    ASSERT_TRUE(TextureView{0x1234}.valid());
+    ASSERT_TRUE(TextureView{0x1234} == TextureView{0x1234});
+    ASSERT_TRUE(TextureView{0x1234} != TextureView{0x5678});
+    std::hash<TextureView> hasher;
+    ASSERT_EQ(hasher(TextureView{42}), hasher(TextureView{42}));
+
+    // --- DescriptorLayoutBuilder / DescriptorPoolBuilder ---
+    pipeline::DescriptorSetLayout sealed_layout =
+        pipeline::DescriptorLayoutBuilder()
+            .uniform_buffer(0, ShaderStage::Vertex | ShaderStage::Fragment)
+            .build(*g_device);
+    ASSERT_TRUE(sealed_layout.handle() != VK_NULL_HANDLE);
+    ASSERT_EQ(sealed_layout.bindings().size(), 1u);
+
+    pipeline::DescriptorPool sealed_pool =
+        pipeline::DescriptorPoolBuilder()
+            .add_sets(sealed_layout, 1)
+            .build(*g_device);
+    ASSERT_TRUE(sealed_pool.handle() != VK_NULL_HANDLE);
+
+    pipeline::DescriptorSet sealed_set(*g_device, sealed_pool, sealed_layout);
+    sealed_set.bind_buffer(0, sealed_buf); // Should not throw.
+
+    // --- Sealed PipelineDesc + CommandBuffer's layout-caching overloads ---
+    pipeline::Shader vert(*g_device, VERT_SPV, ShaderStage::Vertex);
+    pipeline::Shader frag(*g_device, FRAG_SPV, ShaderStage::Fragment);
+
+    pipeline::PipelineDesc desc;
+    desc.shaders = { &vert, &frag };
+    desc.descriptor_layouts = { &sealed_layout };
+    desc.push_constants = { { ShaderStage::Vertex, 0, sizeof(float) * 4 } };
+    desc.raster.cull = CullMode::None;
+
+    pipeline::Pipeline sealed_pipeline(*g_device, *g_render_pass, desc);
+    ASSERT_TRUE(sealed_pipeline.handle() != VK_NULL_HANDLE);
+
+    // bind_descriptor_set(uint32_t, set) / push_constants(ShaderStage, value)
+    // both need a bound pipeline -- verify the "no pipeline bound" guard
+    // throws, then verify the happy path records without throwing.
+    {
+        VkCommandBuffer raw = g_cmd_pool->begin_single_use();
+        command::CommandBuffer cmd(raw);
+        bool threw = false;
+        try {
+            cmd.bind_descriptor_set(sealed_set);
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        ASSERT_TRUE(threw);
+
+        cmd.bind_pipeline(sealed_pipeline);
+        cmd.bind_descriptor_set(sealed_set); // Should not throw now.
+        float push_data[4] = {1, 2, 3, 4};
+        cmd.push_constants(ShaderStage::Vertex, push_data); // Template overload.
+        g_cmd_pool->end_single_use(raw, g_device->graphics_queue());
+    }
+
+    // --- transition()/copy_buffer_to_image()/copy_image_to_buffer() round trip ---
+    // Uploads a known 4x4 RGBA8 pattern into sealed_img via a staging buffer,
+    // transitions it to ShaderRead (the steady state a texture lives in),
+    // then transitions back to TransferSrc and reads it back into a second
+    // buffer -- verifying the bytes survive both barrier directions intact.
+    const uint32_t w = 4, h = 4, byte_size = w * h * 4;
+    std::vector<uint8_t> pattern(byte_size);
+    for (uint32_t i = 0; i < byte_size; ++i) pattern[i] = static_cast<uint8_t>(i * 7 + 3);
+
+    memory::Buffer staging(*g_device, *g_allocator, byte_size,
+                           BufferUsage::TransferSrc, MemoryResidency::CpuToGpu);
+    staging.upload(pattern.data(), byte_size);
+
+    memory::Buffer readback(*g_device, *g_allocator, byte_size,
+                            BufferUsage::TransferDst, MemoryResidency::GpuToCpu);
+
+    g_cmd_pool->submit_once([&](command::CommandBuffer& cmd) {
+        cmd.transition(sealed_img, TextureUsage::TransferDst);
+        cmd.copy_buffer_to_image(staging, sealed_img, Extent2D{w, h});
+        cmd.transition(sealed_img, TextureUsage::ShaderRead);
+        ASSERT_TRUE(sealed_img.current_usage() == TextureUsage::ShaderRead);
+        cmd.transition(sealed_img, TextureUsage::TransferSrc);
+        cmd.copy_image_to_buffer(sealed_img, readback, Extent2D{w, h});
+    });
+
+    void* mapped = nullptr;
+    GFX_VK_CHECK(vmaMapMemory(g_allocator->handle(), readback.allocation(), &mapped));
+    bool bytes_match = std::memcmp(mapped, pattern.data(), byte_size) == 0;
+    vmaUnmapMemory(g_allocator->handle(), readback.allocation());
+    ASSERT_TRUE(bytes_match);
+}
+
+// --- util/image_readback.h ---
+//
+// Verifies the readback path end-to-end and independently of any consumer:
+// clears an offscreen image to a known color, writes it to disk via
+// save_image_png(), then reads the PNG back with stb_image (a completely
+// separate code path from the write side) and checks every pixel matches.
+// This is the "render a triangle, screenshot it, and byte-compare" proof
+// the seal plan calls for before any consumer adopts this API.
+void test_image_readback() {
+    using namespace coopa::gfx;
+
+    // ColorAttachment is included because memory::Image unconditionally
+    // creates a VkImageView, and the Vulkan spec requires at least one
+    // view-compatible usage bit (Sampled/Storage/ColorAttachment/...) --
+    // a real render target being screenshotted always has this anyway.
+    memory::Image target(*g_device, *g_allocator, 8, 8, Format::RGBA8_Unorm,
+                         ImageUsage::ColorAttachment | ImageUsage::TransferSrc | ImageUsage::TransferDst);
+
+    ClearColor clear{0.25f, 0.5f, 0.75f, 1.0f};
+    g_cmd_pool->submit_once([&](command::CommandBuffer& cmd) {
+        cmd.transition(target, TextureUsage::TransferDst);
+        cmd.clear_color(target, clear);
+    });
+    ASSERT_TRUE(target.current_usage() == TextureUsage::TransferDst);
+
+    const std::string out_path = "test_image_readback_output.png";
+    util::save_image_png(*g_device, *g_allocator, *g_cmd_pool, target, out_path);
+
+    int w = 0, h = 0, channels = 0;
+    unsigned char* pixels = stbi_load(out_path.c_str(), &w, &h, &channels, 4);
+    ASSERT_TRUE(pixels != nullptr);
+    ASSERT_EQ(w, 8);
+    ASSERT_EQ(h, 8);
+
+    auto to_u8 = [](float f) { return static_cast<int>(f * 255.0f + 0.5f); };
+    int expected_r = to_u8(clear.r), expected_g = to_u8(clear.g), expected_b = to_u8(clear.b);
+
+    bool all_match = true;
+    for (int i = 0; i < w * h && all_match; ++i) {
+        int r = pixels[i * 4 + 0], g = pixels[i * 4 + 1], b = pixels[i * 4 + 2];
+        // +/-2 tolerance for float->unorm8 rounding through the GPU clear.
+        if (std::abs(r - expected_r) > 2 || std::abs(g - expected_g) > 2 || std::abs(b - expected_b) > 2) {
+            all_match = false;
+        }
+    }
+    stbi_image_free(pixels);
+    std::remove(out_path.c_str());
+    ASSERT_TRUE(all_match);
+
+    // read_image()'s "restore original usage" behavior: TransferDst is
+    // restorable, so after read_image() runs internally inside
+    // save_image_png(), the image should be back in TransferDst, not
+    // stranded in TransferSrc.
+    ASSERT_TRUE(target.current_usage() == TextureUsage::TransferDst);
+}
+
+// --- app/context.h ---
+//
+// Verifies gfx::app::Context independently, before any consumer adopts it:
+// full bring-up (its own Window/Instance/Surface/Device/Allocator/
+// Swapchain/CommandPool/RenderPass/Renderer, entirely separate from this
+// file's g_* fixtures), a driven run() loop bounded by max_frames, and that
+// frame timing/derived accessors report sane values.
+void test_context() {
+    using namespace coopa::gfx;
+
+    app::ContextConfig config;
+    config.title      = "gfxcoopa_context_test";
+    config.width      = 320;
+    config.height     = 240;
+    config.validation = true;
+    config.max_frames = 3; // Bound the loop regardless of ONESHOT/MAX_FRAMES env.
+
+    app::Context ctx(config);
+
+    ASSERT_TRUE(ctx.extent().width == 320);
+    ASSERT_TRUE(ctx.extent().height == 240);
+    ASSERT_TRUE(ctx.color_format() != Format::Undefined);
+    ASSERT_EQ(ctx.frames_in_flight(), presentation::MAX_FRAMES_IN_FLIGHT);
+    ASSERT_TRUE(!ctx.should_close());
+
+    uint32_t frames_recorded = 0;
+    float last_dt = -1.0f;
+
+    ctx.run(
+        [&](float dt) { last_dt = dt; },
+        app::FrameCallbacks{
+            [&](command::CommandBuffer& cmd) { (void)cmd; ++frames_recorded; },
+            nullptr,
+            nullptr,
+            ClearColor{0.1f, 0.2f, 0.3f, 1.0f},
+        });
+
+    ASSERT_EQ(frames_recorded, 3u);
+    ASSERT_EQ(ctx.frame_index(), 3u); // poll() calls time_.update() once per iteration.
+    ASSERT_TRUE(last_dt >= 0.0f);
+
+    // A single frame() call driven manually (not via run()) should also work.
+    ctx.poll();
+    bool presented = ctx.frame([](command::CommandBuffer&) {});
+    ASSERT_TRUE(presented);
+}
+
 // --- presentation/renderer.h (frame cycle) ---
 
 void test_renderer_frame() {
@@ -413,7 +639,7 @@ int main() {
     try {
         g_window      = new coopa::gfx::presentation::Window("gfxcoopa test", 800, 600, false);
         g_instance    = new coopa::gfx::core::Instance("gfxcoopa_test", /*validation=*/true);
-        g_surface     = new coopa::gfx::core::Surface(*g_instance, g_window->handle());
+        g_surface     = new coopa::gfx::core::Surface(*g_instance, *g_window);
         g_device      = new coopa::gfx::core::Device(*g_instance, *g_surface);
         g_allocator   = new coopa::gfx::memory::Allocator(*g_instance, *g_device);
 
@@ -449,6 +675,9 @@ int main() {
     RUN_TEST(test_command_pool);
     RUN_TEST(test_sync_primitives);
     RUN_TEST(test_descriptor_set);
+    RUN_TEST(test_sealed_api);
+    RUN_TEST(test_image_readback);
+    RUN_TEST(test_context);
     RUN_TEST(test_renderer_frame);
     RUN_TEST(test_swapchain_resize);
 

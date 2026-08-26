@@ -123,10 +123,15 @@ public:
      *                  handoff instead of leaving it to chance.
      * @return True if the frame was presented successfully, false if the window was minimized.
      */
-    bool begin_frame(std::function<void(command::CommandBuffer&)> record_fn,
-                     VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}},
-                     std::function<void()> on_resize = nullptr,
-                     std::function<void(command::CommandBuffer&)> pre_pass_fn = nullptr)
+    // NOTE: named begin_frame() until this rename; kept as an inline alias
+    // immediately below for existing callers. The old name paired
+    // confusingly with no end_frame() (this method does the whole
+    // acquire-record-submit-present cycle in one call) -- draw_frame()
+    // doesn't imply a missing partner. Purely a rename; no behavior change.
+    bool draw_frame(std::function<void(command::CommandBuffer&)> record_fn,
+                    VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}},
+                    std::function<void()> on_resize = nullptr,
+                    std::function<void(command::CommandBuffer&)> pre_pass_fn = nullptr)
     {
         // Wait for this frame slot to be free.
         in_flight_fences_[current_frame_]->wait();
@@ -225,6 +230,45 @@ public:
 
         current_frame_ = (current_frame_ + 1) % MAX_FRAMES_IN_FLIGHT;
         return true;
+    }
+
+    /**
+     * @brief Alias for draw_frame(), kept for existing callers.
+     * @deprecated Prefer draw_frame() in new code -- same behavior, clearer name.
+     */
+    bool begin_frame(std::function<void(command::CommandBuffer&)> record_fn,
+                     VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}},
+                     std::function<void()> on_resize = nullptr,
+                     std::function<void(command::CommandBuffer&)> pre_pass_fn = nullptr)
+    {
+        return draw_frame(std::move(record_fn), clear_color, std::move(on_resize), std::move(pre_pass_fn));
+    }
+
+    /**
+     * @brief Installs a handler invoked INSTEAD OF the internal resize path
+     * (device_.wait_idle() + recreate_framebuffers() + the per-call
+     * on_resize callback) whenever the swapchain reports out-of-date or
+     * suboptimal.
+     *
+     * The internal path never calls Swapchain::recreate() (see
+     * recreate_framebuffers()'s docs) -- it only rebuilds framebuffers
+     * against whatever extent the swapchain already has, which is a latent
+     * bug if the caller forgets the recreate() call themselves. This seam
+     * exists so gfx::app::Context can install the FULL correct sequence
+     * (wait_idle -> poll framebuffer size -> swapchain_.recreate() ->
+     * recreate_framebuffers() -> user callback) once, instead of every
+     * caller needing to get that ordering right by hand.
+     *
+     * When a handler is installed, draw_frame()/begin_frame()'s own
+     * `on_resize` parameter is ignored -- the handler is expected to invoke
+     * whatever it needs to itself (Context's handler calls the user's
+     * FrameCallbacks::on_resize internally).
+     *
+     * @param handler Callback to invoke on resize, or nullptr to restore
+     *   the default internal-only behavior.
+     */
+    void set_resize_handler(std::function<void()> handler) {
+        resize_handler_ = std::move(handler);
     }
 
     /**
@@ -333,9 +377,14 @@ private:
      * @param on_resize Optional user-supplied callback for post-resize work.
      */
     void handle_resize(std::function<void()> on_resize) {
+        if (resize_handler_) {
+            resize_handler_();
+            return;
+        }
         device_.wait_idle();
         // Note: Caller is responsible for querying new size and calling
         // swapchain_.recreate(w, h) since Renderer does not own the window.
+        // (See set_resize_handler()'s docs -- this is the latent bug it exists to fix.)
         recreate_framebuffers();
         if (on_resize) on_resize();
     }
@@ -352,6 +401,7 @@ private:
     std::vector<VkFence>                                images_in_flight_;                 /**< Non-owning: aliases the in_flight_fences_ handle that last wrote each swapchain image. Indexed by image_index. */
     std::vector<VkCommandBuffer>                        raw_cmd_buffers_;                  /**< Command buffers (allocated from cmd_pool_). */
     uint32_t                                            current_frame_ = 0;                /**< Current frame-in-flight index. */
+    std::function<void()>                               resize_handler_;                   /**< See set_resize_handler(). */
 };
 
 } // namespace presentation

@@ -14,9 +14,11 @@
 #include <volk/volk.h>
 #include <vector>
 #include <stdexcept>
+#include <functional>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/util/error.h>
+#include <gfxcoopa/command/command_buffer.h>
 
 namespace coopa {
 namespace gfx {
@@ -143,6 +145,32 @@ public:
         GFX_VK_CHECK(vkQueueWaitIdle(queue));
 
         vkFreeCommandBuffers(device_.handle(), pool_, 1, &cmd);
+    }
+
+    /**
+     * @brief Allocates a transient command buffer, records `record` into
+     * it via the CommandBuffer wrapper, then submits and blocks until the
+     * GPU finishes -- the whole begin_single_use()/end_single_use() dance
+     * in one call, using CommandBuffer rather than a raw VkCommandBuffer.
+     *
+     * This is what every pre-seal hand-rolled one-shot submission (a
+     * texture upload, a readback copy, a GI bake step) was reimplementing
+     * by hand around the two methods above, occasionally worse -- e.g.
+     * allocating with vkAllocateCommandBuffers directly instead of going
+     * through this pool at all.
+     *
+     * @param record A callable that records commands into the CommandBuffer.
+     *   Do not call begin()/end() on it yourself -- submit_once() does both.
+     *   Submits to this pool's device's graphics queue, which is correct
+     *   for every use in this codebase today (uploads, readbacks, and bakes
+     *   are all graphics-queue work here; there is no separate transfer or
+     *   compute queue in use).
+     */
+    void submit_once(std::function<void(CommandBuffer&)> record) const {
+        VkCommandBuffer raw = begin_single_use();
+        CommandBuffer cmd(raw);
+        record(cmd);
+        end_single_use(raw, device_.graphics_queue());
     }
 
 private:

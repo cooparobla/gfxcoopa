@@ -14,15 +14,32 @@
 
 #include <volk/volk.h>
 #include <vector>
+#include <map>
 #include <stdexcept>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/buffer.h>
 #include <gfxcoopa/util/error.h>
+#include <gfxcoopa/types/enums.h>
+#include <gfxcoopa/types/texture_view.h>
+#include <gfxcoopa/detail/vk_convert.h>
+#include <gfxcoopa/engine/util/sampler.h>
 
 namespace coopa {
 namespace gfx {
 namespace pipeline {
+
+class DescriptorSetLayout; // forward declaration for DescriptorPoolBuilder
+
+/// @brief One binding point within a descriptor set: its resource type,
+/// visibility, and (for arrays) element count. gfxcoopa's sealed
+/// replacement for hand-building a VkDescriptorSetLayoutBinding.
+struct DescriptorBinding {
+    uint32_t       binding = 0;
+    DescriptorType type    = DescriptorType::UniformBuffer;
+    ShaderStage    stages  = ShaderStage::None;
+    uint32_t       count   = 1;
+};
 
 // ---------------------------------------------------------
 // DescriptorPool
@@ -73,6 +90,23 @@ public:
     DescriptorPool& operator=(const DescriptorPool&) = delete;
 
     /**
+     * @brief Move constructor: transfers VkDescriptorPool ownership.
+     *
+     * Needed so DescriptorPoolBuilder::build() can return a DescriptorPool
+     * by value into e.g. `std::make_unique<DescriptorPool>(builder.build(device))`
+     * -- make_unique's forwarding-reference argument passing does not
+     * qualify for C++17's guaranteed prvalue elision the way a direct
+     * `DescriptorPool p = builder.build(device);` does, so an actual move
+     * constructor is required, not just reliance on elision.
+     * @param other The DescriptorPool to move from (left in a null state).
+     */
+    DescriptorPool(DescriptorPool&& other) noexcept
+        : device_(other.device_), pool_(other.pool_)
+    {
+        other.pool_ = VK_NULL_HANDLE;
+    }
+
+    /**
      * @brief Returns the underlying VkDescriptorPool handle.
      * @return Raw VkDescriptorPool.
      */
@@ -105,12 +139,38 @@ public:
                         const std::vector<VkDescriptorSetLayoutBinding>& bindings)
         : device_(device)
     {
-        VkDescriptorSetLayoutCreateInfo info{};
-        info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        info.bindingCount = static_cast<uint32_t>(bindings.size());
-        info.pBindings    = bindings.data();
+        create_from_vk_bindings(bindings);
+    }
 
-        GFX_VK_CHECK(vkCreateDescriptorSetLayout(device_.handle(), &info, nullptr, &layout_));
+    /**
+     * @brief Creates a VkDescriptorSetLayout from gfxcoopa's sealed
+     * DescriptorBinding list instead of raw VkDescriptorSetLayoutBinding
+     * structs. See DescriptorLayoutBuilder for a fluent way to build the
+     * `bindings` vector.
+     *
+     * Unlike the raw-typed constructor above, this ALSO retains the
+     * sealed bindings (see bindings()), which is what lets
+     * DescriptorPoolBuilder derive correct pool sizes from a layout
+     * instead of requiring the caller to compute VkDescriptorPoolSize
+     * counts by hand.
+     *
+     * @param device   The logical device.
+     * @param bindings The set's binding points, in gfxcoopa's sealed vocabulary.
+     */
+    DescriptorSetLayout(core::Device& device, const std::vector<DescriptorBinding>& bindings)
+        : device_(device), bindings_(bindings)
+    {
+        std::vector<VkDescriptorSetLayoutBinding> vk_bindings;
+        vk_bindings.reserve(bindings.size());
+        for (const auto& b : bindings) {
+            VkDescriptorSetLayoutBinding vb{};
+            vb.binding         = b.binding;
+            vb.descriptorType  = detail::to_vk(b.type);
+            vb.descriptorCount = b.count;
+            vb.stageFlags      = detail::to_vk(b.stages);
+            vk_bindings.push_back(vb);
+        }
+        create_from_vk_bindings(vk_bindings);
     }
 
     /**
@@ -128,14 +188,48 @@ public:
     DescriptorSetLayout& operator=(const DescriptorSetLayout&) = delete;
 
     /**
+     * @brief Move constructor: transfers VkDescriptorSetLayout ownership.
+     * See DescriptorPool's move constructor docs for why this is needed
+     * (DescriptorLayoutBuilder::build() returns by value).
+     * @param other The DescriptorSetLayout to move from (left in a null state).
+     */
+    DescriptorSetLayout(DescriptorSetLayout&& other) noexcept
+        : device_(other.device_), layout_(other.layout_), bindings_(std::move(other.bindings_))
+    {
+        other.layout_ = VK_NULL_HANDLE;
+    }
+
+    /**
      * @brief Returns the underlying VkDescriptorSetLayout handle.
      * @return Raw VkDescriptorSetLayout.
      */
     VkDescriptorSetLayout handle() const { return layout_; }
 
+    /**
+     * @brief Returns the sealed bindings this layout was built from.
+     *
+     * Only populated when constructed via the sealed
+     * `std::vector<DescriptorBinding>` constructor (or via
+     * DescriptorLayoutBuilder, which uses it) -- empty for layouts built
+     * from raw VkDescriptorSetLayoutBinding structs, since there is no
+     * DescriptorType/ShaderStage to recover from those. DescriptorPoolBuilder
+     * relies on this being populated.
+     */
+    const std::vector<DescriptorBinding>& bindings() const { return bindings_; }
+
 private:
+    void create_from_vk_bindings(const std::vector<VkDescriptorSetLayoutBinding>& vk_bindings) {
+        VkDescriptorSetLayoutCreateInfo info{};
+        info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        info.bindingCount = static_cast<uint32_t>(vk_bindings.size());
+        info.pBindings    = vk_bindings.data();
+
+        GFX_VK_CHECK(vkCreateDescriptorSetLayout(device_.handle(), &info, nullptr, &layout_));
+    }
+
     core::Device&         device_;               /**< Owning logical device (not owned). */
     VkDescriptorSetLayout layout_ = VK_NULL_HANDLE;/**< The Vulkan descriptor set layout. */
+    std::vector<DescriptorBinding> bindings_;     /**< See bindings(). */
 };
 
 // ---------------------------------------------------------
@@ -259,6 +353,17 @@ public:
     }
 
     /**
+     * @brief Binds a combined image sampler, using the sealed TextureView
+     * instead of a raw VkImageView.
+     * @param binding    The binding index within the set.
+     * @param view       The texture view to expose to the shader.
+     * @param sampler    The sampler controlling filtering and addressing.
+     */
+    void bind_image(uint32_t binding, TextureView view, const engine::util::Sampler& sampler) {
+        bind_image(binding, detail::unwrap(view), sampler.handle());
+    }
+
+    /**
      * @brief Returns the underlying VkDescriptorSet handle.
      * @return Raw VkDescriptorSet.
      */
@@ -268,6 +373,120 @@ private:
     core::Device&    device_;               /**< Owning logical device (not owned). */
     VkDescriptorPool pool_  = VK_NULL_HANDLE;/**< Pool this set was allocated from (not owned). */
     VkDescriptorSet  set_   = VK_NULL_HANDLE;/**< The allocated descriptor set. */
+};
+
+// ---------------------------------------------------------
+// DescriptorLayoutBuilder
+// ---------------------------------------------------------
+
+/**
+ * @class DescriptorLayoutBuilder
+ * @brief Fluent construction of a DescriptorSetLayout's bindings, so a
+ * caller never hand-builds a std::vector<VkDescriptorSetLayoutBinding>.
+ *
+ * @code
+ * auto layout = DescriptorLayoutBuilder()
+ *     .uniform_buffer(0, ShaderStage::Vertex | ShaderStage::Fragment)
+ *     .combined_sampler(1, ShaderStage::Fragment)
+ *     .build(device);
+ * @endcode
+ */
+class DescriptorLayoutBuilder {
+public:
+    /// @brief Adds a uniform buffer binding.
+    DescriptorLayoutBuilder& uniform_buffer(uint32_t binding, ShaderStage stages, uint32_t count = 1) {
+        bindings_.push_back(DescriptorBinding{binding, DescriptorType::UniformBuffer, stages, count});
+        return *this;
+    }
+
+    /// @brief Adds a storage buffer (SSBO) binding.
+    DescriptorLayoutBuilder& storage_buffer(uint32_t binding, ShaderStage stages, uint32_t count = 1) {
+        bindings_.push_back(DescriptorBinding{binding, DescriptorType::StorageBuffer, stages, count});
+        return *this;
+    }
+
+    /// @brief Adds a combined image+sampler binding.
+    DescriptorLayoutBuilder& combined_sampler(uint32_t binding, ShaderStage stages, uint32_t count = 1) {
+        bindings_.push_back(DescriptorBinding{binding, DescriptorType::CombinedImageSampler, stages, count});
+        return *this;
+    }
+
+    /// @brief Adds a storage image binding (compute read/write).
+    DescriptorLayoutBuilder& storage_image(uint32_t binding, ShaderStage stages, uint32_t count = 1) {
+        bindings_.push_back(DescriptorBinding{binding, DescriptorType::StorageImage, stages, count});
+        return *this;
+    }
+
+    /// @brief Builds the DescriptorSetLayout from the bindings added so far.
+    DescriptorSetLayout build(core::Device& device) const {
+        return DescriptorSetLayout(device, bindings_);
+    }
+
+private:
+    std::vector<DescriptorBinding> bindings_;
+};
+
+// ---------------------------------------------------------
+// DescriptorPoolBuilder
+// ---------------------------------------------------------
+
+/**
+ * @class DescriptorPoolBuilder
+ * @brief Derives a DescriptorPool's per-type sizes from the
+ * DescriptorSetLayouts it will allocate sets from, instead of requiring
+ * the caller to compute VkDescriptorPoolSize counts by hand and keep them
+ * in sync with the layouts as bindings change.
+ *
+ * @code
+ * auto pool = DescriptorPoolBuilder()
+ *     .add_sets(camera_layout, 1)
+ *     .add_sets(material_layout, max_materials)
+ *     .build(device);
+ * @endcode
+ */
+class DescriptorPoolBuilder {
+public:
+    /**
+     * @brief Reserves pool capacity for `count` sets allocated from `layout`.
+     *
+     * `layout` must have been built via the sealed DescriptorSetLayout
+     * constructor (or DescriptorLayoutBuilder) -- its bindings() must be
+     * populated, since that is the only source of type/count information
+     * this builder has to work from.
+     *
+     * @param layout The layout that will be used to allocate `count` sets.
+     * @param count  How many sets will be allocated from this layout.
+     * @return *this, for chaining.
+     */
+    DescriptorPoolBuilder& add_sets(const DescriptorSetLayout& layout, uint32_t count) {
+        max_sets_ += count;
+        for (const DescriptorBinding& b : layout.bindings()) {
+            type_counts_[b.type] += b.count * count;
+        }
+        return *this;
+    }
+
+    /// @brief Escape hatch: adds `count` descriptors of a given type
+    /// directly, for pools that allocate sets DescriptorPoolBuilder can't
+    /// see the layout of (e.g. one shared across multiple layout variants).
+    DescriptorPoolBuilder& add_type(DescriptorType type, uint32_t count) {
+        type_counts_[type] += count;
+        return *this;
+    }
+
+    /// @brief Builds the DescriptorPool sized for everything added so far.
+    DescriptorPool build(core::Device& device) const {
+        std::vector<VkDescriptorPoolSize> sizes;
+        sizes.reserve(type_counts_.size());
+        for (const auto& [type, count] : type_counts_) {
+            sizes.push_back(VkDescriptorPoolSize{ detail::to_vk(type), count });
+        }
+        return DescriptorPool(device, max_sets_, sizes);
+    }
+
+private:
+    uint32_t max_sets_ = 0;
+    std::map<DescriptorType, uint32_t> type_counts_;
 };
 
 } // namespace pipeline

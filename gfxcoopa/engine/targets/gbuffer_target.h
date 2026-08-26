@@ -17,6 +17,8 @@
 #include <gfxcoopa/memory/image.h>
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/util/error.h>
+#include <gfxcoopa/types/texture_view.h>
+#include <gfxcoopa/detail/vk_convert.h>
 
 namespace coopa {
 namespace gfx {
@@ -86,6 +88,19 @@ public:
     VkImageView g2_view() const { return g2_image_->view(); }
     VkImageView depth_view() const { return depth_image_->view(); }
     VkImage depth_image_handle() const { return depth_image_->handle(); }
+
+    // Sealed TextureView siblings of the four accessors above.
+    TextureView g0_view_typed() const    { return g0_image_->view_typed(); }
+    TextureView g1_view_typed() const    { return g1_image_->view_typed(); }
+    TextureView g2_view_typed() const    { return g2_image_->view_typed(); }
+    TextureView depth_view_typed() const { return depth_image_->view_typed(); }
+
+    /// @brief The depth memory::Image itself, for command::CommandBuffer::
+    /// transition() -- the sealed sibling of depth_image_handle(), which
+    /// only ever gets a raw VkImage (needed by the pass ctors this target
+    /// feeds, whose signatures are unchanged here -- see the plan's
+    /// "mechanical substitution only" scope for engine/passes+targets).
+    memory::Image& depth_image_object() const { return *depth_image_; }
 
     VkRenderPass render_pass() const { return render_pass_; }
 

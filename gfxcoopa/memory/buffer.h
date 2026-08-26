@@ -25,6 +25,8 @@
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/util/error.h>
+#include <gfxcoopa/types/enums.h>
+#include <gfxcoopa/detail/vk_convert.h>
 
 namespace coopa {
 namespace gfx {
@@ -75,6 +77,28 @@ public:
                                      util::vk_result_string(result));
         }
     }
+
+    /**
+     * @brief Creates a Vulkan buffer using gfxcoopa's sealed BufferUsage/
+     * MemoryResidency vocabulary instead of raw VkBufferUsageFlags/
+     * VmaMemoryUsage/VmaAllocationCreateFlags.
+     *
+     * The sibling of the raw-typed constructor above for callers who need a
+     * custom usage/residency combination not covered by the named factories
+     * (vertex()/index()/uniform()/staging()/storage()) below -- e.g. a
+     * buffer that is both TransferDst (upload target) and Storage.
+     *
+     * @param device    The logical device.
+     * @param allocator The VMA allocator.
+     * @param size      Buffer size in bytes.
+     * @param usage     What the buffer will be bound as (bitmask).
+     * @param residency Where the memory lives and how the CPU may access it.
+     */
+    Buffer(core::Device& device, Allocator& allocator, VkDeviceSize size,
+           BufferUsage usage, MemoryResidency residency = MemoryResidency::GpuOnly)
+        : Buffer(device, allocator, size, detail::to_vk(usage),
+                 detail::to_vma(residency).usage, detail::to_vma(residency).flags)
+    {}
 
     /**
      * @brief Destroys the buffer and frees its VMA allocation.

@@ -17,6 +17,8 @@
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/util/error.h>
 #include <gfxcoopa/util/format.h>
+#include <gfxcoopa/types/enums.h>
+#include <gfxcoopa/detail/vk_convert.h>
 
 namespace coopa {
 namespace gfx {
@@ -172,6 +174,9 @@ public:
         create_info.pDependencies   = dependencies.data();
 
         GFX_VK_CHECK(vkCreateRenderPass(device_.handle(), &create_info, nullptr, &render_pass_));
+
+        samples_ = samples;
+        color_attachment_count_ = has_color ? 1u : 0u;
     }
 
     /**
@@ -194,9 +199,33 @@ public:
      */
     VkRenderPass handle() const { return render_pass_; }
 
+    /**
+     * @brief Returns this render pass's MSAA sample count.
+     *
+     * A Pipeline built against this render pass must use the same sample
+     * count -- see PipelineConfig::samples' removal from the sealed
+     * pipeline::PipelineDesc API: rather than let a caller set a pipeline's
+     * sample count independently (and risk it mismatching the render pass,
+     * which Vulkan requires), Pipeline's sealed constructor reads it from
+     * here automatically.
+     */
+    SampleCount samples() const { return detail::from_vk(samples_); }
+
+    /**
+     * @brief Returns the number of color attachments this render pass has
+     * (0 or 1 -- this class supports at most one color attachment).
+     *
+     * A Pipeline's blend-attachment-state array must be sized to match; see
+     * samples()'s docs for why the sealed Pipeline constructor reads this
+     * automatically rather than taking it as a separate caller-supplied count.
+     */
+    uint32_t color_attachment_count() const { return color_attachment_count_; }
+
 private:
     core::Device& device_;                           /**< Owning logical device (not owned). */
     VkRenderPass  render_pass_ = VK_NULL_HANDLE;     /**< The Vulkan render pass. */
+    VkSampleCountFlagBits samples_ = VK_SAMPLE_COUNT_1_BIT; /**< See samples(). */
+    uint32_t      color_attachment_count_ = 0;       /**< See color_attachment_count(). */
 };
 
 } // namespace pipeline

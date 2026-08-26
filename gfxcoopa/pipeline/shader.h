@@ -18,6 +18,8 @@
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/util/error.h>
+#include <gfxcoopa/types/enums.h>
+#include <gfxcoopa/detail/vk_convert.h>
 
 namespace coopa {
 namespace gfx {
@@ -56,6 +58,18 @@ public:
 
         GFX_VK_CHECK(vkCreateShaderModule(device_.handle(), &create_info, nullptr, &module_));
     }
+
+    /**
+     * @brief Loads a SPIR-V binary, using the sealed ShaderStage instead of
+     * VkShaderStageFlagBits.
+     * @param device   The logical device.
+     * @param filepath Absolute or relative path to the compiled .spv file.
+     * @param stage    The shader stage this module implements.
+     * @throws std::runtime_error if the file cannot be read or module creation fails.
+     */
+    Shader(core::Device& device, const std::string& filepath, ShaderStage stage)
+        : Shader(device, filepath, detail::to_vk_bit(stage))
+    {}
 
     /**
      * @brief Destroys the VkShaderModule.

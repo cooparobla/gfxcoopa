@@ -16,6 +16,9 @@
 #include <vector>
 #include <stdexcept>
 
+#include <gfxcoopa/detail/glfw_keys.h>
+#include <gfxcoopa/input/keys.h>
+
 namespace coopa {
 namespace gfx {
 namespace presentation {
@@ -68,9 +71,20 @@ public:
            bool resizable = false)
         : width_(width), height_(height)
     {
+        // glfwInit() itself is safe to call repeatedly (GLFW documents it as
+        // idempotent), but glfwTerminate() is NOT idempotent-safe when
+        // multiple Windows coexist -- it tears down ALL GLFW state
+        // unconditionally, including any other live Window's handle. The
+        // destructor below only calls it once the LAST live Window is
+        // destroyed, via this counter, so two Windows can safely coexist in
+        // one process (e.g. a test fixture's Window alongside a
+        // gfx::app::Context's own -- verified this crashes without the
+        // refcount: the second Window's teardown otherwise invalidates the
+        // first, which then segfaults on its next GLFW call).
         if (!glfwInit()) {
             throw std::runtime_error("[gfxcoopa] glfwInit() failed.");
         }
+        ++live_window_count_;
 
         // No OpenGL context — Vulkan provides its own surface.
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -82,7 +96,7 @@ public:
             title.c_str(), nullptr, nullptr);
 
         if (!window_) {
-            glfwTerminate();
+            if (--live_window_count_ == 0) glfwTerminate();
             throw std::runtime_error("[gfxcoopa] glfwCreateWindow() failed.");
         }
 
@@ -104,7 +118,11 @@ public:
         if (window_) {
             glfwDestroyWindow(window_);
         }
-        glfwTerminate();
+        // Only the last live Window tears GLFW down globally -- see the
+        // constructor's comment on live_window_count_.
+        if (--live_window_count_ == 0) {
+            glfwTerminate();
+        }
     }
 
     /// @brief Non-copyable.
@@ -138,6 +156,19 @@ public:
     }
 
     /**
+     * @brief Returns true if the given keyboard key is currently pressed.
+     *
+     * Sealed sibling of is_key_pressed(int): takes a gfx::input::Key rather
+     * than a raw GLFW code, so callers never need to name GLFW_KEY_*.
+     *
+     * @param key The key to query.
+     * @return True if key state is GLFW_PRESS.
+     */
+    bool is_key_pressed(input::Key key) const {
+        return is_key_pressed(detail::to_glfw(key));
+    }
+
+    /**
      * @brief Returns the cursor position in window coordinates.
      *
      * Origin is the top-left corner, +Y down (GLFW convention). May include
@@ -161,6 +192,19 @@ public:
     }
 
     /**
+     * @brief Returns true if the given mouse button is currently held down.
+     *
+     * Sealed sibling of is_mouse_button_pressed(int): takes a
+     * gfx::input::MouseButton rather than a raw GLFW index.
+     *
+     * @param button The button to query.
+     * @return True if button state is GLFW_PRESS.
+     */
+    bool is_mouse_button_pressed(input::MouseButton button) const {
+        return is_mouse_button_pressed(detail::to_glfw(button));
+    }
+
+    /**
      * @brief Returns the scroll wheel delta accumulated since the last new_frame().
      * @return Pair of (x, y) scroll offsets.
      */
@@ -181,6 +225,18 @@ public:
     const std::vector<KeyEvent>& key_events() const { return key_events_; }
 
     /**
+     * @brief Returns discrete key events since the last new_frame(), using
+     * the sealed gfx::input::KeyEvent (Key/KeyAction/Mods) rather than raw
+     * GLFW ints.
+     *
+     * Named key_events_typed() rather than overloading key_events() -- C++
+     * cannot overload on return type alone. Once key_events() (the raw
+     * GLFW-typed form) is deleted in the seal's final phase, this becomes
+     * the sole key_events().
+     */
+    const std::vector<input::KeyEvent>& key_events_typed() const { return typed_key_events_; }
+
+    /**
      * @brief Clears per-frame input accumulators (scroll, char input, key events).
      *
      * Call once per frame before poll_events().
@@ -190,6 +246,7 @@ public:
         scroll_y_ = 0.0;
         char_input_.clear();
         key_events_.clear();
+        typed_key_events_.clear();
     }
 
     /**
@@ -209,11 +266,34 @@ public:
     }
 
     /**
+     * @brief Sets the mouse cursor shape, using the sealed
+     * gfx::input::CursorShape rather than this class's own local
+     * CursorShape (which the input:: version supersedes and will replace).
+     * @param shape One of the standard input::CursorShape values.
+     */
+    void set_cursor(input::CursorShape shape) {
+        switch (shape) {
+            case input::CursorShape::IBeam: set_cursor(CursorShape::IBeam); break;
+            case input::CursorShape::Hand:  set_cursor(CursorShape::Hand);  break;
+            case input::CursorShape::Arrow: default: set_cursor(CursorShape::Arrow); break;
+        }
+    }
+
+    /**
      * @brief Polls pending OS events (keyboard, mouse, resize, close).
      *
      * Must be called once per frame on the main thread.
      */
     void poll_events() { glfwPollEvents(); }
+
+    /**
+     * @brief Blocks until at least one OS event arrives, then processes it.
+     *
+     * Unlike poll_events() (returns immediately), this sleeps the calling
+     * thread -- useful for waiting out a minimized window (0x0 framebuffer)
+     * without a busy-poll loop; see gfx::app::Context's resize handling.
+     */
+    void wait_events() { glfwWaitEvents(); }
 
     /**
      * @brief Returns the underlying GLFWwindow pointer.
@@ -301,6 +381,9 @@ private:
         auto* self = reinterpret_cast<Window*>(glfwGetWindowUserPointer(window));
         if (self) {
             self->key_events_.push_back(KeyEvent{ key, scancode, action, mods });
+            self->typed_key_events_.push_back(input::KeyEvent{
+                detail::from_glfw(key), scancode,
+                detail::action_from_glfw(action), detail::mods_from_glfw(mods) });
         }
     }
 
@@ -311,8 +394,16 @@ private:
     bool         resized_ = false;   /**< Set to true when a framebuffer resize event arrives. */
     double       scroll_x_ = 0.0;    /**< Accumulated scroll x-offset since the last new_frame(). */
     double       scroll_y_ = 0.0;    /**< Accumulated scroll y-offset since the last new_frame(). */
-    std::vector<unsigned int> char_input_;  /**< UTF-32 codepoints typed since the last new_frame(). */
-    std::vector<KeyEvent>     key_events_;  /**< Key press/release/repeat events since the last new_frame(). */
+    std::vector<unsigned int>   char_input_;  /**< UTF-32 codepoints typed since the last new_frame(). */
+    std::vector<KeyEvent>       key_events_;  /**< Key press/release/repeat events since the last new_frame(). */
+    std::vector<input::KeyEvent> typed_key_events_; /**< Same events as key_events_, sealed-typed. */
+
+    /// @brief Process-wide count of live Window instances, so only the
+    /// last one destroyed calls glfwTerminate(). Not atomic: GLFW (and
+    /// therefore Window) is assumed single-threaded, matching every other
+    /// assumption this class already makes (its callbacks, poll_events(),
+    /// etc. are all main-thread-only per GLFW's own threading rules).
+    static inline int live_window_count_ = 0;
 };
 
 } // namespace presentation

@@ -17,14 +17,19 @@
 #include <vector>
 #include <array>
 #include <stdexcept>
+#include <string>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/core/swapchain.h>
 #include <gfxcoopa/memory/buffer.h>
+#include <gfxcoopa/memory/image.h>
 #include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/util/error.h>
+#include <gfxcoopa/types/enums.h>
+#include <gfxcoopa/types/clear.h>
+#include <gfxcoopa/detail/vk_convert.h>
 
 namespace coopa {
 namespace gfx {
@@ -129,10 +134,17 @@ public:
 
     /**
      * @brief Binds a graphics pipeline (analogous to glUseProgram).
+     *
+     * Also remembers `p`'s layout, so the sealed bind_descriptor_set(uint32_t,
+     * const DescriptorSet&) and push_constants(ShaderStage, ...) overloads
+     * below never need a caller-supplied VkPipelineLayout -- eliminating
+     * Pipeline::layout() from every call site that isn't gfxcoopa itself.
+     *
      * @param pipeline The pipeline to bind.
      */
     void bind_pipeline(const pipeline::Pipeline& p) {
         vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, p.handle());
+        bound_pipeline_ = &p;
     }
 
     /**
@@ -164,6 +176,18 @@ public:
     }
 
     /**
+     * @brief Binds an index buffer, using the sealed IndexType instead of
+     * VkIndexType. `index_type` has no default (unlike the raw overload
+     * above) so that a zero-extra-argument call `bind_index_buffer(buffer)`
+     * stays unambiguous, resolving to the raw overload's UINT32 default.
+     * @param buffer     The index buffer to bind.
+     * @param index_type U16 or U32.
+     */
+    void bind_index_buffer(const memory::Buffer& buffer, IndexType index_type) {
+        bind_index_buffer(buffer, detail::to_vk(index_type), 0);
+    }
+
+    /**
      * @brief Binds a descriptor set to the graphics pipeline (analogous to glBindBufferBase/glBindTexture).
      * @param pipeline_layout The pipeline layout that owns the descriptor set layout.
      * @param set             The descriptor set to bind.
@@ -176,6 +200,30 @@ public:
         VkDescriptorSet raw = set.handle();
         vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipeline_layout, set_index, 1, &raw, 0, nullptr);
+    }
+
+    /**
+     * @brief Binds a descriptor set to the graphics pipeline, using the
+     * layout of the most recently bound pipeline (see bind_pipeline()) --
+     * no caller-supplied VkPipelineLayout needed.
+     *
+     * `set` is the first parameter (not `set_index`, unlike the raw
+     * overload above) deliberately: a literal `0` is a valid null-pointer
+     * constant, so it converts to both this overload's `set_index`
+     * (uint32_t) and the raw overload's `pipeline_layout` (VkPipelineLayout)
+     * equally well, which makes `bind_descriptor_set(0, set)` genuinely
+     * ambiguous between the two. Putting `set` (a DescriptorSet&, which
+     * cannot convert to VkPipelineLayout at all) first rules the raw
+     * overload out as a candidate whenever this one is meant, at the cost
+     * of the two overloads' set_index parameter not lining up positionally.
+     *
+     * @param set       The descriptor set to bind.
+     * @param set_index The descriptor set index (binding point).
+     * @throws std::runtime_error if no pipeline has been bound yet.
+     */
+    void bind_descriptor_set(const pipeline::DescriptorSet& set, uint32_t set_index = 0) {
+        require_bound_pipeline("bind_descriptor_set");
+        bind_descriptor_set(bound_pipeline_->layout(), set, set_index);
     }
 
     /**
@@ -194,6 +242,36 @@ public:
                         const void*        data)
     {
         vkCmdPushConstants(cmd_, pipeline_layout, stages, offset, size, data);
+    }
+
+    /**
+     * @brief Records a push constant update, using the layout of the most
+     * recently bound pipeline (see bind_pipeline()) and the sealed
+     * ShaderStage instead of a caller-supplied VkPipelineLayout/
+     * VkShaderStageFlags pair.
+     * @param stages Shader stages that read this push constant.
+     * @param offset Byte offset into the push constant block.
+     * @param size   Number of bytes to update.
+     * @param data   Pointer to the data to upload.
+     * @throws std::runtime_error if no pipeline has been bound yet.
+     */
+    void push_constants(ShaderStage stages, uint32_t offset, uint32_t size, const void* data) {
+        require_bound_pipeline("push_constants");
+        push_constants(bound_pipeline_->layout(), detail::to_vk(stages), offset, size, data);
+    }
+
+    /**
+     * @brief Records a push constant update from a typed value, sized and
+     * pointer-taken automatically. The common case:
+     * `cmd.push_constants(ShaderStage::Fragment, my_push_constants_struct);`
+     * @tparam T The push constant struct type (must match the shader's layout).
+     * @param stages Shader stages that read this push constant.
+     * @param value  The value to upload.
+     * @param offset Byte offset into the push constant block.
+     */
+    template <typename T>
+    void push_constants(ShaderStage stages, const T& value, uint32_t offset = 0) {
+        push_constants(stages, offset, static_cast<uint32_t>(sizeof(T)), &value);
     }
 
     // --- Draw calls ---
@@ -257,6 +335,182 @@ public:
         pipeline::Pipeline::set_scissor(cmd_, x, y, w, h);
     }
 
+    // --- Image state transitions, copies, and blits ---
+    //
+    // These give CommandBuffer everywhere raw vkCmdPipelineBarrier /
+    // vkCmdCopy*/vkCmdBlitImage calls were previously needed downstream
+    // (screenshot readback, depth-buffer barriers, texture uploads).
+    // handle() below stays available for anything not yet covered here.
+
+    /**
+     * @brief Transitions an image to a new TextureUsage, inferring the
+     * correct access/pipeline-stage masks (and, via the image's own
+     * Format, the correct aspect mask) automatically.
+     *
+     * Unlike memory::Image::transition_layout() (which takes an explicit
+     * "from" layout the caller must track correctly themselves), this reads
+     * the image's current usage via memory::Image::current_usage() and
+     * updates it afterward -- the "from" argument that caused every
+     * pre-seal hand-rolled-barrier bug simply does not exist here.
+     *
+     * @param image The image to transition. Must be a single-mip,
+     *   single-layer image (memory::Image's only supported shape today).
+     * @param to    The usage to transition into.
+     */
+    void transition(memory::Image& image, TextureUsage to) {
+        TextureUsage from = image.current_usage();
+        Format fmt = image.format_typed();
+        bool depth = is_depth(fmt);
+        detail::BarrierMasks src = detail::barrier_masks_for(from, depth);
+        detail::BarrierMasks dst = detail::barrier_masks_for(to, depth);
+
+        VkImageMemoryBarrier barrier{};
+        barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout           = detail::to_vk_layout(from);
+        barrier.newLayout           = detail::to_vk_layout(to);
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image               = image.handle();
+        barrier.srcAccessMask       = src.access;
+        barrier.dstAccessMask       = dst.access;
+        barrier.subresourceRange.aspectMask     = detail::aspect_mask_for(fmt);
+        barrier.subresourceRange.baseMipLevel   = 0;
+        barrier.subresourceRange.levelCount     = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount     = 1;
+
+        vkCmdPipelineBarrier(cmd_, src.stage, dst.stage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        image.mark_transitioned(to);
+    }
+
+    /**
+     * @brief Copies a byte range between two buffers (vkCmdCopyBuffer).
+     * @param src     Source buffer.
+     * @param dst     Destination buffer.
+     * @param size    Number of bytes to copy.
+     * @param src_off Byte offset into src.
+     * @param dst_off Byte offset into dst.
+     */
+    void copy_buffer(const memory::Buffer& src, memory::Buffer& dst,
+                     uint64_t size, uint64_t src_off = 0, uint64_t dst_off = 0)
+    {
+        VkBufferCopy region{};
+        region.srcOffset = src_off;
+        region.dstOffset = dst_off;
+        region.size       = size;
+        vkCmdCopyBuffer(cmd_, src.handle(), dst.handle(), 1, &region);
+    }
+
+    /**
+     * @brief Copies buffer bytes into an image (vkCmdCopyBufferToImage).
+     * The image must already be transition()ed to TextureUsage::TransferDst.
+     * @param src           Source buffer, tightly packed pixel data.
+     * @param dst           Destination image.
+     * @param extent        Region size in pixels (from image origin).
+     * @param mip           Target mip level.
+     * @param layer         Target array layer.
+     * @param buffer_offset Byte offset into src where pixel data starts.
+     */
+    void copy_buffer_to_image(const memory::Buffer& src, memory::Image& dst, Extent2D extent,
+                              uint32_t mip = 0, uint32_t layer = 0, uint64_t buffer_offset = 0)
+    {
+        VkBufferImageCopy region{};
+        region.bufferOffset      = buffer_offset;
+        region.bufferRowLength   = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask     = detail::aspect_mask_for(dst.format_typed());
+        region.imageSubresource.mipLevel       = mip;
+        region.imageSubresource.baseArrayLayer = layer;
+        region.imageSubresource.layerCount     = 1;
+        region.imageOffset = {0, 0, 0};
+        region.imageExtent = {extent.width, extent.height, 1};
+        vkCmdCopyBufferToImage(cmd_, src.handle(), dst.handle(),
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
+
+    /**
+     * @brief Copies image texels into a buffer (vkCmdCopyImageToBuffer).
+     * The image must already be transition()ed to TextureUsage::TransferSrc.
+     * This is the operation every pre-seal hand-rolled screenshot/readback
+     * path needed and gfxcoopa had no wrapper for; see
+     * gfxcoopa/util/image_readback.h for the full readback-to-PNG helper
+     * built on top of this.
+     * @param src    Source image.
+     * @param dst    Destination buffer. Must be at least
+     *   extent.width * extent.height * format_byte_size(src's format) bytes.
+     * @param extent Region size in pixels (from image origin).
+     * @param mip    Source mip level.
+     * @param layer  Source array layer.
+     */
+    void copy_image_to_buffer(const memory::Image& src, memory::Buffer& dst, Extent2D extent,
+                              uint32_t mip = 0, uint32_t layer = 0)
+    {
+        VkBufferImageCopy region{};
+        region.bufferOffset      = 0;
+        region.bufferRowLength   = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask     = detail::aspect_mask_for(src.format_typed());
+        region.imageSubresource.mipLevel       = mip;
+        region.imageSubresource.baseArrayLayer = layer;
+        region.imageSubresource.layerCount     = 1;
+        region.imageOffset = {0, 0, 0};
+        region.imageExtent = {extent.width, extent.height, 1};
+        vkCmdCopyImageToBuffer(cmd_, src.handle(),
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.handle(), 1, &region);
+    }
+
+    /**
+     * @brief Blits (copies with optional scaling/filtering) between two
+     * image regions (vkCmdBlitImage). `src` must already be
+     * TextureUsage::TransferSrc and `dst` TextureUsage::TransferDst.
+     * @param src   Source image.
+     * @param dst   Destination image.
+     * @param src_r Source region (offset + extent + mip/layer).
+     * @param dst_r Destination region.
+     * @param filter Nearest or Linear scaling filter.
+     */
+    void blit(const memory::Image& src, memory::Image& dst,
+             ImageRegion src_r, ImageRegion dst_r, Filter filter)
+    {
+        VkImageBlit region{};
+        region.srcSubresource.aspectMask     = detail::aspect_mask_for(src.format_typed());
+        region.srcSubresource.mipLevel       = src_r.mip;
+        region.srcSubresource.baseArrayLayer = src_r.layer;
+        region.srcSubresource.layerCount     = 1;
+        region.srcOffsets[0] = { src_r.x, src_r.y, 0 };
+        region.srcOffsets[1] = { src_r.x + static_cast<int32_t>(src_r.width),
+                                 src_r.y + static_cast<int32_t>(src_r.height), 1 };
+        region.dstSubresource.aspectMask     = detail::aspect_mask_for(dst.format_typed());
+        region.dstSubresource.mipLevel       = dst_r.mip;
+        region.dstSubresource.baseArrayLayer = dst_r.layer;
+        region.dstSubresource.layerCount     = 1;
+        region.dstOffsets[0] = { dst_r.x, dst_r.y, 0 };
+        region.dstOffsets[1] = { dst_r.x + static_cast<int32_t>(dst_r.width),
+                                 dst_r.y + static_cast<int32_t>(dst_r.height), 1 };
+
+        vkCmdBlitImage(cmd_, src.handle(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       dst.handle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &region, detail::to_vk(filter));
+    }
+
+    /**
+     * @brief Clears an image to a solid color (vkCmdClearColorImage).
+     * `image` must already be transition()ed to TextureUsage::TransferDst.
+     * @param image Image to clear.
+     * @param color Clear color.
+     */
+    void clear_color(memory::Image& image, ClearColor color) {
+        VkClearColorValue vk_color = detail::to_vk(color);
+        VkImageSubresourceRange range{};
+        range.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        range.baseMipLevel   = 0;
+        range.levelCount     = 1;
+        range.baseArrayLayer = 0;
+        range.layerCount     = 1;
+        vkCmdClearColorImage(cmd_, image.handle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &vk_color, 1, &range);
+    }
+
     /**
      * @brief Returns the raw VkCommandBuffer handle.
      * @return Raw VkCommandBuffer.
@@ -264,7 +518,18 @@ public:
     VkCommandBuffer handle() const { return cmd_; }
 
 private:
+    /// @brief Throws if bind_pipeline() has not been called yet -- guards
+    /// the sealed bind_descriptor_set(uint32_t, ...)/push_constants(ShaderStage, ...)
+    /// overloads, which need a bound pipeline's layout.
+    void require_bound_pipeline(const char* caller) const {
+        if (!bound_pipeline_) {
+            throw std::runtime_error(std::string("[gfxcoopa] CommandBuffer::") + caller +
+                                     ": no pipeline bound (call bind_pipeline() first)");
+        }
+    }
+
     VkCommandBuffer cmd_ = VK_NULL_HANDLE; /**< The raw command buffer (not owned). */
+    const pipeline::Pipeline* bound_pipeline_ = nullptr; /**< Set by bind_pipeline(); backs the sealed overloads above. */
 };
 
 } // namespace command

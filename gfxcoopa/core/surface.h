@@ -18,6 +18,7 @@
 
 #include <gfxcoopa/core/instance.h>
 #include <gfxcoopa/util/error.h>
+#include <gfxcoopa/presentation/window.h>
 
 namespace coopa {
 namespace gfx {
@@ -57,6 +58,22 @@ public:
     {
         GFX_VK_CHECK(glfwCreateWindowSurface(instance_, window, nullptr, &surface_));
     }
+
+    /**
+     * @brief Creates a Vulkan surface from a sealed presentation::Window.
+     *
+     * The last standing GLFW->Vulkan coupling a consumer could otherwise be
+     * forced to name directly (Window::handle() returning GLFWwindow*) --
+     * this overload lets app::Context (and any other caller) construct a
+     * Surface from a Window without ever naming GLFWwindow* itself.
+     *
+     * @param instance The Vulkan instance.
+     * @param window The window to create a surface for.
+     * @throws std::runtime_error if surface creation fails.
+     */
+    Surface(const Instance& instance, const presentation::Window& window)
+        : Surface(instance, window.handle())
+    {}
 
     /**
      * @brief Destroys the VkSurfaceKHR.

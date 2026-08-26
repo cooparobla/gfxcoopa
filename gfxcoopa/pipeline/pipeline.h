@@ -21,6 +21,9 @@
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/util/error.h>
+#include <gfxcoopa/types/enums.h>
+#include <gfxcoopa/types/vertex_layout.h>
+#include <gfxcoopa/detail/vk_convert.h>
 
 namespace coopa {
 namespace gfx {
@@ -62,6 +65,67 @@ struct PipelineConfig {
     VkSampleCountFlagBits  samples                = VK_SAMPLE_COUNT_1_BIT;               /**< MSAA sample count. */
     VkCompareOp             depth_compare_op       = VK_COMPARE_OP_LESS;                  /**< Depth comparison function. */
     uint32_t                color_attachment_count = 1;                                   /**< Color attachments sharing this blend state. */
+};
+
+/// @brief A single push constant range: which stages read it, and its
+/// byte offset/size within the push constant block. gfxcoopa's sealed
+/// replacement for hand-building a VkPushConstantRange.
+struct PushConstantRange {
+    ShaderStage stages;
+    uint32_t    offset;
+    uint32_t    size;
+};
+
+/// @brief Rasterizer state for the sealed PipelineDesc, using gfxcoopa's
+/// sealed Topology/PolygonMode/CullMode/FrontFace instead of Vk enums.
+struct RasterState {
+    Topology    topology    = Topology::TriangleList;
+    PolygonMode polygon     = PolygonMode::Fill;
+    CullMode    cull        = CullMode::Back;
+    FrontFace   front       = FrontFace::CounterClockwise;
+    float       line_width  = 1.0f;
+};
+
+/// @brief Depth test state for the sealed PipelineDesc.
+struct DepthState {
+    bool      test    = true;
+    bool      write   = true;
+    CompareOp compare = CompareOp::Less;
+};
+
+/// @brief Blend state for the sealed PipelineDesc.
+struct BlendState {
+    BlendMode mode = BlendMode::None;
+    /// @brief Number of color attachments sharing this blend state. 0 means
+    /// "ask the RenderPass" (via RenderPass::color_attachment_count()) --
+    /// the sealed Pipeline constructor never lets this mismatch the render
+    /// pass it's built against, which an independently-set count could.
+    uint32_t  color_attachment_count = 0;
+};
+
+/**
+ * @struct PipelineDesc
+ * @brief A graphics pipeline's full description, in gfxcoopa's sealed
+ * vocabulary -- the single argument to Pipeline's sealed constructor,
+ * replacing its 7-positional-argument raw-typed constructor below.
+ *
+ * @code
+ * Pipeline pipeline(device, render_pass, PipelineDesc{
+ *     .shaders = {&vert_shader, &frag_shader},
+ *     .vertex  = MyVertex::layout(),
+ *     .descriptor_layouts = {&set0_layout},
+ *     .push_constants = {{ShaderStage::Fragment, 0, sizeof(MyPushConstants)}},
+ * });
+ * @endcode
+ */
+struct PipelineDesc {
+    std::vector<Shader*>                    shaders;
+    VertexLayout                            vertex;
+    std::vector<const DescriptorSetLayout*> descriptor_layouts;
+    std::vector<PushConstantRange>          push_constants;
+    RasterState raster;
+    DepthState  depth;
+    BlendState  blend;
 };
 
 /**
@@ -127,6 +191,158 @@ public:
     {
         create_layout(descriptor_layouts, push_constants);
         create_pipeline(render_pass, shaders, vertex_bindings, vertex_attributes, config);
+    }
+
+    /**
+     * @brief Creates a graphics pipeline from a single sealed PipelineDesc,
+     * instead of seven positional raw-typed arguments.
+     *
+     * Sample count and (unless PipelineDesc::blend::color_attachment_count
+     * is explicitly set) color attachment count are read from `render_pass`
+     * automatically -- see RenderPass::samples()'s docs for why a pipeline
+     * is never allowed to specify these independently of the render pass
+     * it targets.
+     *
+     * @param device      The logical device.
+     * @param render_pass The compatible render pass.
+     * @param desc        The pipeline's full description.
+     */
+    Pipeline(core::Device& device, const RenderPass& render_pass, const PipelineDesc& desc)
+        : device_(device)
+    {
+        std::vector<VkDescriptorSetLayout> vk_layouts;
+        vk_layouts.reserve(desc.descriptor_layouts.size());
+        for (const DescriptorSetLayout* l : desc.descriptor_layouts) {
+            vk_layouts.push_back(l->handle());
+        }
+
+        std::vector<VkPushConstantRange> vk_push_constants;
+        vk_push_constants.reserve(desc.push_constants.size());
+        for (const PushConstantRange& pc : desc.push_constants) {
+            VkPushConstantRange r{};
+            r.stageFlags = detail::to_vk(pc.stages);
+            r.offset     = pc.offset;
+            r.size       = pc.size;
+            vk_push_constants.push_back(r);
+        }
+
+        create_layout(vk_layouts, vk_push_constants);
+
+        std::vector<VkVertexInputBindingDescription> vk_bindings;
+        vk_bindings.reserve(desc.vertex.bindings.size());
+        for (const VertexBinding& b : desc.vertex.bindings) {
+            VkVertexInputBindingDescription vb{};
+            vb.binding   = b.binding;
+            vb.stride    = b.stride;
+            vb.inputRate = b.rate == VertexRate::Instance
+                              ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+            vk_bindings.push_back(vb);
+        }
+
+        std::vector<VkVertexInputAttributeDescription> vk_attributes;
+        vk_attributes.reserve(desc.vertex.attributes.size());
+        for (const VertexAttribute& a : desc.vertex.attributes) {
+            VkVertexInputAttributeDescription va{};
+            va.location = a.location;
+            va.binding  = a.binding;
+            va.format   = detail::to_vk(a.format);
+            va.offset   = a.offset;
+            vk_attributes.push_back(va);
+        }
+
+        PipelineConfig config;
+        config.topology         = detail::to_vk(desc.raster.topology);
+        config.polygon_mode     = detail::to_vk(desc.raster.polygon);
+        config.cull_mode        = detail::to_vk(desc.raster.cull);
+        config.front_face       = detail::to_vk(desc.raster.front);
+        config.line_width       = desc.raster.line_width;
+        config.depth_test       = desc.depth.test;
+        config.depth_write      = desc.depth.write;
+        config.depth_compare_op = detail::to_vk(desc.depth.compare);
+        config.blend_mode       = desc.blend.mode;
+        config.blending         = desc.blend.mode != BlendMode::None;
+        config.samples          = detail::to_vk(render_pass.samples());
+        config.color_attachment_count = desc.blend.color_attachment_count != 0
+                                           ? desc.blend.color_attachment_count
+                                           : render_pass.color_attachment_count();
+
+        create_pipeline(render_pass.handle(), desc.shaders, vk_bindings, vk_attributes, config);
+    }
+
+    /**
+     * @brief Creates a graphics pipeline against a raw render pass handle
+     * wrapped in detail::RawRenderPass, using a sealed PipelineDesc.
+     *
+     * For gfxcoopa-internal callers only (e.g. a pass with a hand-built
+     * multi-render-target VkRenderPass render_pass.h's RenderPass can't yet
+     * express) -- see detail::RawRenderPass's docs for why the wrapper
+     * exists instead of a bare VkRenderPass parameter here. Since
+     * `render_pass.samples()`/`color_attachment_count()` aren't available
+     * without a real RenderPass, `desc.blend.color_attachment_count` must
+     * be set explicitly (0 defaults to 1, matching PipelineConfig's
+     * pre-seal default) and MSAA is not supported through this overload.
+     *
+     * @param device      The logical device.
+     * @param render_pass Handle of a compatible render pass, wrapped.
+     * @param desc        The pipeline's full description.
+     */
+    Pipeline(core::Device& device, detail::RawRenderPass render_pass, const PipelineDesc& desc)
+        : device_(device)
+    {
+        std::vector<VkDescriptorSetLayout> vk_layouts;
+        vk_layouts.reserve(desc.descriptor_layouts.size());
+        for (const DescriptorSetLayout* l : desc.descriptor_layouts) {
+            vk_layouts.push_back(l->handle());
+        }
+
+        std::vector<VkPushConstantRange> vk_push_constants;
+        vk_push_constants.reserve(desc.push_constants.size());
+        for (const PushConstantRange& pc : desc.push_constants) {
+            VkPushConstantRange r{};
+            r.stageFlags = detail::to_vk(pc.stages);
+            r.offset     = pc.offset;
+            r.size       = pc.size;
+            vk_push_constants.push_back(r);
+        }
+
+        create_layout(vk_layouts, vk_push_constants);
+
+        std::vector<VkVertexInputBindingDescription> vk_bindings;
+        vk_bindings.reserve(desc.vertex.bindings.size());
+        for (const VertexBinding& b : desc.vertex.bindings) {
+            VkVertexInputBindingDescription vb{};
+            vb.binding   = b.binding;
+            vb.stride    = b.stride;
+            vb.inputRate = b.rate == VertexRate::Instance
+                              ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+            vk_bindings.push_back(vb);
+        }
+
+        std::vector<VkVertexInputAttributeDescription> vk_attributes;
+        vk_attributes.reserve(desc.vertex.attributes.size());
+        for (const VertexAttribute& a : desc.vertex.attributes) {
+            VkVertexInputAttributeDescription va{};
+            va.location = a.location;
+            va.binding  = a.binding;
+            va.format   = detail::to_vk(a.format);
+            va.offset   = a.offset;
+            vk_attributes.push_back(va);
+        }
+
+        PipelineConfig config;
+        config.topology         = detail::to_vk(desc.raster.topology);
+        config.polygon_mode     = detail::to_vk(desc.raster.polygon);
+        config.cull_mode        = detail::to_vk(desc.raster.cull);
+        config.front_face       = detail::to_vk(desc.raster.front);
+        config.line_width       = desc.raster.line_width;
+        config.depth_test       = desc.depth.test;
+        config.depth_write      = desc.depth.write;
+        config.depth_compare_op = detail::to_vk(desc.depth.compare);
+        config.blend_mode       = desc.blend.mode;
+        config.blending         = desc.blend.mode != BlendMode::None;
+        config.color_attachment_count = desc.blend.color_attachment_count; // 0 -> PipelineConfig's own default (1)
+
+        create_pipeline(render_pass.handle, desc.shaders, vk_bindings, vk_attributes, config);
     }
 
     /**
