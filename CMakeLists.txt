@@ -37,7 +37,7 @@ configure_file(configuration/root_directory.h.in configuration/root_directory.h)
 # so downstream consumers no longer need to pass it explicitly either.
 include(cmake/GfxShaders.cmake)
 gfx_add_shader_target(shaders
-    SHADER_DIR   "${CMAKE_SOURCE_DIR}/assets/shaders"
+    SHADER_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders"
 )
 
 # --- gfxcoopa_impl: the ONE translation unit in the whole dependency graph
