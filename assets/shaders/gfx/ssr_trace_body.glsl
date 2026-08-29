@@ -35,6 +35,9 @@ struct GfxSsrParams {
     int   start_mip;         // Hi-Z mip the march starts at (ssr_start_mip)
     int   min_mip0_steps;    // self-reflection gate (ssr_min_mip0_steps)
     int   max_color_mip;     // top mip of the prefiltered scene-colour chain
+    float jitter_strength;   // 0 = old deterministic mirror-ray trace, exactly (ssr_jitter)
+    int   frame_index;       // decorrelates ssr_ign2() noise frame to frame; meaningless at
+                              // jitter_strength == 0
 };
 
 float gfx_ssr_get_view_z(float depth_ndc, mat4 inv_proj) {
@@ -68,6 +71,31 @@ struct GfxSsrHit {
 GfxSsrHit gfx_ssr_trace(vec3 P, vec3 N, float roughness, mat4 inv_proj, GfxSsrParams sp) {
     vec3 V = normalize(P - camera.camera_pos);
     vec3 R = reflect(V, N);
+
+    // Stochastic ray jitter. The far end of a reflection -- where the ray either clears the
+    // reflected object's silhouette or doesn't -- is a hard binary hit/miss decision on a
+    // perfectly deterministic ray; as the camera moves that decision flips in lockstep across
+    // the whole boundary, which is what reads as shimmer no amount of temporal/spatial
+    // filtering downstream can fully absorb. Sampling a fresh point inside the GGX lobe every
+    // pixel, every frame turns that hard edge into per-pixel noise instead, which the
+    // resolve/blur stages already exist to integrate into a soft edge. jitter_strength == 0
+    // skips this entirely and reproduces the old single deterministic ray exactly.
+    if (sp.jitter_strength > 0.0) {
+        vec3 up = (abs(R.z) < 0.999) ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+        vec3 tangent   = normalize(cross(up, R));
+        vec3 bitangent = cross(R, tangent);
+
+        vec2 xi = ssr_ign2(gl_FragCoord.xy, sp.frame_index);
+        float lobe_radius = sqrt(xi.x) * sp.jitter_strength * ssr_ggx_cone_tan(roughness);
+        float phi = 6.28318530718 * xi.y;
+
+        vec3 candidate = normalize(R + tangent * (lobe_radius * cos(phi))
+                                      + bitangent * (lobe_radius * sin(phi)));
+        // The caller already gated on dot(R, N) <= 0 using this SAME unjittered R (computed
+        // identically, before this branch runs) -- a jittered ray that dips below the origin
+        // surface must fall back to the mirror ray rather than silently trace garbage.
+        if (dot(candidate, N) > 0.0) R = candidate;
+    }
 
     // Depth-scaled bias. The self-reflection this exists to prevent is a screen-space
     // phenomenon -- the ray must clear roughly one texel's worth of the source surface -- so
@@ -103,6 +131,18 @@ GfxSsrHit gfx_ssr_trace(vec3 P, vec3 N, float roughness, mat4 inv_proj, GfxSsrPa
 
     if (length(ray_dir.xy) < 0.0001) return GfxSsrHit(vec3(0.0), 0.0, 0.0, false);
 
+    // Sub-texel start offset: shifts the ray's first sample point a fraction of one mip-0
+    // texel along its own direction, decorrelating which Hi-Z cell each frame's march first
+    // tests. Without this, a static sub-pixel camera offset makes every frame snap to
+    // identical cell boundaries even with the direction jitter above -- the hit/miss boundary
+    // would still sit at the same on-screen location every frame.
+    if (sp.jitter_strength > 0.0) {
+        vec2 mip0_size = vec2(textureSize(u_hiz_map, 0));
+        float texel_size = 1.0 / max(mip0_size.x, mip0_size.y);
+        float t_offset = (ssr_ign2(gl_FragCoord.xy + vec2(13.0, 7.0), sp.frame_index).x - 0.5) * texel_size;
+        ray_start += (ray_dir / max(length(ray_dir.xy), 1e-5)) * t_offset;
+    }
+
     vec3 current_pos = ray_start;
     // Starting at a coarse mip is safe: cell_min_depth is a conservative MIN over the cell, so
     // "ray is in front of the cell" at a coarse mip provably means no hit anywhere in that
@@ -136,7 +176,21 @@ GfxSsrHit gfx_ssr_trace(vec3 P, vec3 N, float roughness, mat4 inv_proj, GfxSsrPa
             t_planes.x = (ray_dir.x > 0.0) ? (cell_max.x - current_pos.x) / ray_dir.x : (cell_min.x - current_pos.x) / ray_dir.x;
             t_planes.y = (ray_dir.y > 0.0) ? (cell_max.y - current_pos.y) / ray_dir.y : (cell_min.y - current_pos.y) / ray_dir.y;
 
-            float t_step = max(min(t_planes.x, t_planes.y), 0.0001) + 0.0001;
+            // min_t_step: a UV-space nudge, converted into t-space by dividing by the ray's own
+            // length -- ray_dir is the full un-normalized on-screen span (see the mip-0 texel
+            // advance below, which normalizes for exactly this reason), so a bare constant here
+            // would be a wildly different absolute distance for a screen-spanning ray than for a
+            // short one, drifting continuously as the camera moves and each pixel's ray length
+            // changes. That produced a genuine, deterministic, camera-rotation-keyed instability
+            // in which Hi-Z cell boundary got crossed frame to frame. Capped at 0.01 of the t
+            // range: for a very short on-screen ray (small length(ray_dir.xy)) the raw quotient
+            // can exceed 1.0 -- an epsilon meant to be a tiny nudge would instead jump past the
+            // entire remaining ray in one step and terminate the march immediately, turning
+            // every such ray into a guaranteed miss. The cap keeps this a small nudge (at most
+            // 1% of the ray) in that regime instead, while leaving normal-length rays (where the
+            // quotient is already far below the cap) unaffected.
+            float min_t_step = min(0.0001 / max(length(ray_dir.xy), 1e-5), 0.01);
+            float t_step = max(min(t_planes.x, t_planes.y), min_t_step) + min_t_step;
             current_pos += ray_dir * t_step;
 
             current_mip = min(current_mip + 1, sp.max_hiz_mip);

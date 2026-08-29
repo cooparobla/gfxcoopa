@@ -52,6 +52,8 @@ layout(push_constant) uniform SsrPushConstants {
     int   start_mip;         // Hi-Z mip the march starts at (ssr_start_mip)
     int   min_mip0_steps;    // self-reflection gate (ssr_min_mip0_steps)
     int   max_color_mip;     // top mip of the prefiltered scene-colour chain
+    float jitter_strength;   // 0 = old deterministic mirror-ray trace, exactly (ssr_jitter)
+    int   frame_index;       // decorrelates the jitter's noise frame to frame
 
     // Secondary source: != 0 -> also trace gfx_ssr_trace_secondary() and keep whichever hit
     // has the smaller GfxSsrHit.travel. Every other GfxSsrParams field above (distance/bias/
@@ -107,6 +109,8 @@ void main() {
     sp.start_mip         = u_ssr.start_mip;
     sp.min_mip0_steps    = u_ssr.min_mip0_steps;
     sp.max_color_mip     = u_ssr.max_color_mip;
+    sp.jitter_strength   = u_ssr.jitter_strength;
+    sp.frame_index       = u_ssr.frame_index;
 
     GfxSsrHit hit = gfx_ssr_trace(P, N, roughness, u_ssr.inv_proj, sp);
 

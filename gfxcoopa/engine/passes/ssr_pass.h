@@ -49,6 +49,8 @@ public:
         int   start_mip;         // Hi-Z mip the march starts at (ssr_start_mip)
         int   min_mip0_steps;    // self-reflection gate (ssr_min_mip0_steps)
         int   max_color_mip = 0; // top mip of the prefiltered scene-colour chain
+        float jitter_strength = 0.0f; // 0 = old deterministic mirror-ray trace (ssr_jitter)
+        int   frame_index     = 0;    // decorrelates the jitter's noise frame to frame
 
         // Secondary source (see set_secondary_source()): != 0 -> ssr.frag also traces
         // gfx_ssr_trace_secondary() and keeps whichever hit is nearer. max_hiz_mip_b/
@@ -61,6 +63,7 @@ public:
         int   max_hiz_mip_b   = 0;
         int   max_color_mip_b = 0;
     };
+    static_assert(sizeof(SsrPushConstants) == 124, "ssr.frag's SsrPushConstants block must match this layout byte-for-byte");
 
     /// Matches ssr_blur.frag's push-constant block exactly.
     struct BlurPushConstants {
@@ -72,7 +75,10 @@ public:
         glm::vec2 resolution;       // offset 64
         float     blend_factor;     // offset 72
         int       history_valid;    // offset 76
-    };                              // 80 bytes
+        float     gamma = 1.0f;     // offset 80 -- variance-clipping width, in std deviations
+                                     // (ssr_temporal_gamma); see ssr_resolve.frag's own doc
+    };                              // 84 bytes
+    static_assert(sizeof(ResolvePushConstants) == 84, "ssr_resolve.frag's PushConstants block must match this layout byte-for-byte");
 
     /// Union layout shared with the composite's GLSL push-constant block, so
     /// every consumer's ssr_composite.frag -- whatever else it does -- reads
@@ -106,8 +112,18 @@ public:
         int   start_mip        = 0;
         int   min_mip0_steps   = 1;
         int   max_color_mip    = 0;      // scene_color_mip_pass_->max_mip_level(), filled by caller
+        // Stochastic ray jitter -- see GfxSsrParams' own doc (gfx/ssr_trace_body.glsl) for why
+        // this exists. 0 (the default) reproduces the pre-jitter single-ray trace exactly, so
+        // every existing consumer of this pass is unaffected unless it opts in. frame_index is
+        // meaningless at jitter_strength == 0.
+        float jitter_strength  = 0.0f;
+        int   frame_index      = 0;
         bool  temporal_enabled = true;
         float temporal_blend   = 0.85f;
+        // Variance-clipping gamma for the temporal resolve's history rejection (see
+        // ResolvePushConstants' own doc) -- widens or tightens the accepted history band as a
+        // multiple of the 3x3 neighbourhood's standard deviation.
+        float temporal_gamma   = 1.0f;
         // Reprojection: previous frame's JITTERED proj * view, and whether it (and the history
         // buffer) actually exist yet. False for the first two frames and right after a resize.
         glm::mat4 prev_view_proj       = glm::mat4(1.0f);
@@ -590,6 +606,8 @@ public:
         pc.start_mip        = params.start_mip;
         pc.min_mip0_steps   = params.min_mip0_steps;
         pc.max_color_mip    = params.max_color_mip;
+        pc.jitter_strength  = params.jitter_strength;
+        pc.frame_index      = params.frame_index;
         pc.has_secondary    = params.has_secondary ? 1.0f : 0.0f;
         pc.max_hiz_mip_b    = params.max_hiz_mip_b;
         pc.max_color_mip_b  = params.max_color_mip_b;
@@ -626,6 +644,7 @@ public:
         // fresh start (frames 0 and 1), so ANDing them is what keeps the very first reprojected
         // sample from reading a stale/identity prev_view_proj.
         rpc.history_valid = (history_initialized_ && params.prev_view_proj_valid) ? 1 : 0;
+        rpc.gamma         = params.temporal_gamma;
 
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, rpc);
         cmd.bind_descriptor_set(*resolve_set_, 0);

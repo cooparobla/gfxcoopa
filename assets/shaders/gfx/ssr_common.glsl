@@ -38,4 +38,36 @@ float ssr_ggx_cone_tan(float roughness) {
     return sqrt(max(1.0 - cos_theta * cos_theta, 0.0)) / max(cos_theta, 1e-4);
 }
 
+/// Interleaved gradient noise (Jimenez, "Next Generation Post Processing in Call of Duty:
+/// Advanced Warfare") -- one scalar in [0, 1) from a pixel coordinate. Same method as
+/// gfx/shadow_sampling.glsl's gfx_ign_angle(), duplicated locally rather than shared because
+/// that one already multiplies by TAU for an angle and this needs the raw scalar.
+float ssr_ign(vec2 px) {
+    return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715))));
+}
+
+/// Per-frame offset for ssr_ign()-based sampling, via the R2 low-discrepancy sequence
+/// (Roberts, "The Unreasonable Effectiveness of Quasirandom Sequences", 2018):
+/// fract(frame * (1/phi2, 1/phi2^2)) for the plastic number phi2. Scaled up to move the
+/// sample by tens of pixels per frame -- a sub-texel shift would fall inside IGN's own
+/// dithering and barely change which cell is sampled.
+vec2 ssr_frame_shift(int frame) {
+    return fract(vec2(0.7548776662, 0.5698402909) * float(frame & 0xFF)) * 97.0;
+}
+
+/// Two DECORRELATED values in [0, 1) for stochastic SSR ray sampling, re-seeded every frame.
+///
+/// The obvious "call ssr_ign() twice with transposed constants" pairing is equal on the
+/// px.x == px.y diagonal and correlated everywhere else (the two dot products differ only in
+/// which axis carries the larger weight) -- structured, not noisy. This instead evaluates
+/// ssr_ign() at two pixel coordinates separated by a fixed, non-axis-aligned offset large
+/// enough that the second falls in an unrelated IGN cell. Both coordinates carry the SAME
+/// per-frame shift (ssr_frame_shift), so consecutive frames scatter the pair together over the
+/// 2-D neighbourhood instead of sliding along one axis, which is what a shared scalar*frame
+/// shift on a single coordinate would do.
+vec2 ssr_ign2(vec2 px, int frame) {
+    vec2 shifted = px + ssr_frame_shift(frame);
+    return vec2(ssr_ign(shifted), ssr_ign(shifted + vec2(37.0, 17.0)));
+}
+
 #endif // GFX_SSR_COMMON_GLSL

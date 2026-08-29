@@ -34,6 +34,22 @@ GfxSsrHit gfx_ssr_trace_secondary(vec3 P, vec3 N, float roughness, mat4 inv_proj
     vec3 V = normalize(P - camera.camera_pos);
     vec3 R = reflect(V, N);
 
+    // Stochastic ray jitter -- KEPT IN SYNC with gfx_ssr_trace()'s own copy in
+    // gfx/ssr_trace_body.glsl; see that copy's doc for why this exists.
+    if (sp.jitter_strength > 0.0) {
+        vec3 up = (abs(R.z) < 0.999) ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+        vec3 tangent   = normalize(cross(up, R));
+        vec3 bitangent = cross(R, tangent);
+
+        vec2 xi = ssr_ign2(gl_FragCoord.xy, sp.frame_index);
+        float lobe_radius = sqrt(xi.x) * sp.jitter_strength * ssr_ggx_cone_tan(roughness);
+        float phi = 6.28318530718 * xi.y;
+
+        vec3 candidate = normalize(R + tangent * (lobe_radius * cos(phi))
+                                      + bitangent * (lobe_radius * sin(phi)));
+        if (dot(candidate, N) > 0.0) R = candidate;
+    }
+
     ivec2 gsize    = textureSize(g_position_roughness_b, 0);
     float view_z   = (camera.view * vec4(P, 1.0)).z;
     float p11      = abs(camera.proj[1][1]);
@@ -59,6 +75,14 @@ GfxSsrHit gfx_ssr_trace_secondary(vec3 P, vec3 N, float roughness, mat4 inv_proj
     vec3 ray_dir   = ray_end - ray_start;
 
     if (length(ray_dir.xy) < 0.0001) return GfxSsrHit(vec3(0.0), 0.0, 0.0, false);
+
+    // Sub-texel start offset -- KEPT IN SYNC with gfx_ssr_trace()'s own copy.
+    if (sp.jitter_strength > 0.0) {
+        vec2 mip0_size = vec2(textureSize(u_hiz_map_b, 0));
+        float texel_size = 1.0 / max(mip0_size.x, mip0_size.y);
+        float t_offset = (ssr_ign2(gl_FragCoord.xy + vec2(13.0, 7.0), sp.frame_index).x - 0.5) * texel_size;
+        ray_start += (ray_dir / max(length(ray_dir.xy), 1e-5)) * t_offset;
+    }
 
     vec3 current_pos = ray_start;
     int current_mip = clamp(sp.start_mip, 0, sp.max_hiz_mip);
@@ -88,7 +112,9 @@ GfxSsrHit gfx_ssr_trace_secondary(vec3 P, vec3 N, float roughness, mat4 inv_proj
             t_planes.x = (ray_dir.x > 0.0) ? (cell_max.x - current_pos.x) / ray_dir.x : (cell_min.x - current_pos.x) / ray_dir.x;
             t_planes.y = (ray_dir.y > 0.0) ? (cell_max.y - current_pos.y) / ray_dir.y : (cell_min.y - current_pos.y) / ray_dir.y;
 
-            float t_step = max(min(t_planes.x, t_planes.y), 0.0001) + 0.0001;
+            // min_t_step -- KEPT IN SYNC with gfx_ssr_trace()'s own copy; see that copy's doc.
+            float min_t_step = min(0.0001 / max(length(ray_dir.xy), 1e-5), 0.01);
+            float t_step = max(min(t_planes.x, t_planes.y), min_t_step) + min_t_step;
             current_pos += ray_dir * t_step;
 
             current_mip = min(current_mip + 1, sp.max_hiz_mip);

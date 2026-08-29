@@ -68,18 +68,28 @@ void main() {
             vec2  tap_uv = clamp(in_uv + vec2(x, y) * texel_uv, vec2(0.0), vec2(1.0));
             ivec2 tap_px = clamp(center_px + ivec2(x, y), ivec2(0), size - 1);
 
-            vec3 Nt = texture(g_normal_metallic, tap_uv).rgb;
-            if (dot(Nt, Nt) < 0.001) continue; // background tap -- skip, don't drag the buffer toward 0
+            vec3 Nt_raw = texture(g_normal_metallic, tap_uv).rgb;
+            bool tap_is_background = dot(Nt_raw, Nt_raw) < 0.001;
 
-            Nt = normalize(Nt);
-            vec3 Pt = texture(g_position_roughness, tap_uv).rgb;
+            // A background tap votes for the CENTER's own value instead of being excluded from
+            // sum/wsum outright. Falling back to Nt=Nc/Pt=Pc makes wn=wd=1 (full weight) --
+            // effectively "this tap agrees with the center" -- rather than the previous
+            // continue-based skip, which changed the SET of contributing taps in discrete,
+            // integer steps as an object's silhouette swept the 5x5 footprint during camera
+            // rotation, and jumped the output every time a tap crossed that boundary. The
+            // fallback keeps wsum's shape constant regardless of how many taps are background;
+            // the only thing that varies continuously across a moving silhouette is each real
+            // tap's own Pt (via wd), which is already smooth.
+            vec3 Nt = tap_is_background ? Nc : normalize(Nt_raw);
+            vec3 Pt = tap_is_background ? Pc : texture(g_position_roughness, tap_uv).rgb;
+            vec4 tap_val = tap_is_background ? center : texelFetch(u_ssr, tap_px, 0);
 
             float wn = pow(max(dot(Nc, Nt), 0.0), 16.0);
             float d  = dot(Nc, Pt - Pc);
             float wd = exp(-(d * d) / (2.0 * sigma * sigma));
             float w  = wn * wd;
 
-            sum  += texelFetch(u_ssr, tap_px, 0) * w;
+            sum  += tap_val * w;
             wsum += w;
         }
     }

@@ -21,6 +21,7 @@ layout(push_constant) uniform PushConstants {
     vec2  resolution;      // TRACE resolution (half of the screen under ssr_half_res)
     float blend_factor;
     int   history_valid;   // 0 until both a history image and a previous matrix exist
+    float gamma;           // variance-clipping width, in std deviations (ssr_temporal_gamma)
 } pc;
 
 void main() {
@@ -70,21 +71,46 @@ void main() {
     vec4 s7 = texture(tex_current, in_uv + vec2( 0.0, -1.0) * texel_size);
     vec4 s8 = texture(tex_current, in_uv + vec2( 1.0, -1.0) * texel_size);
 
-    vec4 aabb_min = min(s0, min(s1, min(s2, min(s3, min(s4, min(s5, min(s6, min(s7, s8))))))));
-    vec4 aabb_max = max(s0, max(s1, max(s2, max(s3, max(s4, max(s5, max(s6, max(s7, s8))))))));
+    // Variance clipping (Salvi 2016 / Marrs et al.) instead of a raw min/max AABB. A min/max
+    // box over just 9 samples is maximally sensitive to a single outlier -- exactly what the
+    // stochastic ray jitter in gfx_ssr_trace() now produces every frame at a silhouette, since
+    // a jittered ray occasionally hits/misses independently of its neighbours even when the
+    // underlying surface hasn't changed. Clipping to the neighbourhood's mean +/- gamma standard
+    // deviations instead accepts that per-pixel noise as normal variation and only rejects
+    // genuine disocclusion, which is what lets the temporal blend below actually integrate the
+    // jitter into a soft edge instead of rejecting history every single frame.
+    vec4 sum  = s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
+    vec4 sum2 = s0*s0 + s1*s1 + s2*s2 + s3*s3 + s4*s4 + s5*s5 + s6*s6 + s7*s7 + s8*s8;
+    vec4 mean = sum / 9.0;
+    vec4 sigma = sqrt(max(sum2 / 9.0 - mean * mean, vec4(0.0)));
+
+    // Neighbourhood maximum confidence, kept separately from the moments above -- needed to
+    // tell "the whole neighbourhood genuinely missed" (disocclusion) apart from "confidence is
+    // just noisy" (the jitter), which the decay branch below depends on.
+    float max_a = max(s0.a, max(s1.a, max(s2.a, max(s3.a, max(s4.a, max(s5.a, max(s6.a, max(s7.a, s8.a))))))));
 
     vec4 history = texture(tex_history, prev_uv);
 
-    // Colour: clamp two-sided against the neighbourhood AABB, as before.
-    vec3 clamped_rgb = clamp(history.rgb, aabb_min.rgb, aabb_max.rgb);
+    // Colour: two-sided clip against the variance ellipsoid, as the AABB clamp used to be.
+    vec3 clamped_rgb = clamp(history.rgb, mean.rgb - pc.gamma * sigma.rgb, mean.rgb + pc.gamma * sigma.rgb);
 
-    // Confidence: clamp against the neighbourhood MAXIMUM only. A two-sided clamp drags an
-    // accumulated confidence to zero the instant one neighbour misses, so any surface where the
-    // trace alternates hit/miss between frames settles at a flickering half-strength
-    // reflection -- the reflection is present but permanently dim, which reads as a bug rather
-    // than as "no reflection here". The one-sided clamp still collapses history immediately
-    // where the WHOLE neighbourhood missed, which is the disocclusion case it exists for.
-    float clamped_a = min(history.a, aabb_max.a);
+    // Confidence: same one-sided INTENT as the old AABB-max clamp -- accumulated history should
+    // never be pulled ABOVE what this frame's neighbourhood supports -- but a hard collapse to
+    // (near) zero the instant the neighbourhood misses is exactly the pulse the jitter is meant
+    // to avoid: with a boundary that moves every frame, "the whole neighbourhood missed" now
+    // happens often even where a reflection genuinely belongs, not just at real disocclusion. So
+    // a genuine whole-neighbourhood miss DECAYS history instead of zeroing it outright; a
+    // neighbourhood that has at least one hit is clipped to its mean + gamma*sigma as before.
+    //
+    // The two branches are blended by a smoothstep of max_a rather than a hard ?: -- a discrete
+    // switch AT max_a == 1e-4 is itself a flicker source: a neighbourhood sitting right at that
+    // threshold flips between "decay" and "clip" behaviour from one frame to the next as max_a
+    // drifts a hair either side of it, on top of whatever moved max_a in the first place. Both
+    // branches still evaluate identically well below/above the old threshold; only the
+    // transition between them is now continuous.
+    float decayed  = history.a * 0.6;
+    float clipped  = min(history.a, mean.a + pc.gamma * sigma.a);
+    float clamped_a = mix(decayed, clipped, smoothstep(0.0, 1e-3, max_a));
 
     out_color = vec4(mix(current.rgb, clamped_rgb, pc.blend_factor),
                      mix(current.a,   clamped_a,   pc.blend_factor));
