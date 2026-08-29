@@ -2,7 +2,7 @@
 
 The `coopa::gfx::engine` module provides high-level rendering engine abstractions built on top of `gfxcoopa` lower-level Vulkan modules. It is structured into 5 specialized submodules:
 
-- **`coopa::gfx::engine::passes`** ([`passes`](file:///home/coopa/git/gfxcoopa/gfxcoopa/engine/passes)): Render pass execution and graphics pipelines (`DeferredLightingPass`, `GBufferPipeline`, `PbrPipeline`, `SSRPass`, `SMAAPass`, `TAAPass`, `ToneMappingPass`, `PresentPass`, `HiZPass`, `SceneColorMipPass`, `SkyboxPass`, `ShadowPipeline`, `EnvPrefilterPass`, `ProbeCapturePass`).
+- **`coopa::gfx::engine::passes`** ([`passes`](file:///home/coopa/git/gfxcoopa/gfxcoopa/engine/passes)): Render pass execution and graphics pipelines (`DeferredLightingPass`, `GBufferPipeline`, `PbrPipeline`, `SSRPass`, `SMAAPass`, `TAAPass`, `ToneMappingPass`, `PresentPass`, `HiZPass`, `SceneColorMipPass`, `SkyboxPass`, `ShadowPipeline`, `EnvPrefilterPass`, `ProbeCapturePass`, `FogPass`).
 - **`coopa::gfx::engine::targets`** ([`targets`](file:///home/coopa/git/gfxcoopa/gfxcoopa/engine/targets)): Framebuffer and render target resource managers (`OffscreenTarget`, `GBufferTarget`, `ShadowMapTarget`, `CubemapTarget`).
 - **`coopa::gfx::engine::gi`** ([`gi`](file:///home/coopa/git/gfxcoopa/gfxcoopa/engine/gi)): Global Illumination system, CPU/GPU probe baking, and SH data structures (`GiSystem`, `GiBaker`, `GiData`, `BRDFLUT`).
 - **`coopa::gfx::engine::data`** ([`data`](file:///home/coopa/git/gfxcoopa/gfxcoopa/engine/data)): Vertex layout, mesh data, and camera/light uniform structures (`Mesh`, `Vertex`, `CameraUBO`, `LightData`, `ModelPushConstants`).
@@ -70,6 +70,11 @@ The `coopa::gfx::engine` module provides high-level rendering engine abstraction
 - **Role**: Push constant data structure for per-object matrix transformations.
 - **Key Classes / Structs**: `ModelPushConstants`.
 - **Details**: 128-byte layout containing model matrix (`mat4`) and normal matrix (`mat4 normal_matrix = transpose(inverse(model))`).
+
+#### [fog_data.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/engine/data/fog_data.h)
+- **Role**: Host-visible uniform buffer for global Unity-style fog parameters plus up to 8 local fog volumes.
+- **Key Classes / Structs**: `FogVolumeGPU`, `FogUBO`, `FogData`.
+- **Details**: Self-contained (own `inv_view_proj`/`camera_pos`) so it never touches CameraUBO/LightData's std140 layout; consumed by `FogPass`.
 
 ### Global Illumination Submodule (`engine/gi`)
 
@@ -186,6 +191,11 @@ The `coopa::gfx::engine` module provides high-level rendering engine abstraction
 - **Role**: Fullscreen tonemapping and FXAA post-processing pass.
 - **Key Classes / Structs**: `TonemappingPass`.
 - **Details**: Evaluates ACES filmic s-curve, exposure adjustments, gamma 2.2 correction, and FXAA 3.11 edge smoothing.
+
+#### [fog_pass.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/engine/passes/fog_pass.h)
+- **Role**: Fullscreen Unity-style fog composite (Linear/Exponential/Exp2 global fog + local box/sphere fog volumes).
+- **Key Classes / Structs**: `FogPass`.
+- **Details**: Reads scene colour plus the G-buffer's normal/world-position, writes a fogged copy into its own HDR target (see `assets/shaders/fog.frag`, `assets/shaders/gfx/fog.glsl`).
 
 ### Engine Utilities Submodule (`engine/util`)
 

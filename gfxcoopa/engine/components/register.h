@@ -48,6 +48,7 @@
 #include <gfxcoopa/engine/components/environment_light.h>
 #include <gfxcoopa/engine/components/gi_probe_volume.h>
 #include <gfxcoopa/engine/components/reflection_probe.h>
+#include <gfxcoopa/engine/components/fog_volume.h>
 
 #include <fstream>
 #include <filesystem>
@@ -283,6 +284,30 @@ inline void register_render_components(core::Device& device,
             }
             if (node.contains("gi_intensity"))
                 gv->gi_intensity = node.at("gi_intensity").get_value<float>();
+        });
+
+    SceneLoader::register_component_parser("FogVolume",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* fv = obj.add_component<FogVolumeComponent>();
+            if (node.contains("shape")) {
+                std::string shape = node.at("shape").get_value<std::string>();
+                fv->shape = (shape == "sphere" || shape == "Sphere")
+                            ? FogVolumeShape::Sphere : FogVolumeShape::Box;
+            }
+            if (node.contains("extent")) {
+                const auto& e = node.at("extent");
+                fv->extent.x = e.contains("x") ? e.at("x").get_value<float>() : fv->extent.x;
+                fv->extent.y = e.contains("y") ? e.at("y").get_value<float>() : fv->extent.y;
+                fv->extent.z = e.contains("z") ? e.at("z").get_value<float>() : fv->extent.z;
+            }
+            if (node.contains("color")) {
+                const auto& c = node.at("color");
+                fv->color.r = c.contains("r") ? c.at("r").get_value<float>() : fv->color.r;
+                fv->color.g = c.contains("g") ? c.at("g").get_value<float>() : fv->color.g;
+                fv->color.b = c.contains("b") ? c.at("b").get_value<float>() : fv->color.b;
+            }
+            if (node.contains("density")) fv->density = node.at("density").get_value<float>();
+            if (node.contains("falloff")) fv->falloff = node.at("falloff").get_value<float>();
         });
 
     SceneLoader::register_component_parser("ReflectionProbe",

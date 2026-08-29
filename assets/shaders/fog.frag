@@ -1,0 +1,150 @@
+#version 450
+
+// Fullscreen fog composite. Vertex stage is the shared tonemapping.vert
+// fullscreen triangle (see engine/passes/fog_pass.h). Reads the scene colour
+// plus two G-buffer targets and writes a fogged copy into its own HDR
+// target -- pipeline::RenderPass hardcodes LOAD_OP_CLEAR, so this cannot
+// composite in place onto the image it reads from.
+
+layout(location = 0) in  vec2 in_uv;
+layout(location = 0) out vec4 out_color;
+
+// Set 0: scene colour (linear sampler) + G-buffer normal/position (nearest --
+// linear filtering would blend world positions across silhouette edges and
+// produce a wrong fog distance on every object outline).
+layout(set = 0, binding = 0) uniform sampler2D scene_color;
+layout(set = 0, binding = 1) uniform sampler2D g_normal_metallic;
+layout(set = 0, binding = 2) uniform sampler2D g_position_roughness;
+
+struct FogVolume {
+    mat4 inv_world;
+    vec4 extent_shape;
+    vec4 color_density;
+    vec4 falloff;
+};
+
+layout(set = 1, binding = 0) uniform FogUBO {
+    mat4 inv_view_proj;
+    vec4 camera_pos;
+    vec4 fog_color;
+    vec4 sun_direction;
+    vec4 sun_color;
+    vec4 mode_density;
+    vec4 height_params;
+    vec4 misc_params;
+    FogVolume volumes[8];
+} u_fog;
+
+#include <gfx/fog.glsl>
+
+void main() {
+    vec3 color = texture(scene_color, in_uv).rgb;
+
+    vec3 N        = texture(g_normal_metallic, in_uv).rgb;
+    vec3 cam_pos  = u_fog.camera_pos.xyz;
+    bool is_sky   = dot(N, N) < 0.001;
+
+    vec3  A = cam_pos;
+
+    // Reconstruct the view ray precisely from inv_view_proj for EVERY pixel -- the same
+    // convention skybox.frag uses (NDC.y negated: this fullscreen triangle uses a
+    // positive-height viewport while inv_view_proj follows the Y-up convention every other
+    // unprojection in this engine shares) -- rather than deriving it from the G2 world
+    // position via subtraction on geometry pixels. The direction of a screen pixel's view
+    // ray is a purely geometric property of the camera -- it doesn't depend on what's
+    // rendered there -- so there is no reason to derive it two different ways (a precise
+    // matrix unprojection for sky pixels vs. a subtraction against G2's quantized
+    // R16G16B16A16_SFLOAT world position for geometry pixels, which loses real precision at
+    // the large magnitudes a near-horizon/grazing-angle pixel has).
+    vec3 ndc      = vec3(in_uv.x * 2.0 - 1.0, 1.0 - in_uv.y * 2.0, 1.0);
+    vec4 world    = u_fog.inv_view_proj * vec4(ndc, 1.0);
+    vec3 view_dir = normalize(world.xyz / world.w - cam_pos);
+
+    // Global fog is evaluated at a distance capped to misc_params.w -- both here and for
+    // sky pixels below -- rather than sky being a hard-coded T_global = 1.0. A narrow-FOV
+    // camera grazing a large flat surface (this scene's telephoto shot across its ground
+    // plane) has its apparent per-pixel distance blow up near the vanishing point, which
+    // would otherwise fog the last few rows of geometry far more aggressively than anything
+    // else in view, right up against an unconditionally-unfogged sky -- a hard seam at the
+    // horizon. Capping both sides at the SAME distance makes them converge to the same
+    // transmittance instead, so there's nothing to see a seam between. `d` itself stays the
+    // real (uncapped) distance below, for the local-volume occlusion clamps.
+    float max_distance = max(u_fog.misc_params.w, 1.0);
+
+    float d;
+    float T_global;
+    if (is_sky) {
+        d = 4000.0;   // local-volume occlusion clamps only, see below -- no real occluder
+        T_global = gfx_fog_transmittance(A, A + view_dir * max_distance, u_fog.mode_density, u_fog.height_params);
+    } else {
+        vec3 B = texture(g_position_roughness, in_uv).rgb;
+        d = distance(A, B);
+        float d_fog = min(d, max_distance);
+        T_global = gfx_fog_transmittance(A, A + view_dir * d_fog, u_fog.mode_density, u_fog.height_params);
+    }
+
+    // Local fog volumes: each contributes to the local optical depth, and
+    // (soft-edge-weighted) to a density-weighted average colour.
+    float tau_local        = 0.0;
+    vec3  volume_color_sum = vec3(0.0);
+    int   volume_count     = int(u_fog.misc_params.z);
+
+    for (int i = 0; i < volume_count; ++i) {
+        vec3 ro = (u_fog.volumes[i].inv_world * vec4(A, 1.0)).xyz;
+        // Not renormalized after the transform -- inv_world is rotation +
+        // translation only (fog volumes assume unit scale), so `t` stays in
+        // world-space distance units on both sides of this transform.
+        vec3 rd = (u_fog.volumes[i].inv_world * vec4(view_dir, 0.0)).xyz;
+
+        vec3  extent = u_fog.volumes[i].extent_shape.xyz;
+        float shape  = u_fog.volumes[i].extent_shape.w;
+        vec2  t = (shape > 0.5) ? gfx_fog_sphere_intersect(ro, rd, extent.x)
+                                 : gfx_fog_box_intersect(ro, rd, extent);
+
+        float t_enter = max(t.x, 0.0);
+        // t.y itself (the volume's TRUE, natural far boundary) is kept unclamped for the
+        // edge-weight evaluation below -- only this occlusion-clamped copy, used for the
+        // optical-depth integral, is limited by nearby geometry. A ray whose far side is
+        // clipped by the table (or the orbiting sphere passing behind it) should still show
+        // the volume's own density profile right up to that clip, not fade near the clip
+        // itself -- that coupling was the bug in an earlier version of this fade (see
+        // gfx_fog_box_edge_weight's doc).
+        float t_exit_visible = min(t.y, d);
+        float seg = t_exit_visible - t_enter;
+        if (seg <= 0.0) continue;
+
+        // Soft edge, box: a single evaluation at the ray's own natural midpoint (not entry,
+        // not entry+exit -- see gfx_fog_box_edge_weight's doc for why both of those broke
+        // down, one at a face-on silhouette, the other at an ordinary corner). Deliberately
+        // built from t_enter/t.y (the natural bounds), not t_exit_visible, so occlusion never
+        // feeds into the density profile itself, only into how much of it is integrated.
+        vec3 p_enter = ro + rd * t_enter;
+        float edge_weight;
+        if (shape > 0.5) {
+            edge_weight = gfx_fog_sphere_edge_weight(p_enter, rd, u_fog.volumes[i].falloff.x);
+        } else {
+            vec3 p_mid = ro + rd * (0.5 * (t_enter + t.y));
+            edge_weight = gfx_fog_box_edge_weight(p_mid, extent, u_fog.volumes[i].falloff.x);
+        }
+
+        float density = u_fog.volumes[i].color_density.a;
+        float tau_i   = density * seg * edge_weight;
+        tau_local        += tau_i;
+        volume_color_sum += u_fog.volumes[i].color_density.rgb * tau_i;
+    }
+
+    vec3 base_color = gfx_fog_base_color(u_fog.fog_color.rgb, view_dir, u_fog.sun_direction.xyz,
+                                         u_fog.sun_color.rgb, u_fog.height_params, u_fog.misc_params);
+
+    vec3 fog_color = base_color;
+    if (tau_local > 1e-5) {
+        vec3  weighted_volume_color = volume_color_sum / tau_local;
+        float local_mix = 1.0 - exp(-tau_local);
+        fog_color = mix(base_color, weighted_volume_color, local_mix);
+    }
+
+    float max_opacity = u_fog.misc_params.y;
+    float T = clamp(T_global * exp(-tau_local), 1.0 - max_opacity, 1.0);
+
+    out_color = vec4(mix(fog_color, color, T), 1.0);
+}
