@@ -1,7 +1,7 @@
 /**
  * @file pixel_stylize_pass.h
- * @brief Optional tonemap + outline + ordered dither + palette quantization
- *        overlay (see assets/shaders/pixel_stylize.frag).
+ * @brief Optional bloom + tonemap + outline + ordered dither + palette
+ *        quantization overlay (see assets/shaders/pixel_stylize.frag).
  *
  * The tonemap step is optional (PushConstants::exposure <= 0 disables it):
  * a full PBR renderer with its own tonemap/AA chain (e.g. blendy) feeds
@@ -11,7 +11,11 @@
  * scene color instead.
  *
  * Reads scene color plus the G-buffer's depth and normal (for the outline
- * edge detector), and a palette LUT. Writes into its own target --
+ * edge detector), a palette LUT, and (optionally) a pre-blurred bloom image --
+ * see set_source_images()'s bloom_result param. Bloom itself is NOT computed
+ * here: it's a separate BloomPass pyramid (bright-pass threshold -> multi-tap
+ * downsample -> tent-filter upsample+combine), and this pass just adds its
+ * finished result before the tonemap. Writes into its own target --
  * pipeline::RenderPass's hardcoded LOAD_OP_CLEAR (gfxcoopa/pipeline/render_pass.h)
  * means the target it reads from can't be reopened and composited onto in place.
  */
@@ -63,8 +67,15 @@ public:
         float     camera_far            = 1000.0f;
         float     camera_is_perspective = 1.0f;  ///< >= 0.5 => perspective, else orthographic.
         float     exposure              = 0.0f;  ///< <= 0 disables the tonemap step (input is already LDR).
+        /// Final multiplier on the pre-blurred bloom image bound at binding 4 (see
+        /// set_source_images()'s bloom_result param and BloomPass). <= 0 disables it.
+        /// No threshold/LOD fields here anymore: BloomPass's own bright-pass shader
+        /// thresholds once, per source texel, before any blurring -- re-thresholding
+        /// the finished blurred result here would eat the halo falloff the pyramid
+        /// exists to produce, and there is no mip chain left to pick an LOD from.
+        float     bloom_intensity        = 0.0f;
     };
-    static_assert(sizeof(PushConstants) == 60,
+    static_assert(sizeof(PushConstants) == 64,
                  "PushConstants must match pixel_stylize.frag's StylizePushConstants byte-for-byte");
 
     PixelStylizePass(coopa::gfx::core::Device& device,
@@ -76,7 +87,7 @@ public:
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
         coopa::gfx::pipeline::DescriptorLayoutBuilder layout_builder;
-        for (uint32_t i = 0; i < 4; ++i) {
+        for (uint32_t i = 0; i < 5; ++i) {
             layout_builder.combined_sampler(i, coopa::gfx::ShaderStage::Fragment);
         }
         desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(layout_builder.build(device));
@@ -102,7 +113,9 @@ public:
     void set_source_images(coopa::gfx::TextureView scene_color, coopa::gfx::TextureView scene_depth,
                            coopa::gfx::TextureView scene_normal, coopa::gfx::TextureView palette_lut,
                            const coopa::gfx::engine::util::Sampler& linear_sampler,
-                           const coopa::gfx::engine::util::Sampler& nearest_sampler) {
+                           const coopa::gfx::engine::util::Sampler& nearest_sampler,
+                           coopa::gfx::TextureView bloom_result = {},
+                           const coopa::gfx::engine::util::Sampler* bloom_sampler = nullptr) {
         // scene_depth/scene_normal use the nearest sampler, not linear: the outline edge
         // detector's taps need exact texel values (linear filtering would blend across the
         // very discontinuities it's looking for), and linear filtering of a D32_SFLOAT depth
@@ -111,6 +124,18 @@ public:
         desc_set_->bind_image(1, scene_depth, nearest_sampler);
         desc_set_->bind_image(2, scene_normal, nearest_sampler);
         desc_set_->bind_image(3, palette_lut, nearest_sampler);
+        // bloom_result: the finished, pre-blurred output of a dedicated BloomPass pyramid
+        // (bright-pass threshold -> multi-tap downsample -> tent-filter upsample+combine),
+        // sampled with a plain texture() through a LINEAR sampler -- unlike the mip-chain-
+        // reuse hack this replaced, there is no LOD to pick, just one already-composited
+        // image, half this pass's resolution, bilinearly upsampled for free. Optional
+        // (defaults to binding 0's own view/sampler again -- a harmless self-bind, since
+        // bloom_intensity <= 0 means the shader never reads it) so existing callers that
+        // don't want bloom need no source code change. The caller must only pass a real
+        // view once its BloomPass has actually executed at least once -- see
+        // PixelRenderPipeline's construction-time bloom_enabled guard for why.
+        desc_set_->bind_image(4, bloom_sampler ? bloom_result : scene_color,
+                              bloom_sampler ? *bloom_sampler : linear_sampler);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& params,

@@ -41,9 +41,12 @@ namespace passes {
 
 class TransparentPass {
 public:
-    /// 32 bytes -- byte-identical to GBufferPipeline::PushConstants. model/
-    /// normal_matrix moved to the per-instance vertex stream (data::InstanceData);
-    /// this block is now shared once per instanced batch, not pushed per object.
+    /// 32 bytes -- byte-identical to the first 32 bytes of GBufferPipeline::PushConstants
+    /// (which is 48 bytes total: it carries a trailing `emissive` field this struct does
+    /// not, since emissive is deferred/opaque-only -- this forward BLEND path doesn't
+    /// carry it). model/normal_matrix moved to the per-instance vertex stream
+    /// (data::InstanceData); this block is now shared once per instanced batch, not
+    /// pushed per object.
     struct PushConstants {
         glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f}; // 16 bytes; .w = alpha
         float     metallic     = 0.0f;

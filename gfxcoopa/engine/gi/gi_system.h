@@ -393,7 +393,10 @@ private:
      * minus alpha/alpha_cutoff: probe capture always forces albedo.a=1 and
      * cutoff=0 regardless of the source material (see capture_reflection_probe_()'s
      * "always render fully opaque" comment), so those two never actually
-     * vary between any two items here.
+     * vary between any two items here. Also excludes emissive: ProbeCapturePass is a
+     * forward path and its PushConstants don't carry the deferred-only `emissive` field
+     * (see PBRMaterial::gpu_emissive()'s doc), so two materials differing only in
+     * emissive still produce byte-identical push constants here.
      */
     static bool same_capture_material_(const components::PBRMaterial& a, const components::PBRMaterial& b) {
         return a.albedo == b.albedo && a.metallic == b.metallic

@@ -48,9 +48,11 @@ public:
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        // Descriptor set layout (Set 4): 3 G-Buffer samplers + 1 SSAO sampler
+        // Descriptor set layout (the pass's last set -- see gbuffer_set_index_): 4
+        // G-Buffer samplers (albedo/ao, normal/metallic, position/roughness, emissive)
+        // + 1 SSAO sampler.
         coopa::gfx::pipeline::DescriptorLayoutBuilder gbuffer_layout_builder;
-        for (uint32_t i = 0; i < 4; ++i) {
+        for (uint32_t i = 0; i < 5; ++i) {
             gbuffer_layout_builder.combined_sampler(i, coopa::gfx::ShaderStage::Fragment);
         }
         gbuffer_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
@@ -101,10 +103,16 @@ public:
     void set_gbuffer_images(coopa::gfx::TextureView g0_view,
                             coopa::gfx::TextureView g1_view,
                             coopa::gfx::TextureView g2_view,
+                            coopa::gfx::TextureView g3_view,
                             const util::Sampler& linear_sampler) {
         gbuffer_desc_set_->bind_image(0, g0_view, linear_sampler);
         gbuffer_desc_set_->bind_image(1, g1_view, linear_sampler);
         gbuffer_desc_set_->bind_image(2, g2_view, linear_sampler);
+        // Binding 4, not 3 -- SSAO keeps binding 3 (see set_ssao_image() below), so adding
+        // emissive is a pure append in every consumer's fragment shader rather than a
+        // renumber, and this set stays aligned with SsrPass's composite G-buffer set,
+        // which also treats binding 3 as SSAO.
+        gbuffer_desc_set_->bind_image(4, g3_view, linear_sampler);
     }
 
     /// Binding 3 must be rebound every frame -- callers pass the SSAO pass's blurred output when

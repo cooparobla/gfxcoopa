@@ -77,6 +77,7 @@ layout(set = 4, binding = 0) uniform sampler2D g_albedo_ao;          // RGB = Al
 layout(set = 4, binding = 1) uniform sampler2D g_normal_metallic;    // RGB = Normal, A = Metallic
 layout(set = 4, binding = 2) uniform sampler2D g_position_roughness; // RGB = World Pos, A = Roughness
 layout(set = 4, binding = 3) uniform sampler2D g_ssao;                // R = screen-space AO (SsaoPass output)
+layout(set = 4, binding = 4) uniform sampler2D g_emissive;            // RGB = emissive radiance (HDR)
 
 layout(location = 0) out vec4 out_color;
 
@@ -194,6 +195,7 @@ void main() {
     // 1.0 (fully unoccluded) whenever SSAO is disabled -- DeferredLightingPass::set_ssao_image()
     // binds SsaoPass::neutral_view() in that case, so this read needs no separate enabled flag.
     float ssao = texture(g_ssao, in_uv).r;
+    vec3 emissive = texture(g_emissive, in_uv).rgb;
 
     vec3 N = g1.rgb;
     if (length(N) < 0.001) {
@@ -317,6 +319,8 @@ void main() {
     vec3 kD_indirect = (vec3(1.0) - ind.F) * (1.0 - metallic);
     vec3 ambient = (kD_indirect * albedo * indirect_diffuse + ind.value) * ao * ssao;
 
-    vec3 color = ambient + Lo;
+    // emissive is added last, after ambient's * ao * ssao -- an emissive surface glows
+    // even in a fully occluded/dark crevice, unlike the lit terms above it.
+    vec3 color = ambient + Lo + emissive;
     out_color = vec4(color, 1.0);
 }

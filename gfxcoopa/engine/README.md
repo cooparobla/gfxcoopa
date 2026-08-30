@@ -108,7 +108,7 @@ The `coopa::gfx::engine` module provides high-level rendering engine abstraction
 #### [gbuffer_target.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/engine/targets/gbuffer_target.h)
 - **Role**: Offscreen multi-attachment G-Buffer render target manager.
 - **Key Classes / Structs**: `GBufferTarget`.
-- **Details**: Manages deferred geometry pass attachments: Albedo+AO, Normal+Metallic, Position+Roughness, and Depth.
+- **Details**: Manages deferred geometry pass attachments: Albedo+AO, Normal+Metallic, Position+Roughness, Emissive, and Depth.
 
 #### [offscreen_target.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/engine/targets/offscreen_target.h)
 - **Role**: Custom-resolution offscreen HDR render target.

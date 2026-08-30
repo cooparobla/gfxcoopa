@@ -33,12 +33,18 @@ public:
     // now streamed per-instance instead (see data::InstanceData) — this
     // block is shared once per instanced draw batch rather than pushed per
     // object, so only genuinely per-batch material state remains.
+    //
+    // 48 bytes total. The first 32 bytes (through alpha_cutoff) are byte-identical to
+    // TransparentPass::PushConstants / TransparentCapturePass::PushConstants /
+    // ProbeCapturePass::PushConstants, which stay at 32 bytes -- emissive is deferred
+    // (opaque G-buffer) only, so those forward-path structs deliberately don't grow.
     struct PushConstants {
         glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f}; // 16 bytes; .w = alpha
         float     metallic     = 0.0f;
         float     roughness    = 0.5f;
         float     ao           = 1.0f;
         float     alpha_cutoff = 0.0f;                     // 16 bytes; 0.0 = no alpha test
+        glm::vec4 emissive     = {0.0f, 0.0f, 0.0f, 0.0f}; // 16 bytes; xyz = pre-multiplied emissive radiance, w reserved
     };
 
     GBufferPipeline(coopa::gfx::core::Device& device,
@@ -138,9 +144,9 @@ public:
         depth_stencil.depthCompareOp   = VK_COMPARE_OP_LESS;
         depth_stencil.stencilTestEnable= VK_FALSE;
 
-        // Color blending (3 G-Buffer attachments)
-        VkPipelineColorBlendAttachmentState blend_attachments[3]{};
-        for (int i = 0; i < 3; ++i) {
+        // Color blending (4 G-Buffer attachments)
+        VkPipelineColorBlendAttachmentState blend_attachments[4]{};
+        for (int i = 0; i < 4; ++i) {
             blend_attachments[i].blendEnable = VK_FALSE;
             blend_attachments[i].colorWriteMask =
                 VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -150,7 +156,7 @@ public:
         VkPipelineColorBlendStateCreateInfo color_blending{};
         color_blending.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
         color_blending.logicOpEnable   = VK_FALSE;
-        color_blending.attachmentCount = 3;
+        color_blending.attachmentCount = 4;
         color_blending.pAttachments    = blend_attachments;
 
         // Shaders

@@ -34,6 +34,7 @@ struct SceneBox {
     glm::vec3 box_min;
     glm::vec3 box_max;
     glm::vec3 albedo;
+    glm::vec3 emissive; /**< Pre-multiplied (colour * strength) -- see PBRMaterial::gpu_emissive(). */
 };
 
 struct HitInfo {
@@ -41,6 +42,7 @@ struct HitInfo {
     float t = 1e9f;
     glm::vec3 albedo = glm::vec3(0.0f);
     glm::vec3 normal = glm::vec3(0.0f, 0.0f, 1.0f);
+    glm::vec3 emissive = glm::vec3(0.0f);
 };
 
 inline HitInfo intersect_box(const glm::vec3& O, const glm::vec3& D, const SceneBox& box) {
@@ -58,6 +60,7 @@ inline HitInfo intersect_box(const glm::vec3& O, const glm::vec3& D, const Scene
         res.hit = true;
         res.t = t_near;
         res.albedo = box.albedo;
+        res.emissive = box.emissive;
 
         glm::vec3 hit_pos = O + D * t_near;
         glm::vec3 center = 0.5f * (box.box_min + box.box_max);
@@ -106,7 +109,7 @@ public:
             );
             glm::vec3 box_min = pos - 0.5f * scale;
             glm::vec3 box_max = pos + 0.5f * scale;
-            boxes.push_back({box_min, box_max, mr->material.albedo});
+            boxes.push_back({box_min, box_max, mr->material.albedo, glm::vec3(mr->material.gpu_emissive())});
         }
 
         const int SAMPLE_COUNT = 128;
@@ -150,6 +153,11 @@ public:
                             } else {
                                 radiance = best_hit.albedo * 0.2f;
                             }
+                            // An emissive surface contributes its own radiance regardless of
+                            // whether a directional light exists -- it's a light source in its
+                            // own right for baked GI purposes (unlike the real-time deferred
+                            // path, which never gathers emissive into direct lighting).
+                            radiance += best_hit.emissive;
                         } else {
                             if (dir_light) {
                                 float n_dot_l = std::max(glm::dot(d, -dir_light->direction), 0.0f);

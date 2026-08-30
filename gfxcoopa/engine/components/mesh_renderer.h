@@ -46,6 +46,20 @@ struct PBRMaterial {
     AlphaMode alpha_mode   = AlphaMode::Opaque; /**< Selects the draw list this material joins. */
     float     alpha_cutoff = 0.5f;              /**< Only meaningful for AlphaMode::Mask. */
 
+    /// Emissive radiance colour, linear space, before emissive_strength. Added to the
+    /// shaded result *after* AO/SSAO attenuation -- an emissive surface glows even in a
+    /// dark crevice. Not a real-time light source: no pass gathers emissive into direct
+    /// lighting, so it reaches neighbouring surfaces only via the screen-space SSR/SSGI
+    /// terms that sample lit scene colour (and, for baked probes, via GiBaker). Deferred
+    /// (opaque G-buffer) path only -- the forward transparent/probe-capture paths don't
+    /// carry this field.
+    glm::vec3 emissive = {0.0f, 0.0f, 0.0f};
+
+    /// Multiplier on `emissive`, kept separate so a scene can drive an HDR intensity (>1)
+    /// without denormalising the authored colour. Only ever multiplied together on the
+    /// way to the GPU -- see gpu_emissive().
+    float     emissive_strength = 1.0f;
+
     std::string texture_albedo             = "";
     std::string texture_normal             = "";
     std::string texture_metallic_roughness = "";
@@ -75,6 +89,27 @@ struct PBRMaterial {
      */
     float gpu_alpha_cutoff() const {
         return alpha_mode == AlphaMode::Mask ? glm::clamp(alpha_cutoff, 0.0001f, 1.0f) : 0.0f;
+    }
+
+    /** @brief Returns true when this material contributes any emissive radiance at all. */
+    bool is_emissive() const {
+        return emissive_strength > 0.0f && (emissive.r > 0.0f || emissive.g > 0.0f || emissive.b > 0.0f);
+    }
+
+    /**
+     * @brief Returns the emissive term as the GPU shader sees it.
+     *
+     * Colour and strength collapse into one pre-multiplied vec4 for the same reason
+     * gpu_alpha_cutoff() folds alpha_mode into its result: it keeps the shader side to a
+     * single add, and it makes the batching predicates compare what actually reaches the
+     * GPU, so {1,0,0} x 2.0 and {2,0,0} x 1.0 correctly merge into one batch. Negative
+     * authored values are clamped away -- a negative emissive would subtract light from
+     * the frame, which no pass expects.
+     *
+     * @return vec4(emissive * emissive_strength, 0.0); .w is reserved and currently unread.
+     */
+    glm::vec4 gpu_emissive() const {
+        return glm::vec4(glm::max(emissive, glm::vec3(0.0f)) * glm::max(emissive_strength, 0.0f), 0.0f);
     }
 };
 

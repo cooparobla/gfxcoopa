@@ -48,10 +48,11 @@ namespace passes {
 /// shadows in v1).
 class ProbeCapturePass {
 public:
-    /// 32 bytes -- byte-identical to GBufferPipeline::PushConstants /
-    /// TransparentPass::PushConstants. model/normal_matrix moved to the
-    /// per-instance vertex stream (data::InstanceData); this block is now
-    /// shared once per instanced batch, not pushed per object.
+    /// 32 bytes -- byte-identical to the first 32 bytes of GBufferPipeline::PushConstants
+    /// (48 bytes total there) / TransparentPass::PushConstants. model/normal_matrix moved
+    /// to the per-instance vertex stream (data::InstanceData); this block is now shared
+    /// once per instanced batch, not pushed per object. Probe capture is a forward path,
+    /// so it doesn't carry the deferred-only `emissive` field either.
     struct PushConstants {
         glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f};
         float     metallic     = 0.0f;

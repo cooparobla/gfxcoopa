@@ -47,7 +47,9 @@ public:
     /// 32 bytes -- byte-identical to TransparentPass::PushConstants (alpha_cutoff/alpha are
     /// carried along unused: this pass never blends or alpha-tests, front-most surface always
     /// wins by depth, but keeping the layout identical lets a caller build one PushConstants
-    /// value and push it into both this pass and TransparentPass with no translation).
+    /// value and push it into both this pass and TransparentPass with no translation). Also
+    /// matches the first 32 bytes of GBufferPipeline::PushConstants (48 bytes total there) --
+    /// this forward path doesn't carry the deferred-only `emissive` field.
     struct PushConstants {
         glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f}; // 16 bytes; .w = alpha, unused here
         float     metallic     = 0.0f;

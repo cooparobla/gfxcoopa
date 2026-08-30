@@ -1,8 +1,10 @@
 #version 450
 
-// Stylize overlay: optional exposure+ACES tonemap -> depth/normal-
-// discontinuity outline (alpha-blended over the input color) -> ordered
-// (Bayer) dither -> palette quantization, in that order.
+// Stylize overlay: optional bloom composite -> exposure+ACES tonemap ->
+// depth/normal-discontinuity outline (alpha-blended over the input color) ->
+// ordered (Bayer) dither -> palette quantization, in that order. Bloom runs
+// first (and in linear HDR) since it's an additive light contribution, not
+// a stylistic filter over the final image the way the other four are.
 //
 // The tonemap step is optional: a full-PBR renderer with its own tonemap/AA
 // chain (e.g. blendy) leaves `exposure` <= 0 and feeds this shader
@@ -10,10 +12,11 @@
 // no tonemap step of its own (e.g. toyengine) sets `exposure` > 0 and feeds
 // raw HDR scene color instead.
 //
-// All four effects are independently no-ops at their "off" value
-// (exposure <= 0, outline_thickness <= 0, dither_strength <= 0,
-// palette_count <= 0), so a consumer can leave this pass always-constructed
-// and always-executed and simply zero the fields it doesn't want.
+// All five effects are independently no-ops at their "off" value
+// (bloom_intensity <= 0, exposure <= 0, outline_thickness <= 0,
+// dither_strength <= 0, palette_count <= 0), so a consumer can leave this
+// pass always-constructed and always-executed and simply zero the fields it
+// doesn't want.
 
 layout(location = 0) in vec2 in_uv;
 
@@ -21,6 +24,11 @@ layout(set = 0, binding = 0) uniform sampler2D scene_color;  // already tonemapp
 layout(set = 0, binding = 1) uniform sampler2D scene_depth;  // gbuffer depth
 layout(set = 0, binding = 2) uniform sampler2D scene_normal; // gbuffer world normal (+ metallic in .a)
 layout(set = 0, binding = 3) uniform sampler2D palette_lut;  // Nx1 RGBA8, NEAREST
+// Finished bloom image from BloomPass: already bright-pass filtered and blurred
+// through a downsample/upsample pyramid, at HALF this pass's resolution. Sampled
+// with a plain texture() through a LINEAR sampler -- the bilinear upsample to full
+// resolution is free and is exactly what a soft additive glow wants.
+layout(set = 0, binding = 4) uniform sampler2D bloom_tex;
 
 layout(push_constant) uniform StylizePushConstants {
     vec4  outline_color;      // listed first: std430 would otherwise pad around a mid-struct vec4
@@ -34,6 +42,7 @@ layout(push_constant) uniform StylizePushConstants {
     float camera_far;
     float camera_is_perspective; // >= 0.5 => perspective, else orthographic
     float exposure;              // <= 0 disables the tonemap step (input is already LDR)
+    float bloom_intensity;       // <= 0 disables bloom
 } params;
 
 layout(location = 0) out vec4 out_color;
@@ -143,6 +152,18 @@ vec3 quantize_to_palette(vec3 color) {
 
 void main() {
     vec3 color = texture(scene_color, in_uv).rgb;
+
+    // Bloom: additive soft glow in linear HDR, before the tonemap, since it is a light
+    // contribution rather than a stylistic filter over the final image. Thresholding already
+    // happened once in bloom_prefilter.frag, per source texel and before any blurring --
+    // deliberately NOT repeated here: subtracting a threshold from an already-blurred image
+    // would eat the halo falloff the pyramid exists to produce, and would put a hard
+    // C0 cutoff back on a value that drifts under camera motion (the shimmer this pass used
+    // to have when bloom was a single reused mip lookup).
+    if (params.bloom_intensity > 0.0) {
+        color += texture(bloom_tex, in_uv).rgb * params.bloom_intensity;
+    }
+
     if (params.exposure > 0.0) color = aces_film(color * params.exposure);
 
     vec3 n0 = texture(scene_normal, in_uv).rgb;

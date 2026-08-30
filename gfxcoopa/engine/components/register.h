@@ -134,6 +134,16 @@ inline void register_render_components(core::Device& device,
                 if (mat_node.contains("roughness")) mr->material.roughness = mat_node.at("roughness").get_value<float>();
                 if (mat_node.contains("ao"))        mr->material.ao        = mat_node.at("ao").get_value<float>();
 
+                if (mat_node.contains("emissive")) {
+                    const auto& em = mat_node.at("emissive");
+                    mr->material.emissive = {
+                        em.at("r").get_value<float>(),
+                        em.at("g").get_value<float>(),
+                        em.at("b").get_value<float>()
+                    };
+                }
+                if (mat_node.contains("emissive_strength")) mr->material.emissive_strength = mat_node.at("emissive_strength").get_value<float>();
+
                 if (mat_node.contains("alpha"))        mr->material.alpha        = mat_node.at("alpha").get_value<float>();
                 if (mat_node.contains("alpha_cutoff")) mr->material.alpha_cutoff = mat_node.at("alpha_cutoff").get_value<float>();
                 if (mat_node.contains("alpha_mode")) {

@@ -29,6 +29,13 @@ namespace passes {
 
 class PbrPipeline {
 public:
+    // Unused by any current consumer (legacy single-pass forward pipeline, superseded by
+    // the deferred G-buffer + DeferredLightingPass path). Already 160 bytes here, past the
+    // 128-byte guaranteed-minimum Vulkan push-constant budget -- a pre-existing latent
+    // portability issue, not one introduced by leaving `emissive` out of it. Left without
+    // the deferred-only `emissive` field for the same reason the other forward-path
+    // PushConstants structs (TransparentPass, TransparentCapturePass, ProbeCapturePass)
+    // are: this is a forward pipeline, and emissive is deferred/opaque G-buffer only.
     struct PushConstants {
         coopa::gfx::engine::data::ModelPushConstants model; // 128 bytes
         glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f}; // 16 bytes; .w = alpha
