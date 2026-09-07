@@ -49,6 +49,8 @@
 #include <gfxcoopa/engine/components/gi_probe_volume.h>
 #include <gfxcoopa/engine/components/reflection_probe.h>
 #include <gfxcoopa/engine/components/fog_volume.h>
+#include <gfxcoopa/engine/components/sdf_renderer.h>
+#include <gfxcoopa/engine/components/sdf_shape.h>
 
 #include <fstream>
 #include <filesystem>
@@ -76,6 +78,76 @@ inline fkyaml::node load_yaml_file_(const std::string& path) {
         throw std::runtime_error("[gfxcoopa] Failed to open file: " + path);
     }
     return fkyaml::node::deserialize(ifs);
+}
+
+/**
+ * @brief Parses a `material:` YAML block into a PBRMaterial, shared by the
+ * "MeshRenderer" and "SdfRenderer" parsers below so the two renderer types'
+ * material surface can never drift apart (see SdfRenderer's own doc: it
+ * reuses PBRMaterial verbatim for exactly this reason).
+ */
+inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& material,
+                                coopa::asset::AssetManager& assets,
+                                const coopa::scene::SceneLoader::ParseContext& ctx) {
+    if (mat_node.contains("albedo")) {
+        const auto& alb = mat_node.at("albedo");
+        material.albedo = {
+            alb.at("r").get_value<float>(),
+            alb.at("g").get_value<float>(),
+            alb.at("b").get_value<float>()
+        };
+    }
+    if (mat_node.contains("metallic"))  material.metallic  = mat_node.at("metallic").get_value<float>();
+    if (mat_node.contains("roughness")) material.roughness = mat_node.at("roughness").get_value<float>();
+    if (mat_node.contains("ao"))        material.ao        = mat_node.at("ao").get_value<float>();
+
+    if (mat_node.contains("emissive")) {
+        const auto& em = mat_node.at("emissive");
+        material.emissive = {
+            em.at("r").get_value<float>(),
+            em.at("g").get_value<float>(),
+            em.at("b").get_value<float>()
+        };
+    }
+    if (mat_node.contains("emissive_strength")) material.emissive_strength = mat_node.at("emissive_strength").get_value<float>();
+
+    if (mat_node.contains("alpha"))        material.alpha        = mat_node.at("alpha").get_value<float>();
+    if (mat_node.contains("alpha_cutoff")) material.alpha_cutoff = mat_node.at("alpha_cutoff").get_value<float>();
+    if (mat_node.contains("alpha_mode")) {
+        std::string mode = mat_node.at("alpha_mode").get_value<std::string>();
+        if (mode == "BLEND") {
+            material.alpha_mode = AlphaMode::Blend;
+        } else if (mode == "MASK" || mode == "CLIP") {
+            material.alpha_mode = AlphaMode::Mask;
+        } else {
+            material.alpha_mode = AlphaMode::Opaque;
+        }
+    }
+
+    if (mat_node.contains("texture_albedo")) {
+        material.texture_albedo = mat_node.at("texture_albedo").get_value<std::string>();
+        material.albedo_handle = assets.load_async<data::Texture>(material.texture_albedo, ctx.scene_dir);
+    }
+    if (mat_node.contains("texture_normal")) {
+        material.texture_normal = mat_node.at("texture_normal").get_value<std::string>();
+        material.normal_handle = assets.load_async<data::Texture>(material.texture_normal, ctx.scene_dir);
+    }
+    if (mat_node.contains("texture_metallic_roughness")) {
+        material.texture_metallic_roughness = mat_node.at("texture_metallic_roughness").get_value<std::string>();
+        material.metallic_roughness_handle = assets.load_async<data::Texture>(material.texture_metallic_roughness, ctx.scene_dir);
+    }
+}
+
+/// Parses a `{x:, y:, z:}` node into a glm::vec3, leaving components at
+/// `fallback`'s when absent -- the same partial-override convention every
+/// other vec3 field in this file already follows (DirectionalLight's
+/// direction/color, FogVolume's extent/color, etc.).
+inline glm::vec3 parse_vec3_(const fkyaml::node& node, const glm::vec3& fallback) {
+    glm::vec3 v = fallback;
+    if (node.contains("x")) v.x = node.at("x").get_value<float>();
+    if (node.contains("y")) v.y = node.at("y").get_value<float>();
+    if (node.contains("z")) v.z = node.at("z").get_value<float>();
+    return v;
 }
 
 /**
@@ -121,54 +193,7 @@ inline void register_render_components(core::Device& device,
             }
 
             if (node.contains("material")) {
-                const auto& mat_node = node.at("material");
-                if (mat_node.contains("albedo")) {
-                    const auto& alb = mat_node.at("albedo");
-                    mr->material.albedo = {
-                        alb.at("r").get_value<float>(),
-                        alb.at("g").get_value<float>(),
-                        alb.at("b").get_value<float>()
-                    };
-                }
-                if (mat_node.contains("metallic"))  mr->material.metallic  = mat_node.at("metallic").get_value<float>();
-                if (mat_node.contains("roughness")) mr->material.roughness = mat_node.at("roughness").get_value<float>();
-                if (mat_node.contains("ao"))        mr->material.ao        = mat_node.at("ao").get_value<float>();
-
-                if (mat_node.contains("emissive")) {
-                    const auto& em = mat_node.at("emissive");
-                    mr->material.emissive = {
-                        em.at("r").get_value<float>(),
-                        em.at("g").get_value<float>(),
-                        em.at("b").get_value<float>()
-                    };
-                }
-                if (mat_node.contains("emissive_strength")) mr->material.emissive_strength = mat_node.at("emissive_strength").get_value<float>();
-
-                if (mat_node.contains("alpha"))        mr->material.alpha        = mat_node.at("alpha").get_value<float>();
-                if (mat_node.contains("alpha_cutoff")) mr->material.alpha_cutoff = mat_node.at("alpha_cutoff").get_value<float>();
-                if (mat_node.contains("alpha_mode")) {
-                    std::string mode = mat_node.at("alpha_mode").get_value<std::string>();
-                    if (mode == "BLEND") {
-                        mr->material.alpha_mode = AlphaMode::Blend;
-                    } else if (mode == "MASK" || mode == "CLIP") {
-                        mr->material.alpha_mode = AlphaMode::Mask;
-                    } else {
-                        mr->material.alpha_mode = AlphaMode::Opaque;
-                    }
-                }
-
-                if (mat_node.contains("texture_albedo")) {
-                    mr->material.texture_albedo = mat_node.at("texture_albedo").get_value<std::string>();
-                    mr->material.albedo_handle = assets.load_async<data::Texture>(mr->material.texture_albedo, ctx.scene_dir);
-                }
-                if (mat_node.contains("texture_normal")) {
-                    mr->material.texture_normal = mat_node.at("texture_normal").get_value<std::string>();
-                    mr->material.normal_handle = assets.load_async<data::Texture>(mr->material.texture_normal, ctx.scene_dir);
-                }
-                if (mat_node.contains("texture_metallic_roughness")) {
-                    mr->material.texture_metallic_roughness = mat_node.at("texture_metallic_roughness").get_value<std::string>();
-                    mr->material.metallic_roughness_handle = assets.load_async<data::Texture>(mr->material.texture_metallic_roughness, ctx.scene_dir);
-                }
+                parse_pbr_material_(node.at("material"), mr->material, assets, ctx);
             }
         });
 
@@ -318,6 +343,66 @@ inline void register_render_components(core::Device& device,
             }
             if (node.contains("density")) fv->density = node.at("density").get_value<float>();
             if (node.contains("falloff")) fv->falloff = node.at("falloff").get_value<float>();
+        });
+
+    SceneLoader::register_component_parser("SdfRenderer",
+        [&assets](
+            const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext& ctx) {
+            auto* sr = obj.add_component<SdfRenderer>();
+
+            if (node.contains("bounds_center"))
+                sr->bounds_center = parse_vec3_(node.at("bounds_center"), sr->bounds_center);
+            if (node.contains("bounds_extent"))
+                sr->bounds_extent = parse_vec3_(node.at("bounds_extent"), sr->bounds_extent);
+
+            if (node.contains("cast_shadows"))
+                sr->cast_shadows = node.at("cast_shadows").get_value<bool>();
+            if (node.contains("affects_reflection_probes"))
+                sr->affects_reflection_probes = node.at("affects_reflection_probes").get_value<bool>();
+            if (node.contains("max_steps"))
+                sr->max_steps = node.at("max_steps").get_value<int>();
+            if (node.contains("surface_epsilon"))
+                sr->surface_epsilon = node.at("surface_epsilon").get_value<float>();
+            if (node.contains("normal_epsilon"))
+                sr->normal_epsilon = node.at("normal_epsilon").get_value<float>();
+            if (node.contains("smoothing"))
+                sr->smoothing = node.at("smoothing").get_value<float>();
+
+            if (node.contains("material")) {
+                parse_pbr_material_(node.at("material"), sr->material, assets, ctx);
+            }
+        });
+
+    SceneLoader::register_component_parser("SdfShape",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* shape = obj.add_component<SdfShape>();
+
+            if (node.contains("shape")) {
+                std::string s = node.at("shape").get_value<std::string>();
+                if (s == "Box" || s == "box") {
+                    shape->type = SdfShapeType::Box;
+                } else if (s == "Plane" || s == "plane") {
+                    shape->type = SdfShapeType::Plane;
+                } else {
+                    shape->type = SdfShapeType::Sphere;
+                }
+            }
+            if (node.contains("params"))
+                shape->params = parse_vec3_(node.at("params"), shape->params);
+            if (node.contains("rounding"))
+                shape->rounding = node.at("rounding").get_value<float>();
+            if (node.contains("op")) {
+                std::string o = node.at("op").get_value<std::string>();
+                if (o == "Subtract" || o == "subtract") {
+                    shape->op = SdfOperation::Subtract;
+                } else if (o == "Intersect" || o == "intersect") {
+                    shape->op = SdfOperation::Intersect;
+                } else {
+                    shape->op = SdfOperation::Union;
+                }
+            }
+            if (node.contains("blend"))
+                shape->blend = node.at("blend").get_value<float>();
         });
 
     SceneLoader::register_component_parser("ReflectionProbe",

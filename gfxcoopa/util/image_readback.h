@@ -109,6 +109,26 @@ inline ImageData read_image(core::Device& device, memory::Allocator& allocator,
                                 BufferUsage::TransferDst, MemoryResidency::GpuToCpu);
 
     TextureUsage original = src.current_usage();
+    // Stale-bookkeeping correction: TransferSrc is a value this very function can leave an image
+    // in (see this function's own doc -- deliberate when `original` was Undefined/Present), but
+    // none of this codebase's render targets ever intentionally sit in TransferSrc across
+    // frames. A render pass's automatic layout transition (e.g. to ShaderRead, so a later pass
+    // can sample the target) is NOT reflected back into Image::current_usage() -- only
+    // CommandBuffer::transition() updates it (see command_buffer.h) -- so if this function is
+    // called again on the SAME image after more frames have rendered into it, current_usage()
+    // still reads the stale TransferSrc this function itself set last time, even though the
+    // image's REAL layout has long since moved to ShaderRead via its owning render pass. Treating
+    // that stale TransferSrc as non-restorable (the pre-fix behavior) made the barrier below claim
+    // "already TransferSrc" -- a no-op that never actually transitions anything -- while the
+    // validation layer's OWN tracked state (which follows the real layout, independent of our
+    // bookkeeping) correctly still says ShaderRead, so the subsequent copy is flagged for
+    // expecting TRANSFER_SRC_OPTIMAL when the image is actually SHADER_READ_ONLY_OPTIMAL.
+    // Correcting the bookkeeping here (once, before it's read again below) makes repeated capture
+    // of the same render target self-healing.
+    if (original == TextureUsage::TransferSrc) {
+        src.mark_transitioned(TextureUsage::ShaderRead);
+        original = TextureUsage::ShaderRead;
+    }
     bool restorable = original == TextureUsage::ColorAttachment ||
                       original == TextureUsage::DepthAttachment ||
                       original == TextureUsage::ShaderRead ||

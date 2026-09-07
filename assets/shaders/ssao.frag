@@ -52,6 +52,23 @@ void main() {
     N = normalize(N);
     vec3 P = texelFetch(g_position_roughness, px, 0).rgb;
 
+    // Curvature-aware bias. A single global pc.bias, tuned against this scene's mostly
+    // flat/gently-curved surfaces (floor, cube, ~0.45-radius mesh spheres), isn't enough
+    // for a tightly-curved or concave surface -- e.g. the seam of a smooth-CSG blob, where
+    // the surface bends away from the hemisphere-sample tangent plane fast enough that
+    // pc.bias alone can't tell real occlusion from the surface's own curvature, producing
+    // false self-occlusion that's most visible from certain view angles near the seam
+    // (worse under camera motion simply because rotating sweeps through those angles;
+    // confirmed empirically -- ssao_radius made no difference, ssao_bias alone did, but
+    // only at a global magnitude that visibly weakened legitimate contact shadows
+    // elsewhere -- see plan history). Screen-space normal derivatives are a cheap, direct
+    // curvature proxy: ~0 on a flat or gently-curved surface, large where the normal
+    // changes fast across adjacent pixels (a sharp bend or concave seam) -- scaling bias by
+    // this leaves flat/gently-curved surfaces at the originally-tuned value while boosting
+    // it exactly where the curvature is actually severe.
+    float curvature = length(dFdx(N)) + length(dFdy(N));
+    float effective_bias = pc.bias + curvature * 15.0;
+
     vec2 noise_scale = vec2(pc.noise_scale_x, pc.noise_scale_y);
     vec2 n2 = texture(u_noise, in_uv * noise_scale).rg * 2.0 - 1.0;
 
@@ -92,7 +109,7 @@ void main() {
         // Both view_z values are negative (RH, camera looks down -Z), so "scene surface is in
         // front of the sample point" means scene_vz > sample_vz (less negative == closer).
         float range_check = smoothstep(0.0, 1.0, pc.radius / max(abs(sample_vz - scene_vz), 1e-4));
-        occlusion += (scene_vz >= sample_vz + pc.bias ? 1.0 : 0.0) * range_check;
+        occlusion += (scene_vz >= sample_vz + effective_bias ? 1.0 : 0.0) * range_check;
     }
 
     float ao = 1.0 - occlusion / float(pc.kernel_size);

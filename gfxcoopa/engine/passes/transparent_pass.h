@@ -249,6 +249,14 @@ public:
 
     VkPipelineLayout layout() const { return pipeline_->layout(); }
 
+    /// @brief The hand-built render pass this pass owns -- for a sibling pass
+    /// (e.g. SdfForwardPass) that needs to build its own Pipeline against the
+    /// SAME render pass instance, so both can draw into the same open
+    /// begin()/end() bracket (see PixelRenderPipeline's merged back-to-front
+    /// BLEND draw list, which switches between this pass and SdfForwardPass
+    /// per item without ever closing and reopening the render pass).
+    VkRenderPass render_pass() const { return render_pass_; }
+
 private:
     void create_render_pass_() {
         VkAttachmentDescription attachments[2]{};
