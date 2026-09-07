@@ -40,6 +40,10 @@
 #include <gfxcoopa/presentation/renderer.h>
 #include <gfxcoopa/util/image_readback.h>
 #include <gfxcoopa/app/context.h>
+#include <gfxcoopa/engine/components/camera_component.h>
+
+#include <coopa/scene/scene_object.h>
+#include <coopa/scene/components/transform_component.h>
 
 // ANSI colors — identical to libcoopa test.cpp
 #define ANSI_COLOR_RED     "\x1b[31m"
@@ -155,6 +159,72 @@ void test_format_helpers() {
     bool threw = false;
     try { coopa::gfx::util::format_from_channels(3, false); } catch (...) { threw = true; }
     ASSERT_TRUE(threw);
+}
+
+// --- engine/components/camera_component.h ---
+// Stand-alone: CameraComponent only needs a SceneObject/TransformComponent,
+// no Vulkan device -- so these run in the no-Vulkan-required group above.
+
+void test_camera_main_singleton_explicit() {
+    using coopa::gfx::engine::components::CameraComponent;
+    using coopa::scene::SceneObject;
+
+    SceneObject a("cam_a"), b("cam_b");
+    auto* cam_a = a.add_component<CameraComponent>();
+    auto* cam_b = b.add_component<CameraComponent>();
+    cam_b->is_main = true;
+
+    // b starts first despite a existing first -- is_main should still win regardless of order.
+    cam_b->start();
+    cam_a->start();
+    ASSERT_TRUE(CameraComponent::main() == cam_b);
+}
+
+void test_camera_main_singleton_defaults_to_first() {
+    using coopa::gfx::engine::components::CameraComponent;
+    using coopa::scene::SceneObject;
+
+    SceneObject a("cam_a"), b("cam_b");
+    auto* cam_a = a.add_component<CameraComponent>();
+    auto* cam_b = b.add_component<CameraComponent>();
+
+    // Neither declares is_main -- the first to start() claims the singleton,
+    // so a loaded scene always has a main camera.
+    cam_a->start();
+    cam_b->start();
+    ASSERT_TRUE(CameraComponent::main() == cam_a);
+}
+
+void test_camera_main_singleton_clears_on_destroy() {
+    using coopa::gfx::engine::components::CameraComponent;
+    using coopa::scene::SceneObject;
+
+    SceneObject holder("cam_temp");
+    auto* cam = holder.add_component<CameraComponent>();
+    cam->make_main();
+    ASSERT_TRUE(CameraComponent::main() == cam);
+
+    holder.remove_component<CameraComponent>();
+    ASSERT_TRUE(CameraComponent::main() == nullptr);
+}
+
+void test_camera_projection_runtime_switch() {
+    using coopa::gfx::engine::components::CameraComponent;
+    using coopa::gfx::engine::components::CameraType;
+    using coopa::scene::SceneObject;
+
+    SceneObject obj("cam");
+    auto* cam = obj.add_component<CameraComponent>();
+
+    cam->set_orthographic(5.0f);
+    ASSERT_TRUE(cam->type == CameraType::Orthographic);
+    glm::mat4 ortho_proj = cam->get_projection_matrix(1.0f);
+    ASSERT_TRUE(ortho_proj[3][3] == 1.0f); // orthographic: w stays 1
+
+    cam->set_perspective(60.0f);
+    ASSERT_TRUE(cam->type == CameraType::Perspective);
+    glm::mat4 persp_proj = cam->get_projection_matrix(1.0f);
+    ASSERT_TRUE(persp_proj[3][3] == 0.0f); // perspective: w comes from -z
 }
 
 // --- presentation/window.h ---
@@ -630,6 +700,10 @@ int main() {
     // --- Stand-alone tests (no Vulkan required) ---
     RUN_TEST(test_error_check);
     RUN_TEST(test_format_helpers);
+    RUN_TEST(test_camera_main_singleton_explicit);
+    RUN_TEST(test_camera_main_singleton_defaults_to_first);
+    RUN_TEST(test_camera_main_singleton_clears_on_destroy);
+    RUN_TEST(test_camera_projection_runtime_switch);
 
     // --- Vulkan fixture setup ---
     std::cout << std::endl;

@@ -72,28 +72,8 @@ void main() {
     float aabb_min = min(s0, min(s1, min(s2, min(s3, min(s4, min(s5, min(s6, min(s7, s8))))))));
     float aabb_max = max(s0, max(s1, max(s2, max(s3, max(s4, max(s5, max(s6, max(s7, s8))))))));
 
-    // Motion-adaptive history confidence. The 3x3 clamp above only bounds the MAGNITUDE of
-    // the reprojected value against this frame's local AO range -- it does nothing to catch
-    // a reprojection that lands on the WRONG surface entirely, which is exactly what happens
-    // at a silhouette/grazing-angle pixel: last frame this screen position may have shown a
-    // different patch of the (possibly concave/curved) object, or nothing at all, yet
-    // `history` still often falls inside [aabb_min, aabb_max] by coincidence and gets
-    // blended in at pc.blend_factor regardless. A static camera reprojects such a point with
-    // zero screen-space error no matter the surface, so this only misfires under camera
-    // motion -- and gets WORSE as the camera moves faster, since the silhouette sweeps
-    // proportionally faster and reuses stale history more often. Fading blend_factor toward
-    // 0 as the reprojected screen-space distance grows suppresses that specific failure
-    // mode, while leaving a motionless camera (reproj_px ~ 0) untouched. NOTE (see plan
-    // history): this alone did not resolve the user's reported dark-shadow bug when tested
-    // live -- kept in per their explicit request as a still-plausible partial mitigation
-    // while the search continues elsewhere in the SSAO pipeline, not because it's confirmed
-    // to be THE fix.
-    float reproj_px = length((prev_uv - in_uv) * vec2(pc.resolution_x, pc.resolution_y));
-    float motion_confidence = exp(-(reproj_px * reproj_px) / (2.0 * 3.0 * 3.0));
-    float blend_factor = pc.blend_factor * motion_confidence;
-
     float history = texture(u_ao_history, prev_uv).r;
     float clamped_history = clamp(history, aabb_min, aabb_max);
 
-    out_ao = mix(current, clamped_history, blend_factor);
+    out_ao = mix(current, clamped_history, pc.blend_factor);
 }

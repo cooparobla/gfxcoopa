@@ -15,6 +15,7 @@
 #include <coopa/scene/components/transform_component.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <iostream>
 #include <string>
 
 namespace coopa {
@@ -52,6 +53,16 @@ class CameraComponent : public coopa::scene::Component {
 public:
     CameraComponent() = default;
 
+    /**
+     * @brief Clears the main-camera singleton if this instance currently holds it.
+     *
+     * Required so a scene reload (or any other destruction of the main
+     * camera) never leaves main() pointing at a freed component.
+     */
+    ~CameraComponent() override {
+        if (main_camera_() == this) main_camera_() = nullptr;
+    }
+
     std::string type_name() const override { return "Camera"; }
 
     // --- Camera parameters ---
@@ -64,6 +75,7 @@ public:
     float lens                  = 50.0f;   /**< Lens focal length (informational). */
     float sensor_width          = 36.0f;   /**< Sensor width in mm (informational). */
     float sensor_height         = 24.0f;   /**< Sensor height in mm (informational). */
+    bool is_main                = false;   /**< Claims the main-camera singleton in start() (alias: main). */
 
     // Legacy alias for orthographic scale (full height = orthographic_size * 2)
     float get_ortho_scale() const { return orthographic_size * 2.0f; }
@@ -71,7 +83,12 @@ public:
 
     // --- Configuration API (Unity-style) ---
 
-    /** @brief Sets perspective projection mode with vertical FOV in degrees. */
+    /**
+     * @brief Sets perspective projection mode with vertical FOV in degrees.
+     *
+     * Safe to call at runtime, not just from the YAML parser: this only
+     * mutates plain fields, which the render pipeline re-reads every frame.
+     */
     void set_perspective(float fov_deg, float near_clip = 0.1f, float far_clip = 1000.0f) {
         type = CameraType::Perspective;
         fov = fov_deg;
@@ -79,13 +96,67 @@ public:
         clip_end = far_clip;
     }
 
-    /** @brief Sets orthographic projection mode with half-height size in world units. */
+    /**
+     * @brief Sets orthographic projection mode with half-height size in world units.
+     *
+     * Safe to call at runtime, not just from the YAML parser: this only
+     * mutates plain fields, which the render pipeline re-reads every frame.
+     */
     void set_orthographic(float ortho_size, float near_clip = 0.1f, float far_clip = 1000.0f) {
         type = CameraType::Orthographic;
         orthographic_size = ortho_size;
         clip_start = near_clip;
         clip_end = far_clip;
     }
+
+    // --- Main-camera singleton ---
+
+    /**
+     * @brief Claims the main-camera singleton unconditionally, evicting any
+     * previous holder.
+     *
+     * Call this to switch the active camera at runtime (e.g. a cutscene
+     * camera taking over). YAML-driven claiming happens automatically in
+     * start() instead -- see main()'s doc for the rule a loaded scene follows.
+     */
+    void make_main() {
+        is_main = true;
+        main_camera_() = this;
+    }
+
+    /**
+     * @brief Called once the scene finishes loading. Claims the main-camera
+     * singleton if `is_main` was set by YAML, or if no camera has claimed it
+     * yet -- so a scene always has a main camera, even if every Camera
+     * component in it omits `main: true`.
+     *
+     * If another camera already claimed the singleton and this one also
+     * requests it via `is_main`, this one wins and a warning is printed:
+     * exactly one `main: true` per scene is the intended usage.
+     */
+    void start() override {
+        if (is_main) {
+            if (main_camera_() && main_camera_() != this) {
+                std::cerr << "[gfxcoopa] Warning: multiple cameras marked main; "
+                             "the most recently started one wins.\n";
+            }
+            main_camera_() = this;
+        } else if (!main_camera_()) {
+            main_camera_() = this;
+        }
+    }
+
+    /**
+     * @brief Returns the scene's current main camera, or nullptr if none has
+     * started yet.
+     *
+     * A camera becomes main either by declaring `main: true` in YAML, or by
+     * being the first CameraComponent::start() to run in a scene where none
+     * did -- so a loaded scene always has a main camera once it has started.
+     *
+     * @return The main CameraComponent, or nullptr.
+     */
+    static CameraComponent* main() { return main_camera_(); }
 
     // --- Matrix computation ---
 
@@ -141,6 +212,20 @@ public:
         if (!tc) return glm::vec3(0.0f);
         glm::mat4 world = tc->get_world_matrix();
         return glm::vec3(world[3]); // Translation column
+    }
+
+private:
+    /**
+     * @brief Function-local static holding the main-camera singleton.
+     *
+     * Same idiom as coopa::scene::SceneLoader's parser registry
+     * (a private static accessor returning a reference to a function-local
+     * static) rather than uicoopa's Meyers-singleton `instance()` shape --
+     * the state here is a bare non-owning pointer, not an object to construct.
+     */
+    static CameraComponent*& main_camera_() {
+        static CameraComponent* camera = nullptr;
+        return camera;
     }
 };
 

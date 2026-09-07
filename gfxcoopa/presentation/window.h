@@ -45,6 +45,16 @@ enum class CursorShape {
 };
 
 /**
+ * @enum CursorMode
+ * @brief Visibility/capture behavior of the OS cursor, independent of its shape.
+ */
+enum class CursorMode {
+    Normal,   /**< Cursor visible and unconfined (default). */
+    Hidden,   /**< Cursor hidden but still confined to the window and reporting real position. */
+    Disabled, /**< Cursor hidden, unbounded, and re-centered each frame -- for mouse-look. */
+};
+
+/**
  * @class Window
  * @brief RAII wrapper around a GLFW window configured for Vulkan rendering.
  *
@@ -280,6 +290,31 @@ public:
     }
 
     /**
+     * @brief Sets whether the cursor is visible/confined -- orthogonal to its shape.
+     *
+     * CursorMode::Disabled is the mode for mouse-look camera controls: GLFW
+     * hides the cursor, unbounds it from the window, and reports a virtual
+     * position via cursor_position() that can exceed the window's extent.
+     *
+     * @param mode One of Normal, Hidden, or Disabled.
+     */
+    void set_cursor_mode(CursorMode mode) {
+        int glfw_mode = GLFW_CURSOR_NORMAL;
+        switch (mode) {
+            case CursorMode::Hidden:   glfw_mode = GLFW_CURSOR_HIDDEN;   break;
+            case CursorMode::Disabled: glfw_mode = GLFW_CURSOR_DISABLED; break;
+            case CursorMode::Normal: default: glfw_mode = GLFW_CURSOR_NORMAL; break;
+        }
+        glfwSetInputMode(window_, GLFW_CURSOR, glfw_mode);
+        cursor_mode_ = mode;
+    }
+
+    /**
+     * @brief Returns the cursor mode last set via set_cursor_mode() (Normal by default).
+     */
+    CursorMode cursor_mode() const { return cursor_mode_; }
+
+    /**
      * @brief Polls pending OS events (keyboard, mouse, resize, close).
      *
      * Must be called once per frame on the main thread.
@@ -392,6 +427,7 @@ private:
     uint32_t     width_;             /**< Initial window width in pixels. */
     uint32_t     height_;            /**< Initial window height in pixels. */
     bool         resized_ = false;   /**< Set to true when a framebuffer resize event arrives. */
+    CursorMode   cursor_mode_ = CursorMode::Normal; /**< Last mode set via set_cursor_mode(). */
     double       scroll_x_ = 0.0;    /**< Accumulated scroll x-offset since the last new_frame(). */
     double       scroll_y_ = 0.0;    /**< Accumulated scroll y-offset since the last new_frame(). */
     std::vector<unsigned int>   char_input_;  /**< UTF-32 codepoints typed since the last new_frame(). */

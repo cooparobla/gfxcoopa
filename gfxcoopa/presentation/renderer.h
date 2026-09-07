@@ -104,6 +104,20 @@ public:
     uint32_t current_frame() const { return current_frame_; }
 
     /**
+     * @brief Blocks until the command buffer previously submitted for the CURRENT frame slot
+     *        has completed, without acquiring or submitting anything.
+     *
+     * draw_frame() already does this as its first statement, but only after the caller has had
+     * a chance to write that slot's own per-frame-in-flight host buffers. A caller that writes
+     * slot-indexed resources BEFORE draw_frame() -- the normal shape for a per-frame-in-flight
+     * instance/uniform stream -- calls this first so those writes are provably ordered after
+     * the frame that last used the slot, rather than racing it. Cheap and idempotent: fences
+     * are created signaled (see command/sync.h), so an already-signaled wait returns
+     * immediately.
+     */
+    void wait_for_current_frame() const { in_flight_fences_[current_frame_]->wait(); }
+
+    /**
      * @brief Acquires the next swapchain image, executes the record callback, submits and presents.
      *
      * This is the primary API. The callback receives a ready CommandBuffer already

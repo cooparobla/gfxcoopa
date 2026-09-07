@@ -14,8 +14,13 @@
  * That per-slot duplication is the load-bearing difference from FogData:
  * FogData's one buffer is safe to reupload every frame because nothing else
  * in this pipeline overlaps two frames' G-buffer/shadow/forward passes
- * against the SAME buffer contents simultaneously in a way that matters (a
- * stale one-frame-old fog UBO is imperceptible). An SDF renderer's clip_rect
+ * against the SAME buffer contents simultaneously in a way that matters --
+ * for its TUNING fields (color, density, falloff). FogData::inv_view_proj is
+ * a camera matrix, though, and is the same hazard class as this file's own
+ * SdfGlobals.inv_view_proj below: a stale one-frame-old copy under fast
+ * camera motion, currently unexercised only because no shipped scene enables
+ * fog_enabled (see toyengine's PixelRenderPipeline::render(), the
+ * fog.inv_view_proj fill site). An SDF renderer's clip_rect
  * and shape range, by contrast, feed a scissor rect and a loop bound that
  * must exactly match what CPU-side record_*() calls compute for THIS frame's
  * draws -- reusing one buffer across overlapping frames would let frame N's
@@ -23,8 +28,20 @@
  * Per-slot buffers plus binding one descriptor set per slot ONCE at
  * construction (see set()) keeps every write going to a slot the GPU is
  * provably not reading, with no per-frame device_.wait_idle() -- the same
- * policy InstanceStream/CameraUBO/LightData/FogData all follow for their own
- * reasons (see pixel_render_pipeline.h's synchronization doc).
+ * policy toyengine's InstanceStream follows (see
+ * toyengine/render/instance_stream.h), and that PixelRenderPipeline also
+ * applies to its CAMERA uniform by owning one CameraUBO plus one descriptor
+ * set per frame-in-flight slot rather than sharing one (see that file's
+ * camera_ubos_/camera_sets_ and their synchronization doc) -- an earlier
+ * version shared a single CameraUBO, which put mesh rasterization one frame
+ * out of step with this file's own per-slot SdfGlobals.inv_view_proj under
+ * fast camera motion. The CameraUBO/LightData/FogData *classes* themselves
+ * are still single-buffered: per-slot-ness is a property of a consumer's
+ * frame-overlap model, not of the type -- GiSystem's own capture camera
+ * (gfxcoopa/engine/gi/gi_system.h) submit-and-waits per cube face and
+ * genuinely wants one buffer. LightData/FogData have no per-slot consumer
+ * yet; see FogData's own file doc for why its inv_view_proj is the same
+ * hazard class as this file's, currently unexercised.
  */
 
 #ifndef GFXCOOPA_ENGINE_DATA_SDF_DATA_H

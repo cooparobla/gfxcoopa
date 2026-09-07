@@ -238,6 +238,12 @@ inline void register_render_components(core::Device& device,
             if (node.contains("lens"))          cam->lens          = node.at("lens").get_value<float>();
             if (node.contains("sensor_width"))  cam->sensor_width  = node.at("sensor_width").get_value<float>();
             if (node.contains("sensor_height")) cam->sensor_height = node.at("sensor_height").get_value<float>();
+
+            if (node.contains("main")) {
+                cam->is_main = node.at("main").get_value<bool>();
+            } else if (node.contains("is_main")) {
+                cam->is_main = node.at("is_main").get_value<bool>();
+            }
         });
 
     SceneLoader::register_component_parser("DirectionalLight",
