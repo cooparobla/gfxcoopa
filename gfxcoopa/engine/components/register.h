@@ -81,6 +81,28 @@ inline fkyaml::node load_yaml_file_(const std::string& path) {
 }
 
 /**
+ * @brief Decodes a scene YAML `alpha_mode` string into an AlphaMode.
+ *
+ * "CUTOUT" is the Unity-facing name for the same alpha-tested behaviour "MASK"/"CLIP" (the
+ * glTF names) already select -- all three collapse onto AlphaMode::Mask; see that enum's doc.
+ * Any other string (including an absent/misspelled one) falls back to AlphaMode::Opaque, silently
+ * -- matches this parser's existing behaviour for every other unrecognised enum-like value.
+ *
+ * Factored out of parse_pbr_material_() so it's unit-testable without a Device/AssetManager.
+ *
+ * @param mode The raw `alpha_mode` string from scene YAML.
+ * @return The decoded AlphaMode.
+ */
+inline AlphaMode parse_alpha_mode_(const std::string& mode) {
+    if (mode == "BLEND") {
+        return AlphaMode::Blend;
+    } else if (mode == "MASK" || mode == "CLIP" || mode == "CUTOUT") {
+        return AlphaMode::Mask;
+    }
+    return AlphaMode::Opaque;
+}
+
+/**
  * @brief Parses a `material:` YAML block into a PBRMaterial, shared by the
  * "MeshRenderer" and "SdfRenderer" parsers below so the two renderer types'
  * material surface can never drift apart (see SdfRenderer's own doc: it
@@ -114,14 +136,7 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
     if (mat_node.contains("alpha"))        material.alpha        = mat_node.at("alpha").get_value<float>();
     if (mat_node.contains("alpha_cutoff")) material.alpha_cutoff = mat_node.at("alpha_cutoff").get_value<float>();
     if (mat_node.contains("alpha_mode")) {
-        std::string mode = mat_node.at("alpha_mode").get_value<std::string>();
-        if (mode == "BLEND") {
-            material.alpha_mode = AlphaMode::Blend;
-        } else if (mode == "MASK" || mode == "CLIP") {
-            material.alpha_mode = AlphaMode::Mask;
-        } else {
-            material.alpha_mode = AlphaMode::Opaque;
-        }
+        material.alpha_mode = parse_alpha_mode_(mat_node.at("alpha_mode").get_value<std::string>());
     }
 
     // Mesh-only (forward MESH transparent pass); parsed here regardless of renderer type
@@ -150,6 +165,10 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
     if (mat_node.contains("texture_metallic_roughness")) {
         material.texture_metallic_roughness = mat_node.at("texture_metallic_roughness").get_value<std::string>();
         material.metallic_roughness_handle = assets.load_async<data::Texture>(material.texture_metallic_roughness, ctx.scene_dir);
+    }
+    if (mat_node.contains("texture_alpha_mask")) {
+        material.texture_alpha_mask = mat_node.at("texture_alpha_mask").get_value<std::string>();
+        material.alpha_mask_handle = assets.load_async<data::Texture>(material.texture_alpha_mask, ctx.scene_dir);
     }
 }
 

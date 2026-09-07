@@ -15,6 +15,7 @@
 #include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/pipeline.h>
+#include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/engine/data/mesh.h>
 
@@ -41,6 +42,15 @@ namespace passes {
 struct DirectionalShadowPushConstants {
     glm::mat4 light_space_matrix;
     float     alpha = 1.0f;
+
+    /// CUTOUT (AlphaMode::Mask) support: 0.0 disables the alpha-mask discard in
+    /// shadow_depth.frag entirely (the default, and what OPAQUE/BLEND casters get -- see
+    /// PBRMaterial::gpu_alpha_cutoff()); a masked caster's own material.gpu_alpha_cutoff()
+    /// otherwise. Only meaningful when this ShadowPipeline was built with a non-null
+    /// material_layout (see the ctor) -- shadow_depth.frag has no mask sampler to test
+    /// against otherwise, and every caller that predates CUTOUT never sets this field, so it
+    /// stays at its 0.0 default and behaves exactly as before.
+    float     alpha_cutoff = 0.0f;
 };
 
 /**
@@ -54,6 +64,10 @@ struct CubeShadowPushConstants {
     glm::mat4 light_space_matrix;
     glm::vec4 light_pos_range; // xyz = light pos, w = range
     float     alpha = 1.0f;
+
+    /// See DirectionalShadowPushConstants::alpha_cutoff -- same CUTOUT meaning, same
+    /// backward-compatible 0.0 default.
+    float     alpha_cutoff = 0.0f;
 };
 
 /**
@@ -68,7 +82,8 @@ public:
                    const std::string&    dir_vert_spv,
                    const std::string&    dir_frag_spv,
                    const std::string&    cube_vert_spv,
-                   const std::string&    cube_frag_spv)
+                   const std::string&    cube_frag_spv,
+                   const pipeline::DescriptorSetLayout* material_layout = nullptr)
         : device_(device)
     {
         // 1. Directional Shadow Pipeline
@@ -79,11 +94,18 @@ public:
         // plus the per-instance model matrix (locations 4-7) -- a position-only binding-0 layout
         // (built here, not via data::Vertex::layout(), which declares all four of its
         // position/normal/uv/tangent attributes) eliminates validation warnings about unconsumed
-        // locations 1/2/3 for normal, uv, and tangent.
+        // locations 1/2/3 for normal, uv, and tangent. When material_layout is non-null (CUTOUT
+        // support requested), location 2 (uv) is added too, so shadow_depth.frag/shadow_cube.frag
+        // can alpha-test against the same mask texture the G-buffer pass uses; location 1
+        // (normal) and 3 (tangent) stay unconsumed either way -- depth-only shading needs neither.
         coopa::gfx::VertexLayout vertex_layout;
         vertex_layout.binding(0, sizeof(data::Vertex));
         vertex_layout.attribute(0, coopa::gfx::Format::RGB32_Sfloat,
                                 static_cast<uint32_t>(offsetof(data::Vertex, position)));
+        if (material_layout != nullptr) {
+            vertex_layout.attribute(2, coopa::gfx::Format::RG32_Sfloat,
+                                    static_cast<uint32_t>(offsetof(data::Vertex, uv)));
+        }
         vertex_layout.append(data::InstanceData::layout());
 
         pipeline::PipelineDesc desc;
@@ -91,6 +113,9 @@ public:
         desc.raster.cull = coopa::gfx::CullMode::None;
         desc.depth.test  = true;
         desc.depth.write = true;
+        if (material_layout != nullptr) {
+            desc.descriptor_layouts = {material_layout};
+        }
 
         desc.shaders = {dir_vert_.get(), dir_frag_.get()};
         desc.push_constants = {{coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment,

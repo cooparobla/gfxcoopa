@@ -41,6 +41,8 @@
 #include <gfxcoopa/util/image_readback.h>
 #include <gfxcoopa/app/context.h>
 #include <gfxcoopa/engine/components/camera_component.h>
+#include <gfxcoopa/engine/components/mesh_renderer.h>
+#include <gfxcoopa/engine/components/register.h>
 
 #include <coopa/scene/scene_object.h>
 #include <coopa/scene/components/transform_component.h>
@@ -225,6 +227,61 @@ void test_camera_projection_runtime_switch() {
     ASSERT_TRUE(cam->type == CameraType::Perspective);
     glm::mat4 persp_proj = cam->get_projection_matrix(1.0f);
     ASSERT_TRUE(persp_proj[3][3] == 0.0f); // perspective: w comes from -z
+}
+
+// --- engine/components/register.h + mesh_renderer.h ---
+// CUTOUT support: "CUTOUT" is a new alpha_mode alias for the pre-existing AlphaMode::Mask (see
+// mesh_renderer.h), and PBRMaterial::gpu_alpha_cutoff() is what both the G-buffer and shadow
+// shaders read to arm their alpha-mask discard. Neither needs a Device/AssetManager, so these
+// run in the no-Vulkan-required group above.
+
+void test_parse_alpha_mode() {
+    using coopa::gfx::engine::components::AlphaMode;
+    using coopa::gfx::engine::components::parse_alpha_mode_;
+
+    ASSERT_TRUE(parse_alpha_mode_("BLEND") == AlphaMode::Blend);
+    ASSERT_TRUE(parse_alpha_mode_("MASK") == AlphaMode::Mask);
+    ASSERT_TRUE(parse_alpha_mode_("CLIP") == AlphaMode::Mask);
+    // CUTOUT is the Unity-facing name for the same alpha-tested behaviour MASK/CLIP (the glTF
+    // names) already select -- all three must collapse onto AlphaMode::Mask.
+    ASSERT_TRUE(parse_alpha_mode_("CUTOUT") == AlphaMode::Mask);
+    // Unrecognised (or misspelled) strings silently fall back to Opaque, matching this parser's
+    // existing behaviour for every other unrecognised enum-like value.
+    ASSERT_TRUE(parse_alpha_mode_("") == AlphaMode::Opaque);
+    ASSERT_TRUE(parse_alpha_mode_("OPAQUE") == AlphaMode::Opaque);
+    ASSERT_TRUE(parse_alpha_mode_("cutout") == AlphaMode::Opaque); // case-sensitive by design
+}
+
+void test_pbr_material_gpu_alpha_cutoff() {
+    using coopa::gfx::engine::components::AlphaMode;
+    using coopa::gfx::engine::components::PBRMaterial;
+
+    PBRMaterial opaque;
+    opaque.alpha_mode = AlphaMode::Opaque;
+    opaque.alpha_cutoff = 0.7f;
+    ASSERT_TRUE(opaque.gpu_alpha_cutoff() == 0.0f); // OPAQUE never arms the discard
+
+    PBRMaterial blended;
+    blended.alpha_mode = AlphaMode::Blend;
+    blended.alpha_cutoff = 0.7f;
+    ASSERT_TRUE(blended.gpu_alpha_cutoff() == 0.0f); // BLEND never arms the discard either
+
+    PBRMaterial masked;
+    masked.alpha_mode = AlphaMode::Mask;
+    masked.alpha_cutoff = 0.7f;
+    ASSERT_TRUE(masked.gpu_alpha_cutoff() == 0.7f);
+
+    // Clamped to (0, 1] -- 0.0 would otherwise collide with the "disabled" sentinel itself.
+    PBRMaterial masked_zero;
+    masked_zero.alpha_mode = AlphaMode::Mask;
+    masked_zero.alpha_cutoff = 0.0f;
+    ASSERT_TRUE(masked_zero.gpu_alpha_cutoff() > 0.0f);
+
+    // has_alpha_mask() requires BOTH AlphaMode::Mask AND a loaded texture -- an unset
+    // alpha_mask_handle (the default for every material, masked or not) must read false, so
+    // MaterialTextureCache::set_for() knows to bind the white fallback instead.
+    ASSERT_TRUE(!masked.has_alpha_mask());
+    ASSERT_TRUE(!opaque.has_alpha_mask());
 }
 
 // --- presentation/window.h ---
@@ -704,6 +761,8 @@ int main() {
     RUN_TEST(test_camera_main_singleton_defaults_to_first);
     RUN_TEST(test_camera_main_singleton_clears_on_destroy);
     RUN_TEST(test_camera_projection_runtime_switch);
+    RUN_TEST(test_parse_alpha_mode);
+    RUN_TEST(test_pbr_material_gpu_alpha_cutoff);
 
     // --- Vulkan fixture setup ---
     std::cout << std::endl;

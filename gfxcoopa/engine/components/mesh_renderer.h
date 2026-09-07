@@ -84,17 +84,23 @@ struct PBRMaterial {
     std::string texture_normal             = "";
     std::string texture_metallic_roughness = "";
 
+    /// Alpha-test mask for AlphaMode::Mask (CUTOUT), glTF/Unity convention: only the **alpha**
+    /// channel is read, sampled at the mesh's UV and multiplied into albedo.a before the cutoff
+    /// test (see gpu_alpha_cutoff()/has_alpha_mask()). Always linear, never sRGB -- it's a scalar
+    /// coverage value, not color data. Ignored by SdfRenderer (SDFs have no UVs to sample with).
+    std::string texture_alpha_mask         = "";
+
     // Populated by register_render_components()'s "MeshRenderer" parser once
     // the corresponding texture_* path above has been loaded via
-    // coopa::asset::AssetManager. Not yet consumed by any pipeline
-    // descriptor set -- binding these into the G-buffer pass is a separate,
-    // not-yet-implemented follow-up (see gfxcoopa's asset-system
-    // integration plan) that also needs a material descriptor set layout
-    // and push-constant changes. Until then these just make texture loading
-    // itself observable/testable ahead of that wiring.
+    // coopa::asset::AssetManager. albedo_handle/normal_handle/metallic_roughness_handle are still
+    // not consumed by any pipeline descriptor set -- binding those into the G-buffer pass remains
+    // a separate, not-yet-implemented follow-up. alpha_mask_handle IS consumed: toyengine's
+    // MaterialTextureCache binds it (or a 1x1 white fallback) into the G-buffer and shadow
+    // passes' material descriptor set (see has_alpha_mask()).
     coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> albedo_handle;
     coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> normal_handle;
     coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> metallic_roughness_handle;
+    coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> alpha_mask_handle;
 
     /** @brief Returns true when this material must be drawn by the forward transparent pass. */
     bool is_blended() const { return alpha_mode == AlphaMode::Blend; }
@@ -103,10 +109,21 @@ struct PBRMaterial {
     bool has_refraction() const { return is_blended() && refraction; }
 
     /**
+     * @brief Returns true when this Mask material has a loaded alpha mask texture to sample.
+     *
+     * When false (Opaque/Blend, or a Mask material with no texture_alpha_mask), the G-buffer
+     * and shadow passes bind a 1x1 white fallback instead, which collapses the shader-side test
+     * back to today's constant-alpha behaviour.
+     */
+    bool has_alpha_mask() const { return alpha_mode == AlphaMode::Mask && alpha_mask_handle.is_loaded(); }
+
+    /**
      * @brief Returns the alpha cutoff as the GPU shader sees it.
      *
      * A value of 0.0 disables the discard entirely, which is what OPAQUE and BLEND
-     * materials need since only MASK performs an alpha test in the G-buffer pass.
+     * materials need since only MASK performs an alpha test in the G-buffer pass. When
+     * has_alpha_mask() is true, the shader multiplies this against the sampled mask's alpha
+     * rather than the constant material.albedo.a alone -- see gbuffer.frag/shadow_depth.frag.
      *
      * @return 0.0 for non-Mask materials, otherwise alpha_cutoff clamped to (0, 1].
      */
