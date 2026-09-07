@@ -74,12 +74,14 @@ target_include_directories(gfxcoopa_lib INTERFACE
     ${CMAKE_CURRENT_BINARY_DIR}/configuration)
 target_link_libraries(gfxcoopa_lib INTERFACE gfxcoopa_impl coopa::lib ${CMAKE_DL_LIBS})
 
-# --- coopa::gfx_pure: types/ and input/ only, with NO Vulkan/GLFW include
-# path available at all. A stray `#include <gfxcoopa/memory/buffer.h>` in a
+# --- coopa::gfx_pure: types/ only, with NO Vulkan/GLFW include path
+# available at all. A stray `#include <gfxcoopa/memory/buffer.h>` in a
 # target linked against this fails to compile -- this is what makes the
 # "headless tests never touch Vulkan" invariant structural rather than
 # aspirational (see tools/check_no_vulkan.sh for the complementary grep gate
-# over source text).
+# over source text). Keyboard/mouse input used to live here too
+# (gfxcoopa/input/) but has since moved to coopa/input/ in libcoopa, which
+# coopa::lib below already brings in -- see coopa/input/README.md.
 add_library(gfxcoopa_pure INTERFACE)
 add_library(coopa::gfx_pure ALIAS gfxcoopa_pure)
 target_compile_features(gfxcoopa_pure INTERFACE cxx_std_20)

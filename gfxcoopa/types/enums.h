@@ -5,11 +5,14 @@
  * These replace `Vk*` enums in every gfxcoopa public signature. They are
  * deliberately NOT 1:1 mirrors of their Vulkan counterparts — each is
  * narrowed to the values gfxcoopa's API actually needs, with values added on
- * demand rather than up front. This header (and the rest of `gfxcoopa/types/`
- * and `gfxcoopa/input/`) must never include volk or GLFW: that invariant is
- * what makes the `coopa::gfx_pure` CMake target and the "headless tests never
- * touch Vulkan" guarantee structural rather than aspirational. Vulkan-side
- * conversion lives only in `gfxcoopa/detail/vk_convert.h`.
+ * demand rather than up front. This header (and the rest of `gfxcoopa/types/`)
+ * must never include volk or GLFW: that invariant is what makes the
+ * `coopa::gfx_pure` CMake target and the "headless tests never touch Vulkan"
+ * guarantee structural rather than aspirational. Vulkan-side conversion lives
+ * only in `gfxcoopa/detail/vk_convert.h`. (The keyboard/mouse vocabulary that
+ * used to live alongside this at `gfxcoopa/input/` has since moved to
+ * `coopa/input/` in libcoopa, for the same reason: it never depended on
+ * Vulkan or GLFW either. See coopa/input/README.md.)
  */
 
 #ifndef COOPA_GFX_TYPES_ENUMS_H

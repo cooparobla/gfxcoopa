@@ -190,6 +190,8 @@ public:
 
     // --- Owned object access ---
     presentation::Window&   window()       { return *window_; }
+    /// @brief This context's keyboard/mouse state -- shorthand for window().input().
+    coopa::input::Input&    input()        { return window_->input(); }
     core::Device&           device()       { return *device_; }
     core::Swapchain&        swapchain()    { return *swapchain_; }
     memory::Allocator&      allocator()    { return *allocator_; }
@@ -218,8 +220,13 @@ public:
 
     /// @brief Clears per-frame input state, polls OS events, and advances
     /// the frame timer. Call once per iteration before frame().
+    ///
+    /// new_frame() is passed the PREVIOUS iteration's delta_time() -- the
+    /// only duration known at this point -- so Input's held-time accounting
+    /// (see coopa::input::Input::begin_frame()) accumulates the frame that
+    /// actually just elapsed, not a stale or zero value.
     void poll() {
-        window_->new_frame();
+        window_->new_frame(time_.delta_time());
         window_->poll_events();
         time_.update();
     }

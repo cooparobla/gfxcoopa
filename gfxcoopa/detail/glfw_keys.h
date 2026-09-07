@@ -1,7 +1,7 @@
 /**
  * @file glfw_keys.h
- * @brief INTERNAL. GLFW <-> gfx::input::Key/MouseButton/KeyAction/Mods
- * mapping tables.
+ * @brief INTERNAL. GLFW <-> coopa::input::Key/MouseButton/KeyAction/Mods/
+ * CursorShape/CursorMode mapping tables.
  *
  * This is one of exactly two gfxcoopa headers allowed to include GLFW (the
  * other is presentation/window.h itself). Consumer code must never include
@@ -9,6 +9,10 @@
  * tools/check_no_vulkan.sh precisely so that the escape hatches here
  * (and detail/vk_convert.h's) stay internal to gfxcoopa's own
  * implementation.
+ *
+ * The vocabulary converted here (coopa::input::*) lives in libcoopa, not
+ * gfxcoopa -- see coopa/input/README.md. This file is the GLFW half of that
+ * seam; presentation::Window is the only thing that may call into it.
  */
 
 #ifndef COOPA_GFX_DETAIL_GLFW_KEYS_H
@@ -17,15 +21,15 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
-#include <gfxcoopa/input/keys.h>
+#include <coopa/input/keys.h>
 
 namespace coopa {
 namespace gfx {
 namespace detail {
 
-/// @brief Maps a gfx::input::Key to its GLFW key code.
-inline int to_glfw(input::Key key) {
-    using input::Key;
+/// @brief Maps a coopa::input::Key to its GLFW key code.
+inline int to_glfw(coopa::input::Key key) {
+    using coopa::input::Key;
     switch (key) {
         case Key::Space:        return GLFW_KEY_SPACE;
         case Key::Apostrophe:   return GLFW_KEY_APOSTROPHE;
@@ -121,10 +125,10 @@ inline int to_glfw(input::Key key) {
     }
 }
 
-/// @brief Maps a GLFW key code to its gfx::input::Key, or Key::Unknown if
-/// unmapped (e.g. GLFW_KEY_WORLD_1/2, which have no gfxcoopa equivalent).
-inline input::Key from_glfw(int glfw_key) {
-    using input::Key;
+/// @brief Maps a GLFW key code to its coopa::input::Key, or Key::Unknown if
+/// unmapped (e.g. GLFW_KEY_WORLD_1/2, which have no coopa equivalent).
+inline coopa::input::Key from_glfw(int glfw_key) {
+    using coopa::input::Key;
     switch (glfw_key) {
         case GLFW_KEY_SPACE:        return Key::Space;
         case GLFW_KEY_APOSTROPHE:   return Key::Apostrophe;
@@ -213,32 +217,32 @@ inline input::Key from_glfw(int glfw_key) {
     }
 }
 
-/// @brief Maps a gfx::input::MouseButton to its GLFW button index.
-inline int to_glfw(input::MouseButton button) {
+/// @brief Maps a coopa::input::MouseButton to its GLFW button index.
+inline int to_glfw(coopa::input::MouseButton button) {
     return static_cast<int>(button); // Both are dense 0-based [0, 8), by design.
 }
 
-/// @brief Maps a GLFW mouse button index to gfx::input::MouseButton.
-inline input::MouseButton mouse_from_glfw(int glfw_button) {
-    if (glfw_button < 0 || glfw_button >= static_cast<int>(input::MouseButton::Count)) {
-        return input::MouseButton::Count; // No "Unknown" button; caller must range-check.
+/// @brief Maps a GLFW mouse button index to coopa::input::MouseButton.
+inline coopa::input::MouseButton mouse_from_glfw(int glfw_button) {
+    if (glfw_button < 0 || glfw_button >= static_cast<int>(coopa::input::MouseButton::Count)) {
+        return coopa::input::MouseButton::Count; // No "Unknown" button; caller must range-check.
     }
-    return static_cast<input::MouseButton>(glfw_button);
+    return static_cast<coopa::input::MouseButton>(glfw_button);
 }
 
 /// @brief Maps a GLFW action (GLFW_PRESS/RELEASE/REPEAT) to KeyAction.
-inline input::KeyAction action_from_glfw(int glfw_action) {
+inline coopa::input::KeyAction action_from_glfw(int glfw_action) {
     switch (glfw_action) {
-        case GLFW_PRESS:   return input::KeyAction::Press;
-        case GLFW_REPEAT:  return input::KeyAction::Repeat;
+        case GLFW_PRESS:   return coopa::input::KeyAction::Press;
+        case GLFW_REPEAT:  return coopa::input::KeyAction::Repeat;
         case GLFW_RELEASE:
-        default:           return input::KeyAction::Release;
+        default:           return coopa::input::KeyAction::Release;
     }
 }
 
-/// @brief Maps a GLFW modifier bitmask to gfx::input::Mods.
-inline input::Mods mods_from_glfw(int glfw_mods) {
-    using input::Mods;
+/// @brief Maps a GLFW modifier bitmask to coopa::input::Mods.
+inline coopa::input::Mods mods_from_glfw(int glfw_mods) {
+    using coopa::input::Mods;
     Mods m = Mods::None;
     if (glfw_mods & GLFW_MOD_SHIFT)     m = m | Mods::Shift;
     if (glfw_mods & GLFW_MOD_CONTROL)   m = m | Mods::Control;
@@ -247,6 +251,28 @@ inline input::Mods mods_from_glfw(int glfw_mods) {
     if (glfw_mods & GLFW_MOD_CAPS_LOCK) m = m | Mods::CapsLock;
     if (glfw_mods & GLFW_MOD_NUM_LOCK)  m = m | Mods::NumLock;
     return m;
+}
+
+/// @brief Maps a coopa::input::CursorShape to its GLFW standard-cursor constant.
+inline int to_glfw(coopa::input::CursorShape shape) {
+    using coopa::input::CursorShape;
+    switch (shape) {
+        case CursorShape::IBeam: return GLFW_IBEAM_CURSOR;
+        case CursorShape::Hand:  return GLFW_HAND_CURSOR;
+        case CursorShape::Arrow:
+        default:                 return GLFW_ARROW_CURSOR;
+    }
+}
+
+/// @brief Maps a coopa::input::CursorMode to its GLFW_CURSOR_* input mode value.
+inline int to_glfw(coopa::input::CursorMode mode) {
+    using coopa::input::CursorMode;
+    switch (mode) {
+        case CursorMode::Hidden:   return GLFW_CURSOR_HIDDEN;
+        case CursorMode::Disabled: return GLFW_CURSOR_DISABLED;
+        case CursorMode::Normal:
+        default:                   return GLFW_CURSOR_NORMAL;
+    }
 }
 
 } // namespace detail
