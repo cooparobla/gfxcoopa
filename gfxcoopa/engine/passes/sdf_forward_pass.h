@@ -48,7 +48,7 @@ public:
     /// SdfGBufferPass::PushConstants) -- everything else this pass needs
     /// (material, march params, per-frame lighting/SSR tuning) lives in the
     /// SdfData UBO/SSBOs, not a push constant, for the same 128-byte-budget
-    /// reason toyengine's TransparentLightingPushConstants doc explains.
+    /// reason toyengine's ForwardGlobals doc explains.
     struct PushConstants {
         uint32_t renderer_index = 0;
     };

@@ -126,10 +126,11 @@ struct alignas(16) SdfGlobals {
                                                 here to reconstruct it. */
     glm::vec4 camera_pos    = glm::vec4(0.0f);
     // Forward (BLEND) pass lighting/indirect/SSR tuning -- byte-for-byte the same fields
-    // toyengine's TransparentLightingPushConstants carries, moved to a UBO instead of a push
-    // constant because the SDF forward shader's per-object range/march fields (read from the
-    // renderer SSBO, not pushed) already leave no push-constant room for this block too -- see
-    // this file's doc and the plan's "why not push constants" note.
+    // toyengine's ForwardGlobals carries (forward_globals.h, the mesh forward path's own
+    // analogous UBO), moved to a UBO instead of a push constant because the SDF forward
+    // shader's per-object range/march fields (read from the renderer SSBO, not pushed)
+    // already leave no push-constant room for this block too -- see this file's doc and
+    // the plan's "why not push constants" note.
     glm::vec4 lighting0 = glm::vec4(4.0f, 0.55f, 0.0f, 0.0f);  /**< x=light_bands, y=spec_threshold, z=soft_lighting, w=rim_strength. */
     glm::vec4 lighting1 = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);   /**< x=ambient_intensity, y=sky_intensity, z=ssr_enabled, w=ssgi_intensity. */
     glm::vec4 ssr0 = glm::vec4(0.5f, 15.0f, 3.5f, 0.05f);      /**< x=ssgi_distance, y=ssr_max_distance, z=ssr_bias_texels, w=ssr_thickness_min. */

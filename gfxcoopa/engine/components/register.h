@@ -124,6 +124,21 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
         }
     }
 
+    // Mesh-only (forward MESH transparent pass); parsed here regardless of renderer type
+    // since this function is shared with SdfRenderer, but ignored by every SDF pass -- see
+    // PBRMaterial's own doc on refraction/ior/refraction_thickness/refraction_tint.
+    if (mat_node.contains("refraction"))           material.refraction           = mat_node.at("refraction").get_value<bool>();
+    if (mat_node.contains("ior"))                  material.ior                  = mat_node.at("ior").get_value<float>();
+    if (mat_node.contains("refraction_thickness")) material.refraction_thickness = mat_node.at("refraction_thickness").get_value<float>();
+    if (mat_node.contains("refraction_tint")) {
+        const auto& t = mat_node.at("refraction_tint");
+        material.refraction_tint = {
+            t.at("r").get_value<float>(),
+            t.at("g").get_value<float>(),
+            t.at("b").get_value<float>()
+        };
+    }
+
     if (mat_node.contains("texture_albedo")) {
         material.texture_albedo = mat_node.at("texture_albedo").get_value<std::string>();
         material.albedo_handle = assets.load_async<data::Texture>(material.texture_albedo, ctx.scene_dir);
