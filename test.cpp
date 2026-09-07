@@ -31,6 +31,7 @@
 #include <gfxcoopa/memory/buffer.h>
 #include <gfxcoopa/memory/image.h>
 #include <gfxcoopa/pipeline/shader.h>
+#include <gfxcoopa/pipeline/surface_shader.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/pipeline.h>
@@ -395,6 +396,68 @@ void test_shader_loading() {
 
     coopa::gfx::pipeline::Shader frag(*g_device, FRAG_SPV, VK_SHADER_STAGE_FRAGMENT_BIT);
     ASSERT_TRUE(frag.handle() != VK_NULL_HANDLE);
+}
+
+// --- pipeline/surface_shader.h ---
+
+void test_surface_shader_registry() {
+    using coopa::gfx::pipeline::SurfaceShaderDesc;
+    using coopa::gfx::pipeline::SurfaceShaderDomain;
+    using coopa::gfx::pipeline::SurfaceShaderRegistry;
+
+    SurfaceShaderRegistry registry;
+
+    // Empty name -- find()/require() treat it as "the stock shader", never registered.
+    ASSERT_TRUE(registry.find("") == nullptr);
+    registry.require(""); // must not throw
+
+    // An unregistered name is a hard failure via require(), not a silent fall-back.
+    bool threw = false;
+    try {
+        registry.require("nonexistent");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+    ASSERT_TRUE(registry.find("nonexistent") == nullptr);
+
+    // A registered name resolves and validates.
+    SurfaceShaderDesc water;
+    water.name   = "water";
+    water.domain = SurfaceShaderDomain::Transparent;
+    water.vert   = "water.vert";
+    water.frag   = "water.frag";
+    registry.add(water);
+
+    const SurfaceShaderDesc* found = registry.find("water");
+    ASSERT_TRUE(found != nullptr);
+    ASSERT_TRUE(found->vert == "water.vert");
+    ASSERT_TRUE(found->domain == SurfaceShaderDomain::Transparent);
+    registry.require("water"); // must not throw
+    ASSERT_EQ(registry.all().size(), 1u);
+
+    // Duplicate names are rejected -- a silent overwrite would mean two materials
+    // referencing the same name draw with different pipelines depending on
+    // registration order (see SurfaceShaderRegistry::add()'s own doc).
+    threw = false;
+    try {
+        SurfaceShaderDesc dup;
+        dup.name = "water";
+        registry.add(dup);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+    ASSERT_EQ(registry.all().size(), 1u); // the failed add() must not have appended anyway
+
+    // An empty name is rejected too.
+    threw = false;
+    try {
+        registry.add(SurfaceShaderDesc{});
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
 }
 
 // --- pipeline/render_pass.h ---
@@ -803,6 +866,7 @@ int main() {
     RUN_TEST(test_buffer_uniform);
     RUN_TEST(test_image_creation);
     RUN_TEST(test_shader_loading);
+    RUN_TEST(test_surface_shader_registry);
     RUN_TEST(test_render_pass);
     RUN_TEST(test_pipeline_creation);
     RUN_TEST(test_command_pool);

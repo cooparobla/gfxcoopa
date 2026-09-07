@@ -18,6 +18,7 @@
 
 #include <volk/volk.h>
 #include <glm/glm.hpp>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -41,19 +42,38 @@ namespace passes {
 
 class TransparentPass {
 public:
-    /// 32 bytes -- byte-identical to the first 32 bytes of GBufferPipeline::PushConstants
-    /// (which is 48 bytes total: it carries a trailing `emissive` field this struct does
-    /// not, since emissive is deferred/opaque-only -- this forward BLEND path doesn't
-    /// carry it). model/normal_matrix moved to the per-instance vertex stream
-    /// (data::InstanceData); this block is now shared once per instanced batch, not
-    /// pushed per object.
-    struct PushConstants {
+    /// 64 bytes -- the first 32 (through alpha_cutoff) are byte-identical to the first 32
+    /// bytes of GBufferPipeline::PushConstants (which is 80 bytes total there: it carries a
+    /// trailing `emissive` field this struct does not, since emissive is deferred/opaque-only
+    /// -- this forward BLEND path doesn't carry it). model/normal_matrix moved to the
+    /// per-instance vertex stream (data::InstanceData); this block is now shared once per
+    /// instanced batch, not pushed per object.
+    ///
+    /// gfx_time/gfx_params are the standard trailing "surface" block every surface-shader
+    /// backbone appends (see gfx/surface/gbuffer_vs.glsl and toyengine's
+    /// gfx/surface/transparent_vs.glsl) -- 32 bytes, so a derived transparent shader's
+    /// vertex hook (e.g. water's wave displacement) reads the same gfx_time/gfx_params
+    /// shape every other surface backbone does. alignas(16): every field here lands on a
+    /// 16-byte boundary already (32/48 are multiples of 16), matching GBufferPipeline's
+    /// PushConstants -- see that struct's doc for why this is marked explicitly rather than
+    /// relied upon.
+    struct alignas(16) PushConstants {
         glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f}; // 16 bytes; .w = alpha
         float     metallic     = 0.0f;
         float     roughness    = 0.5f;
         float     ao           = 1.0f;
         float     alpha_cutoff = 0.0f;                     // unused; BLEND never alpha-tests
+        glm::vec4 gfx_time     = {0.0f, 0.0f, 0.0f, 0.0f}; // x=time, y=delta_time, z=frame_index, w=spare
+        glm::vec4 gfx_params   = {0.0f, 0.0f, 0.0f, 0.0f}; // four author-defined floats
     };
+    // <= 128 on its own (a caller's extra_pc_bytes adds on top -- see the ctor's own doc --
+    // so this alone doesn't guarantee the combined size fits; a caller declaring
+    // extra_pc_bytes should static_assert sizeof(PushConstants) + extra_pc_bytes <= 128
+    // itself, e.g. toyengine's pixel_render_pipeline.h does for TransparentRefractionPushConstants).
+    static_assert(sizeof(PushConstants) <= 128,
+                 "TransparentPass::PushConstants exceeds Vulkan's guaranteed "
+                 "maxPushConstantsSize (128 bytes) -- see the layered-shaders plan's "
+                 "push-constant budget table before growing this struct.");
 
     /**
      * @brief Creates the pass's render pass and pipeline.
@@ -90,7 +110,8 @@ public:
                     const std::string& frag_spv,
                     ExtraSets extra = {},
                     uint32_t extra_pc_bytes = 0)
-        : device_(device), color_format_(color_format), extra_(std::move(extra))
+        : device_(device), color_format_(color_format), extra_(std::move(extra)),
+          extra_pc_bytes_(extra_pc_bytes)
     {
         extra_.validate("TransparentPass");
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
@@ -98,34 +119,15 @@ public:
 
         create_render_pass_();
 
-        std::vector<const coopa::gfx::pipeline::DescriptorSetLayout*> layouts = { &camera_layout, &light_layout, &shadow_layout };
-        extra_first_set_ = static_cast<uint32_t>(layouts.size());
-        layouts.insert(layouts.end(), extra_.layouts.begin(), extra_.layouts.end());
+        // Cached as a member: add_variant() below builds additional pipelines against this
+        // exact descriptor set layout list -- a derived shader's own vertex/fragment pair
+        // still reads the same camera/light/shadow/extra sets, only the shader modules
+        // (hence displacement/shading) differ.
+        layouts_ = { &camera_layout, &light_layout, &shadow_layout };
+        extra_first_set_ = static_cast<uint32_t>(layouts_.size());
+        layouts_.insert(layouts_.end(), extra_.layouts.begin(), extra_.layouts.end());
 
-        // render_pass_ is a hand-built raw VkRenderPass (LOAD_OP_LOAD on both attachments,
-        // externally-owned depth -- see this class's file doc for why pipeline::RenderPass can't
-        // express it), so the sealed Pipeline ctor's detail::RawRenderPass escape hatch is used
-        // here instead of the normal pipeline::RenderPass overload.
-        coopa::gfx::pipeline::PipelineDesc desc;
-        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
-        desc.vertex  = coopa::gfx::engine::data::Vertex::layout().append(coopa::gfx::engine::data::InstanceData::layout());
-        desc.descriptor_layouts = layouts;
-        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0,
-                                static_cast<uint32_t>(sizeof(PushConstants) + extra_pc_bytes)}};
-        desc.raster.cull  = coopa::gfx::CullMode::Back;
-        desc.raster.front = coopa::gfx::FrontFace::CounterClockwise;
-        desc.depth.test    = true;                                        // test against the opaque G-Buffer depth
-        desc.depth.write   = false;                                       // never occlude other transparents
-        desc.depth.compare = coopa::gfx::CompareOp::Less;                // a coplanar decal fails cleanly, no flicker
-        desc.blend.mode    = coopa::gfx::pipeline::BlendMode::Alpha;     // src-alpha-over (pipeline.h)
-        // detail::RawRenderPass's Pipeline ctor has no RenderPass to read samples()/
-        // color_attachment_count() from (see pipeline.h) -- this pass is always single-sampled,
-        // single-color-attachment, so BlendState's defaults (0 => derive from RenderPass) don't
-        // apply; set it explicitly.
-        desc.blend.color_attachment_count = 1;
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, coopa::gfx::detail::RawRenderPass{render_pass_}, desc);
+        pipeline_ = create_pipeline_(*vert_shader_, *frag_shader_);
     }
 
     ~TransparentPass() {
@@ -224,9 +226,42 @@ public:
         cmd.set_scissor(0, 0, width_, height_);
     }
 
-    /** @brief Binds the pipeline. Call after begin(), before push()/draws. */
+    /** @brief Binds the stock pipeline. Call after begin(), before push()/draws. */
     void bind(coopa::gfx::command::CommandBuffer& cmd) {
         cmd.bind_pipeline(*pipeline_);
+    }
+
+    /**
+     * @brief Registers a derived shader's own vertex/fragment pair as a named variant,
+     *        reusing this pass's descriptor set layouts, render pass, and blend/depth
+     *        state -- only the shader modules differ (see GBufferPipeline::add_variant()
+     *        for the general shape; this pass doesn't offer a cull override since every
+     *        BLEND material already shares CullMode::Back).
+     *
+     * @param name     The SurfaceShaderDesc's name.
+     * @param vert_spv Resolved .spv path for this shader's transparent vertex entry point.
+     * @param frag_spv Resolved .spv path for this shader's transparent fragment entry point.
+     */
+    void add_variant(const std::string& name, const std::string& vert_spv, const std::string& frag_spv) {
+        Variant v;
+        v.vert_shader = std::make_unique<coopa::gfx::pipeline::Shader>(device_, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
+        v.frag_shader = std::make_unique<coopa::gfx::pipeline::Shader>(device_, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
+        v.pipeline    = create_pipeline_(*v.vert_shader, *v.frag_shader);
+        variants_.emplace(name, std::move(v));
+    }
+
+    /** @brief True if a variant named `name` was registered via add_variant(). */
+    bool has_variant(const std::string& name) const {
+        return variants_.find(name) != variants_.end();
+    }
+
+    /**
+     * @brief Binds a named variant's pipeline, or the stock pipeline if `name` is empty or
+     *        unregistered (see PBRMaterial::shader's doc: empty means "stock").
+     */
+    void bind(coopa::gfx::command::CommandBuffer& cmd, const std::string& name) {
+        auto it = variants_.find(name);
+        cmd.bind_pipeline(it != variants_.end() ? *it->second.pipeline : *pipeline_);
     }
 
     /// Binds the caller's extra sets (e.g. GI), if any were provided at construction. Call
@@ -237,9 +272,16 @@ public:
         }
     }
 
-    /** @brief Uploads per-batch material push constants. */
+    /// Uploads per-batch material push constants. VERTEX|FRAGMENT: the fragment stage still
+    /// owns albedo/metallic/.../alpha_cutoff, but the trailing gfx_time/gfx_params surface
+    /// block must also reach the vertex stage for a derived shader's displacement hook --
+    /// same reasoning as GBufferPipeline::push(). A caller pushing trailing extra_pc_bytes
+    /// (e.g. toyengine's TransparentRefractionPushConstants) at
+    /// [sizeof(PushConstants), ...) must use the same VERTEX|FRAGMENT stage mask: Vulkan
+    /// requires a push call's stageFlags to match the declared range's stageFlags for every
+    /// byte it touches, not just the stages that actually read that particular sub-range.
     void push(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& pc) {
-        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
+        cmd.push_constants(coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, pc);
     }
 
     /** @brief Ends the render pass. */
@@ -258,6 +300,44 @@ public:
     VkRenderPass render_pass() const { return render_pass_; }
 
 private:
+    struct Variant {
+        std::unique_ptr<coopa::gfx::pipeline::Shader> vert_shader;
+        std::unique_ptr<coopa::gfx::pipeline::Shader> frag_shader;
+        std::unique_ptr<coopa::gfx::pipeline::Pipeline> pipeline;
+    };
+
+    /// Builds one Pipeline against this pass's shared render pass, descriptor layouts,
+    /// blend/depth state, and push-constant size -- the stock pipeline and every
+    /// add_variant() call route through here so the only thing that can differ between
+    /// them is the two shader modules.
+    std::unique_ptr<coopa::gfx::pipeline::Pipeline> create_pipeline_(
+        coopa::gfx::pipeline::Shader& vert, coopa::gfx::pipeline::Shader& frag) {
+        coopa::gfx::pipeline::PipelineDesc desc;
+        desc.shaders = {&vert, &frag};
+        desc.vertex  = coopa::gfx::engine::data::Vertex::layout().append(coopa::gfx::engine::data::InstanceData::layout());
+        desc.descriptor_layouts = layouts_;
+        desc.push_constants = {{coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, 0,
+                                static_cast<uint32_t>(sizeof(PushConstants) + extra_pc_bytes_)}};
+        desc.raster.cull  = coopa::gfx::CullMode::Back;
+        desc.raster.front = coopa::gfx::FrontFace::CounterClockwise;
+        desc.depth.test    = true;                                    // test against the opaque G-Buffer depth
+        desc.depth.write   = false;                                   // never occlude other transparents
+        desc.depth.compare = coopa::gfx::CompareOp::Less;              // a coplanar decal fails cleanly, no flicker
+        desc.blend.mode    = coopa::gfx::pipeline::BlendMode::Alpha;   // src-alpha-over (pipeline.h)
+        // detail::RawRenderPass's Pipeline ctor has no RenderPass to read samples()/
+        // color_attachment_count() from (see pipeline.h) -- this pass is always single-sampled,
+        // single-color-attachment, so BlendState's defaults (0 => derive from RenderPass) don't
+        // apply; set it explicitly.
+        desc.blend.color_attachment_count = 1;
+
+        // render_pass_ is a hand-built raw VkRenderPass (LOAD_OP_LOAD on both attachments,
+        // externally-owned depth -- see this class's file doc for why pipeline::RenderPass can't
+        // express it), so the sealed Pipeline ctor's detail::RawRenderPass escape hatch is used
+        // here instead of the normal pipeline::RenderPass overload.
+        return std::make_unique<coopa::gfx::pipeline::Pipeline>(
+            device_, coopa::gfx::detail::RawRenderPass{render_pass_}, desc);
+    }
+
     void create_render_pass_() {
         VkAttachmentDescription attachments[2]{};
 
@@ -357,6 +437,10 @@ private:
 
     ExtraSets extra_;
     uint32_t  extra_first_set_ = 0;
+    uint32_t  extra_pc_bytes_  = 0;
+    std::vector<const coopa::gfx::pipeline::DescriptorSetLayout*> layouts_;
+
+    std::map<std::string, Variant> variants_;
 };
 
 } // namespace passes

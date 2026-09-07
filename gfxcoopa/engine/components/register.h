@@ -170,6 +170,25 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
         material.texture_alpha_mask = mat_node.at("texture_alpha_mask").get_value<std::string>();
         material.alpha_mask_handle = assets.load_async<data::Texture>(material.texture_alpha_mask, ctx.scene_dir);
     }
+
+    // Derived surface shader (see PBRMaterial::shader's doc and the layered-shaders plan's
+    // gfx/surface/*.glsl backbones). Registered-name validation happens later, once a
+    // SurfaceShaderRegistry is available (register_render_components() itself has no
+    // renderer/pipeline context to validate against) -- see PixelRenderPipeline's ctor,
+    // which calls SurfaceShaderRegistry::require() for every parsed material before
+    // building any pipeline. shader_params is a plain 4-element list, not named keys, to
+    // avoid threading the registry's per-shader param-name table into this free function;
+    // a scene author cross-references the shader's own doc for what each slot means (see
+    // foliage_surface.glsl/water_surface.glsl's file comments).
+    if (mat_node.contains("shader")) {
+        material.shader = mat_node.at("shader").get_value<std::string>();
+    }
+    if (mat_node.contains("shader_params")) {
+        const auto& p = mat_node.at("shader_params");
+        for (size_t i = 0; i < 4 && i < p.size(); ++i) {
+            material.shader_params[static_cast<int>(i)] = p[i].get_value<float>();
+        }
+    }
 }
 
 /// Parses a `{x:, y:, z:}` node into a glm::vec3, leaving components at

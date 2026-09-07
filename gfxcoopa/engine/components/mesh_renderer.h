@@ -90,6 +90,23 @@ struct PBRMaterial {
     /// coverage value, not color data. Ignored by SdfRenderer (SDFs have no UVs to sample with).
     std::string texture_alpha_mask         = "";
 
+    /// Empty (the default) selects the stock surface shader for this material's
+    /// alpha_mode -- exactly today's behaviour. Otherwise the name of a shader registered
+    /// in a pipeline::SurfaceShaderRegistry (see gfxcoopa/pipeline/surface_shader.h and the
+    /// layered-shaders plan's gfx/surface/*.glsl backbones): a scene author writing
+    /// `shader: foliage` picks the same G-buffer/shadow/shadow-cube backbone their
+    /// alpha_mode already selects, but with foliage's displacement/shading hooks instead of
+    /// the identity default. An unregistered name is a scene-load error (see
+    /// SurfaceShaderRegistry::require()), never a silent fallback to stock.
+    std::string shader = "";
+
+    /// Four author-defined floats reaching the surface shader's gfx_params (see
+    /// gfx/surface/gbuffer_vs.glsl) -- e.g. foliage's wind strength/frequency/direction.xy,
+    /// or water's wave amplitude/speed/direction.xy. Meaningless (and unread by every
+    /// backbone) when shader is empty. Zero-initialized rather than left uninitialized so a
+    /// material that sets `shader` but forgets a param gets 0.0, not garbage.
+    glm::vec4 shader_params = {0.0f, 0.0f, 0.0f, 0.0f};
+
     // Populated by register_render_components()'s "MeshRenderer" parser once
     // the corresponding texture_* path above has been loaded via
     // coopa::asset::AssetManager. albedo_handle/normal_handle/metallic_roughness_handle are still
