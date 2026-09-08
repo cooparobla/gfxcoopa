@@ -15,11 +15,13 @@
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <coopa/scene/scene.h>
+#include <coopa/job/parallel_for.h>
 
 #include <vector>
 #include <array>
 #include <cmath>
 #include <algorithm>
+#include <cstddef>
 
 namespace coopa {
 namespace gfx {
@@ -81,6 +83,9 @@ inline HitInfo intersect_box(const glm::vec3& O, const glm::vec3& D, const Scene
 
 class GiBaker {
 public:
+    /// @brief JobType tag for GiBaker::bake_cpu's parallel_for dispatch (see coopa::job::JobType's doc).
+    static constexpr coopa::job::JobType k_gi_bake_job_type = 0x61B00000u;
+
     template<typename ProbeVolume>
     static std::vector<gi::SHProbe> bake_cpu(
         const ProbeVolume& volume,
@@ -119,60 +124,78 @@ public:
 
         const auto* dir_light = scene.find_first_component<coopa::gfx::engine::components::DirectionalLightComponent>();
 
-        for (int iz = 0; iz < Nz; ++iz) {
-            for (int iy = 0; iy < Ny; ++iy) {
-                for (int ix = 0; ix < Nx; ++ix) {
-                    int probe_idx = iz * Ny * Nx + iy * Nx + ix;
-                    glm::vec3 probe_pos = volume.probe_position(ix, iy, iz);
+        // Every probe writes only its own probes[probe_idx] slot and reads nothing but the
+        // shared-const boxes/dir_light/volume above, so probes are independent work items --
+        // flatten the iz/iy/ix nest (same probe_idx formula as before: iz*Ny*Nx + iy*Nx + ix)
+        // into a single index range a parallel_for can fan out over.
+        auto bake_probe = [&](int probe_idx) {
+            int iz = probe_idx / (Ny * Nx);
+            int rem = probe_idx % (Ny * Nx);
+            int iy = rem / Nx;
+            int ix = rem % Nx;
+            glm::vec3 probe_pos = volume.probe_position(ix, iy, iz);
 
-                    std::array<glm::vec3, 9> sh_coeffs{};
-                    for (int b = 0; b < 9; ++b) sh_coeffs[b] = glm::vec3(0.0f);
+            std::array<glm::vec3, 9> sh_coeffs{};
+            for (int b = 0; b < 9; ++b) sh_coeffs[b] = glm::vec3(0.0f);
 
-                    for (int k = 0; k < SAMPLE_COUNT; ++k) {
-                        float z = 1.0f - (2.0f * float(k) + 1.0f) / float(SAMPLE_COUNT);
-                        float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
-                        float phi = float(k) * GOLDEN_ANGLE;
+            for (int k = 0; k < SAMPLE_COUNT; ++k) {
+                float z = 1.0f - (2.0f * float(k) + 1.0f) / float(SAMPLE_COUNT);
+                float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+                float phi = float(k) * GOLDEN_ANGLE;
 
-                        glm::vec3 d(std::cos(phi) * r, std::sin(phi) * r, z);
+                glm::vec3 d(std::cos(phi) * r, std::sin(phi) * r, z);
 
-                        HitInfo best_hit{};
-                        for (const auto& box : boxes) {
-                            HitInfo hit = intersect_box(probe_pos, d, box);
-                            if (hit.hit && hit.t < best_hit.t) {
-                                best_hit = hit;
-                            }
-                        }
-
-                        glm::vec3 radiance(0.0f);
-
-                        if (best_hit.hit) {
-                            if (dir_light) {
-                                float n_dot_l = std::max(glm::dot(best_hit.normal, -dir_light->direction), 0.0f);
-                                glm::vec3 direct_light = dir_light->color * dir_light->intensity * n_dot_l;
-                                radiance = (best_hit.albedo / PI) * direct_light;
-                            } else {
-                                radiance = best_hit.albedo * 0.2f;
-                            }
-                            // An emissive surface contributes its own radiance regardless of
-                            // whether a directional light exists -- it's a light source in its
-                            // own right for baked GI purposes (unlike the real-time deferred
-                            // path, which never gathers emissive into direct lighting).
-                            radiance += best_hit.emissive;
-                        } else {
-                            if (dir_light) {
-                                float n_dot_l = std::max(glm::dot(d, -dir_light->direction), 0.0f);
-                                radiance = dir_light->color * dir_light->intensity * n_dot_l * 0.1f;
-                            }
-                        }
-
-                        sh_project_sample(sh_coeffs, d, radiance, weight);
-                    }
-
-                    for (int b = 0; b < 9; ++b) {
-                        probes[probe_idx].bands[b] = glm::vec4(sh_coeffs[b], 0.0f);
+                HitInfo best_hit{};
+                for (const auto& box : boxes) {
+                    HitInfo hit = intersect_box(probe_pos, d, box);
+                    if (hit.hit && hit.t < best_hit.t) {
+                        best_hit = hit;
                     }
                 }
+
+                glm::vec3 radiance(0.0f);
+
+                if (best_hit.hit) {
+                    if (dir_light) {
+                        float n_dot_l = std::max(glm::dot(best_hit.normal, -dir_light->direction), 0.0f);
+                        glm::vec3 direct_light = dir_light->color * dir_light->intensity * n_dot_l;
+                        radiance = (best_hit.albedo / PI) * direct_light;
+                    } else {
+                        radiance = best_hit.albedo * 0.2f;
+                    }
+                    // An emissive surface contributes its own radiance regardless of
+                    // whether a directional light exists -- it's a light source in its
+                    // own right for baked GI purposes (unlike the real-time deferred
+                    // path, which never gathers emissive into direct lighting).
+                    radiance += best_hit.emissive;
+                } else {
+                    if (dir_light) {
+                        float n_dot_l = std::max(glm::dot(d, -dir_light->direction), 0.0f);
+                        radiance = dir_light->color * dir_light->intensity * n_dot_l * 0.1f;
+                    }
+                }
+
+                sh_project_sample(sh_coeffs, d, radiance, weight);
             }
+
+            for (int b = 0; b < 9; ++b) {
+                probes[probe_idx].bands[b] = glm::vec4(sh_coeffs[b], 0.0f);
+            }
+        };
+
+        // scene.job_engine() may be nullptr (no engine installed) -- fall back to the plain
+        // serial loop, byte-identical to the parallel path since each probe is independent.
+        coopa::job::JobEngine* jobs = scene.job_engine();
+        if (jobs && total_probes > 1) {
+            jobs->parallel_for_blocking(static_cast<std::size_t>(total_probes), 0 /* auto grain */,
+                [&](std::size_t begin, std::size_t end) {
+                    for (std::size_t p = begin; p < end; ++p) {
+                        bake_probe(static_cast<int>(p));
+                    }
+                },
+                k_gi_bake_job_type);
+        } else {
+            for (int p = 0; p < total_probes; ++p) bake_probe(p);
         }
 
         return probes;

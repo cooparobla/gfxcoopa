@@ -235,14 +235,14 @@ inline void register_render_components(core::Device& device,
                 mr->affects_reflection_probes = node.at("affects_reflection_probes").get_value<bool>();
 
             if (!mesh_path_key.empty()) {
+                // Async: the fkYAML mesh parse (data::Mesh::from_node) is pure CPU decode with
+                // no GPU calls, so it runs on a JobEngine worker like the texture loads just
+                // below already do -- meshes in a scene decode concurrently instead of
+                // serializing at parse time. is_failed() can't be checked here since the
+                // decode hasn't necessarily run yet; the caller must poll AssetManager::update()
+                // (e.g. via a startup drain loop) and check mr->mesh_handle() then.
                 std::string mesh_virtual_path = "meshes/" + mesh_path_key + ".yaml";
-                auto mesh_handle = assets.load<data::Mesh>(mesh_virtual_path, ctx.scene_dir);
-                if (mesh_handle.is_failed()) {
-                    std::cerr << "[register_render_components] Failed to load mesh '"
-                              << mesh_virtual_path << "' (scene_dir=" << ctx.scene_dir
-                              << "): " << mesh_handle.error() << std::endl;
-                }
-                mr->set_mesh(std::move(mesh_handle));
+                mr->set_mesh(assets.load_async<data::Mesh>(mesh_virtual_path, ctx.scene_dir));
             }
 
             if (node.contains("material")) {
