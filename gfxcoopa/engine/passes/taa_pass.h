@@ -38,6 +38,11 @@ public:
         float weight_scale;
     };
 
+    /**
+     * @param history_format Pixel format of the internal history buffer -- see history_format_'s
+     *   own doc for why this must match whatever color-space convention the caller's scene-color
+     *   target already uses. Defaults to VK_FORMAT_R8G8B8A8_SRGB, blendy's own choice.
+     */
     TaaPass(coopa::gfx::core::Device& device,
             coopa::gfx::memory::Allocator& allocator,
             coopa::gfx::pipeline::RenderPass& render_pass,
@@ -45,14 +50,16 @@ public:
             uint32_t width,
             uint32_t height,
             const std::string& vert_path,
-            const std::string& frag_path)
-        : device_(device), allocator_(allocator), sampler_(sampler), width_(width), height_(height)
+            const std::string& frag_path,
+            VkFormat history_format = VK_FORMAT_R8G8B8A8_SRGB)
+        : device_(device), allocator_(allocator), sampler_(sampler), width_(width), height_(height),
+          history_format_(history_format)
     {
         // History image with TRANSFER_DST so we can copy into it
         VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         history_image_ = std::make_unique<coopa::gfx::memory::Image>(
             device, allocator, width, height,
-            VK_FORMAT_R8G8B8A8_SRGB, usage,
+            history_format_, usage,
             VK_IMAGE_ASPECT_COLOR_BIT, VMA_MEMORY_USAGE_AUTO
         );
         history_initialized_ = false;
@@ -93,7 +100,7 @@ public:
         VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         history_image_ = std::make_unique<coopa::gfx::memory::Image>(
             device_, allocator_, width, height,
-            VK_FORMAT_R8G8B8A8_SRGB, usage,
+            history_format_, usage,
             VK_IMAGE_ASPECT_COLOR_BIT, VMA_MEMORY_USAGE_AUTO
         );
         history_initialized_ = false;
@@ -226,6 +233,15 @@ private:
     util::Sampler& sampler_;
     uint32_t width_;
     uint32_t height_;
+    /**
+     * Format of history_image_, fixed at construction (recreate() reuses it). Defaults to
+     * VK_FORMAT_R8G8B8A8_SRGB to match blendy's post_process_target_ (RGBA8_Srgb) exactly --
+     * a caller whose scene color is already sRGB-*encoded* in a UNORM target (e.g. toyengine's
+     * post_target_, RGBA8_Unorm) should pass VK_FORMAT_R8G8B8A8_UNORM instead, or every sampled
+     * history read would get an extra sRGB decode the current frame doesn't, drifting the
+     * temporal blend dark.
+     */
+    VkFormat history_format_ = VK_FORMAT_R8G8B8A8_SRGB;
     bool history_initialized_ = false;
     
     float blend_factor_ = 0.9f;

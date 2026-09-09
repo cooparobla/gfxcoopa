@@ -20,9 +20,13 @@
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/engine/util/sampler.h>
 
-// Include official Jimenez SMAA texture headers
-#include "/home/coopa/third-party/smaa/Textures/SearchTex.h"
-#include "/home/coopa/third-party/smaa/Textures/AreaTex.h"
+// Include official Jimenez SMAA texture headers. Resolved via the SMAA_TEXTURES_DIR include
+// path gfxcoopa's CMakeLists.txt adds to gfxcoopa_lib (defaulting to
+// /home/coopa/third-party/smaa/Textures) rather than an absolute path baked in here, so this
+// header stays portable to a machine with the SMAA reference implementation checked out
+// elsewhere -- see that cache variable's own CMakeLists.txt comment.
+#include <SearchTex.h>
+#include <AreaTex.h>
 
 namespace coopa {
 namespace gfx {

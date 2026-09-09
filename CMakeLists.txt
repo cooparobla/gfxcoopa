@@ -68,10 +68,19 @@ target_link_libraries(gfxcoopa_impl PUBLIC glfw Vulkan::Headers)
 add_library(gfxcoopa_lib INTERFACE)
 add_library(coopa::gfx ALIAS gfxcoopa_lib)
 target_compile_features(gfxcoopa_lib INTERFACE cxx_std_20)
+
+# Location of the official Jimenez SMAA reference implementation's Textures/ directory
+# (SearchTex.h / AreaTex.h), consumed by gfxcoopa/engine/util/smaa_textures.h. Overridable
+# with -DSMAA_TEXTURES_DIR=... on a machine where the SMAA repo lives somewhere else; not
+# vendored into gfxcoopa because AreaTex.h alone is a 1.1 MB generated C array.
+set(SMAA_TEXTURES_DIR "/home/coopa/third-party/smaa/Textures" CACHE PATH
+    "Directory containing the SMAA reference implementation's SearchTex.h/AreaTex.h")
+
 target_include_directories(gfxcoopa_lib INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}                    # gfxcoopa/...
     ${CMAKE_CURRENT_SOURCE_DIR}/includes           # volk/, vma/, stb/
-    ${CMAKE_CURRENT_BINARY_DIR}/configuration)
+    ${CMAKE_CURRENT_BINARY_DIR}/configuration
+    ${SMAA_TEXTURES_DIR})
 target_link_libraries(gfxcoopa_lib INTERFACE gfxcoopa_impl coopa::lib ${CMAKE_DL_LIBS})
 
 # --- coopa::gfx_pure: types/ only, with NO Vulkan/GLFW include path
