@@ -100,6 +100,12 @@ public:
      *                      each region independently (this pass's own push() call handles
      *                      [0, sizeof(PushConstants)); the caller issues its own
      *                      cmd.push_constants() at [sizeof(PushConstants), ...) for the rest).
+     * @param material_layout Optional material set (see engine::util::MaterialTextureCache),
+     *                      appended as the LAST set -- after camera/light/shadow AND extra --
+     *                      so passing one never shifts extra's own set indices. Null (the
+     *                      default) omits the set entirely, same "declared iff bound" contract
+     *                      GBufferPipeline's material_layout already follows. See
+     *                      bind_material()/gfx/surface/transparent_fs.glsl's set 7.
      */
     TransparentPass(coopa::gfx::core::Device& device,
                     VkFormat color_format,
@@ -109,7 +115,8 @@ public:
                     const std::string& vert_spv,
                     const std::string& frag_spv,
                     ExtraSets extra = {},
-                    uint32_t extra_pc_bytes = 0)
+                    uint32_t extra_pc_bytes = 0,
+                    const coopa::gfx::pipeline::DescriptorSetLayout* material_layout = nullptr)
         : device_(device), color_format_(color_format), extra_(std::move(extra)),
           extra_pc_bytes_(extra_pc_bytes)
     {
@@ -121,11 +128,20 @@ public:
 
         // Cached as a member: add_variant() below builds additional pipelines against this
         // exact descriptor set layout list -- a derived shader's own vertex/fragment pair
-        // still reads the same camera/light/shadow/extra sets, only the shader modules
-        // (hence displacement/shading) differ.
+        // still reads the same camera/light/shadow/extra/material sets, only the shader
+        // modules (hence displacement/shading) differ.
         layouts_ = { &camera_layout, &light_layout, &shadow_layout };
         extra_first_set_ = static_cast<uint32_t>(layouts_.size());
         layouts_.insert(layouts_.end(), extra_.layouts.begin(), extra_.layouts.end());
+
+        // Deliberately AFTER extra: going from 7 bound sets (0-6, today's max) to 8 here is not
+        // a new class of failure -- Vulkan's guaranteed maxBoundDescriptorSets minimum is only
+        // 4, so a device that couldn't do 8 already couldn't run this pass's existing 7-set
+        // layout.
+        material_set_index_ = static_cast<uint32_t>(layouts_.size());
+        if (material_layout != nullptr) {
+            layouts_.push_back(material_layout);
+        }
 
         pipeline_ = create_pipeline_(*vert_shader_, *frag_shader_);
     }
@@ -270,6 +286,14 @@ public:
         if (extra_.bind) {
             extra_.bind(cmd, extra_first_set_);
         }
+    }
+
+    /// Binds `set` at the material set index (see ctor's material_layout doc) -- call after
+    /// bind()/bind_extra(), before draws. Only meaningful when a non-null material_layout was
+    /// passed to the ctor; calling this otherwise binds a set the pipeline layout never
+    /// declared, which the validation layer will flag.
+    void bind_material(coopa::gfx::command::CommandBuffer& cmd, const coopa::gfx::pipeline::DescriptorSet& set) {
+        cmd.bind_descriptor_set(set, material_set_index_);
     }
 
     /// Uploads per-batch material push constants. VERTEX|FRAGMENT: the fragment stage still
@@ -436,8 +460,9 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> pipeline_;
 
     ExtraSets extra_;
-    uint32_t  extra_first_set_ = 0;
-    uint32_t  extra_pc_bytes_  = 0;
+    uint32_t  extra_first_set_    = 0;
+    uint32_t  extra_pc_bytes_     = 0;
+    uint32_t  material_set_index_ = 0;
     std::vector<const coopa::gfx::pipeline::DescriptorSetLayout*> layouts_;
 
     std::map<std::string, Variant> variants_;

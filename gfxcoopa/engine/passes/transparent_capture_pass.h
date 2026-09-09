@@ -31,6 +31,7 @@
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/pipeline/shader.h>
+#include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/engine/data/model_ubo.h>
@@ -93,6 +94,11 @@ public:
      *                      ambient_intensity/sky_intensity), folded into ONE fragment-stage
      *                      VkPushConstantRange -- same reasoning as TransparentPass's own
      *                      extra_pc_bytes ctor param.
+     * @param material_layout Optional material set (see engine::util::MaterialTextureCache),
+     *                      appended as set 3 -- after camera/light/shadow. VK_NULL_HANDLE (the
+     *                      default) omits the set entirely, same "declared iff bound" contract
+     *                      GBufferPipeline's material_layout already follows. See
+     *                      bind_material()/gfx/surface/capture_fs.glsl's set 3.
      */
     TransparentCapturePass(coopa::gfx::core::Device& device,
                            VkRenderPass render_pass,
@@ -101,10 +107,15 @@ public:
                            VkDescriptorSetLayout shadow_layout,
                            const std::string& vert_spv,
                            const std::string& frag_spv,
-                           uint32_t extra_pc_bytes = 0)
+                           uint32_t extra_pc_bytes = 0,
+                           VkDescriptorSetLayout material_layout = VK_NULL_HANDLE)
         : device_(device), render_pass_(render_pass), extra_pc_bytes_(extra_pc_bytes)
     {
         std::vector<VkDescriptorSetLayout> layouts = { camera_layout, light_layout, shadow_layout };
+        material_set_index_ = static_cast<uint32_t>(layouts.size());
+        if (material_layout != VK_NULL_HANDLE) {
+            layouts.push_back(material_layout);
+        }
 
         // VERTEX|FRAGMENT: the fragment stage still owns albedo/metallic/.../alpha_cutoff,
         // but the trailing gfx_time/gfx_params surface block (see PushConstants' doc) must
@@ -201,6 +212,13 @@ public:
     void push(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& pc) const {
         cmd.push_constants(pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants), &pc);
+    }
+
+    /// Binds `set` at the material set index (see ctor's material_layout doc). Call after
+    /// bind(), before draws. Only meaningful when a non-null material_layout was passed to
+    /// the ctor.
+    void bind_material(coopa::gfx::command::CommandBuffer& cmd, const coopa::gfx::pipeline::DescriptorSet& set) const {
+        cmd.bind_descriptor_set(pipeline_layout_, set, material_set_index_);
     }
 
     VkPipelineLayout layout() const {
@@ -315,7 +333,8 @@ private:
     VkRenderPass render_pass_;
     std::vector<VkVertexInputBindingDescription>   binding_vec_;
     std::vector<VkVertexInputAttributeDescription> attr_vec_;
-    uint32_t extra_pc_bytes_ = 0;
+    uint32_t extra_pc_bytes_     = 0;
+    uint32_t material_set_index_ = 0;
 
     std::unique_ptr<coopa::gfx::pipeline::Shader> vert_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Shader> frag_shader_;

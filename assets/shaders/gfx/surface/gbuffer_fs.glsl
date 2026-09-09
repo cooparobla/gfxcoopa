@@ -30,12 +30,16 @@ layout(push_constant) uniform PushConstants {
 vec4 gfx_time   = material.gfx_time;
 vec4 gfx_params = material.gfx_params;
 
-// Set 1: material texture(s) -- currently just the CUTOUT alpha mask. A consumer that passes
-// GBufferPipeline a non-null material_layout must bind a combined sampler here (a 1x1 white
-// fallback for every non-masked material -- see toyengine's MaterialTextureCache -- so
-// texture(...).a == 1.0 and the test below collapses back to the plain constant-alpha MASK test
-// it replaces). A consumer that never passes a material_layout never reaches set 1 at all.
+// Set 1: material textures. A consumer that passes GBufferPipeline a non-null material_layout
+// must bind all four combined samplers here (see engine::util::MaterialTextureCache, which
+// binds a neutral fallback -- white for alpha_mask/albedo/metallic_roughness, flat-up for
+// normal -- for every slot a material doesn't use, so an untextured material's math below
+// collapses back to exactly today's constant-only behaviour). A consumer that never passes a
+// material_layout never reaches set 1 at all.
 layout(set = 1, binding = 0) uniform sampler2D u_alpha_mask;
+layout(set = 1, binding = 1) uniform sampler2D u_albedo_map;
+layout(set = 1, binding = 2) uniform sampler2D u_normal_map;
+layout(set = 1, binding = 3) uniform sampler2D u_metallic_roughness_map;
 
 // G-Buffer Render Targets
 layout(location = 0) out vec4 out_albedo_ao;          // RGB = Albedo, A = AO
@@ -57,6 +61,9 @@ struct GfxSurface {
     vec3  normal_ws;
     vec3  position_ws;
     vec2  uv;
+    mat3  tbn; // world-space tangent/bitangent/normal frame -- see frag_TBN. Seeded before the
+               // hook runs, so a hook that wants to perturb normal_ws in tangent space (e.g. its
+               // own secondary detail map) can do so without recomputing the frame itself.
 };
 
 #ifdef GFX_SURFACE_FRAGMENT
@@ -66,19 +73,34 @@ void gfx_surface_fragment(inout GfxSurface s) {}
 #endif
 
 void main() {
+    vec4 albedo_tex = texture(u_albedo_map, frag_uv);
+
     // CUTOUT/MASK materials: alpha_cutoff > 0 arms the test. albedo.a (the constant per-material
-    // alpha) multiplied by the sampled mask's alpha gives a real per-texel silhouette test when a
-    // texture_alpha_mask is authored, and collapses to the old constant-only test otherwise.
-    float alpha = material.albedo.a * texture(u_alpha_mask, frag_uv).a;
+    // alpha) multiplied by the sampled mask's alpha and the albedo map's own alpha (glTF
+    // convention: a base color texture's alpha channel participates in the alpha test same as
+    // a dedicated mask) gives a real per-texel silhouette test when either is authored, and
+    // collapses to the old constant-only test when neither is (both fallbacks are opaque white).
+    float alpha = material.albedo.a * texture(u_alpha_mask, frag_uv).a * albedo_tex.a;
     if (material.alpha_cutoff > 0.0 && alpha < material.alpha_cutoff) discard;
 
+    // glTF packing: metallic in B, roughness in G (R and A unused/reserved). Fallback is opaque
+    // white, so mr == vec2(1.0, 1.0) when no metallic_roughness map is authored.
+    vec2 mr = texture(u_metallic_roughness_map, frag_uv).bg;
+
     GfxSurface s;
-    s.albedo      = material.albedo.rgb;
-    s.metallic    = material.metallic;
-    s.roughness   = max(material.roughness, 0.045);
+    s.albedo      = material.albedo.rgb * albedo_tex.rgb;
+    s.metallic    = material.metallic  * mr.x;
+    s.roughness   = max(material.roughness * mr.y, 0.045);
     s.ao          = material.ao;
     s.emissive    = material.emissive.rgb;
-    s.normal_ws   = normalize(frag_world_normal);
+    // Normal map is decoded from [0,1] to [-1,1] and rotated into world space by the
+    // interpolated TBN; frag_TBN's third column IS frag_world_normal (see gbuffer_vs.glsl), so
+    // an exact (0,0,1) tangent-space normal would round-trip to frag_world_normal exactly. The
+    // fallback texel (128,128,255) is one integer off that exact midpoint (127.5), so an
+    // untextured material's normal_ws is off by ~0.32 degrees rather than bit-identical -- see
+    // engine::util::MaterialTextureCache's doc, which makes the same call for the same reason.
+    s.tbn         = frag_TBN;
+    s.normal_ws   = normalize(s.tbn * (texture(u_normal_map, frag_uv).xyz * 2.0 - 1.0));
     s.position_ws = frag_world_pos;
     s.uv          = frag_uv;
 

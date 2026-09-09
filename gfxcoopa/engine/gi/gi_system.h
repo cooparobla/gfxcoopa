@@ -15,6 +15,7 @@
 #include <gfxcoopa/engine/targets/cubemap_target.h>
 #include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/engine/util/instance_batcher.h>
+#include <gfxcoopa/engine/util/material_texture_cache.h>
 #include <gfxcoopa/engine/data/camera_ubo.h>
 #include <gfxcoopa/engine/data/light_data.h>
 #include <gfxcoopa/pipeline/descriptor.h>
@@ -45,6 +46,7 @@ using targets::CubemapTarget;
 using util::Sampler;
 using passes::EnvPrefilterPass;
 using passes::ProbeCapturePass;
+using util::MaterialTextureCache;
 using components::MeshRenderer;
 using components::gather_renderables;
 using components::DirectionalLightComponent;
@@ -126,6 +128,12 @@ public:
         for (auto& s : cap_source_sets_) {
             s = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *cap_pool_, *cap_source_layout_);
         }
+
+        // 2c. Material texture cache (albedo/normal/metallic-roughness/alpha-mask), shared
+        //     with PixelRenderPipeline's G-buffer/shadow/transparent passes in spirit but a
+        //     private instance here -- this bake runs once, early, self-contained like every
+        //     other cap_*_ resource above, not per-frame.
+        material_cache_ = std::make_unique<MaterialTextureCache>(device, allocator, cmd_pool);
 
         // 3. Initialize cubemap slot 0 (the default/no-probe-yet target) and
         //    the capture pipelines built against its render passes. Every
@@ -377,7 +385,7 @@ private:
         probe_capture_ = std::make_unique<ProbeCapturePass>(
             device_, cubemap_targets_[0]->render_pass(),
             *cap_camera_layout_, *cap_light_layout_, *cap_brdf_layout_,
-            shaders_
+            shaders_, &material_cache_->layout_object()
         );
     }
 
@@ -397,10 +405,20 @@ private:
      * forward path and its PushConstants don't carry the deferred-only `emissive` field
      * (see PBRMaterial::gpu_emissive()'s doc), so two materials differing only in
      * emissive still produce byte-identical push constants here.
+     *
+     * Also compares the four texture handles (raw Texture* identity, matching
+     * MaterialTextureCache::set_for()'s own key) -- two materials with identical scalar
+     * factors but different albedo/normal/metallic_roughness/alpha_mask textures must NOT
+     * merge into one batch, or the merged batch would render every instance with only the
+     * first item's textures.
      */
     static bool same_capture_material_(const components::PBRMaterial& a, const components::PBRMaterial& b) {
         return a.albedo == b.albedo && a.metallic == b.metallic
-            && a.roughness == b.roughness && a.ao == b.ao;
+            && a.roughness == b.roughness && a.ao == b.ao
+            && a.albedo_handle.get() == b.albedo_handle.get()
+            && a.normal_handle.get() == b.normal_handle.get()
+            && a.metallic_roughness_handle.get() == b.metallic_roughness_handle.get()
+            && a.alpha_mask_handle.get() == b.alpha_mask_handle.get();
     }
 
     void capture_reflection_probe_(coopa::scene::Scene& scene, size_t index, const glm::vec3& probe_pos) {
@@ -510,6 +528,7 @@ private:
                     pc.ao           = mat.ao;
                     pc.alpha_cutoff = 0.0f;
                     probe_capture_->push(cmd, pc);
+                    probe_capture_->bind_material(cmd, material_cache_->set_for(mat));
                     b.mesh->bind(cmd);
                     b.mesh->draw(cmd, b.instance_count, b.first_instance);
                 }
@@ -596,6 +615,7 @@ private:
     // MAX_REFLECTION_PROBES in the constructor.
     std::vector<std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> cap_source_sets_;
     std::unique_ptr<ProbeCapturePass>                          probe_capture_;
+    std::unique_ptr<MaterialTextureCache>                      material_cache_;
 
     bool gi_active_ = false;
     float active_gi_intensity_ = 1.0f;

@@ -237,6 +237,22 @@ enum class AttachmentUse {
                         ///< depth buffer read as both attachment and texture).
 };
 
+/**
+ * @enum ColorSpace
+ * @brief How a decoded texture's pixel data should be interpreted: gamma-encoded color data
+ * (Srgb) vs. data read as-is (Linear).
+ *
+ * Drives which Format a texture loader uploads as (e.g. RGBA8_Srgb vs. RGBA8_Unorm) so the
+ * GPU's fixed-function sampler decodes sRGB->linear before filtering, rather than a shader
+ * approximating it after filtering with pow(). Albedo/base-color maps are Srgb; normal maps,
+ * metallic/roughness maps, and masks are Linear -- see
+ * gfx::loaders::TextureLoader::declare_color_space().
+ */
+enum class ColorSpace : uint8_t {
+    Linear,
+    Srgb,
+};
+
 /// @brief Descriptor resource kind. Survives internally for descriptor pool
 /// sizing; callers building layouts use DescriptorLayoutBuilder's named
 /// methods instead of naming this directly.

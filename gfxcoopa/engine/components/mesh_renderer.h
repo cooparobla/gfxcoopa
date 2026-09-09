@@ -107,13 +107,13 @@ struct PBRMaterial {
     /// material that sets `shader` but forgets a param gets 0.0, not garbage.
     glm::vec4 shader_params = {0.0f, 0.0f, 0.0f, 0.0f};
 
-    // Populated by register_render_components()'s "MeshRenderer" parser once
-    // the corresponding texture_* path above has been loaded via
-    // coopa::asset::AssetManager. albedo_handle/normal_handle/metallic_roughness_handle are still
-    // not consumed by any pipeline descriptor set -- binding those into the G-buffer pass remains
-    // a separate, not-yet-implemented follow-up. alpha_mask_handle IS consumed: toyengine's
-    // MaterialTextureCache binds it (or a 1x1 white fallback) into the G-buffer and shadow
-    // passes' material descriptor set (see has_alpha_mask()).
+    // Populated by register_render_components()'s "MeshRenderer" parser once the corresponding
+    // texture_* path above has been loaded via coopa::asset::AssetManager. All four handles are
+    // consumed: engine::util::MaterialTextureCache binds each (or a neutral 1x1 fallback --
+    // white for alpha_mask/albedo/metallic_roughness, flat-up for normal) into the material
+    // descriptor set every textured pass (G-buffer, shadow, forward transparent, transparent
+    // capture, probe capture) binds -- see has_albedo_map()/has_normal_map()/
+    // has_metallic_roughness_map()/has_alpha_mask().
     coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> albedo_handle;
     coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> normal_handle;
     coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> metallic_roughness_handle;
@@ -133,6 +133,20 @@ struct PBRMaterial {
      * back to today's constant-alpha behaviour.
      */
     bool has_alpha_mask() const { return alpha_mode == AlphaMode::Mask && alpha_mask_handle.is_loaded(); }
+
+    /**
+     * @brief Returns true when this material has a loaded albedo (base color) map to sample.
+     *
+     * Unlike has_alpha_mask(), this does NOT gate on alpha_mode -- an albedo map modulates
+     * the base color for Opaque/Mask/Blend materials alike, not just Mask ones.
+     */
+    bool has_albedo_map() const { return albedo_handle.is_loaded(); }
+
+    /** @brief Returns true when this material has a loaded tangent-space normal map to sample. */
+    bool has_normal_map() const { return normal_handle.is_loaded(); }
+
+    /** @brief Returns true when this material has a loaded metallic/roughness map to sample. */
+    bool has_metallic_roughness_map() const { return metallic_roughness_handle.is_loaded(); }
 
     /**
      * @brief Returns the alpha cutoff as the GPU shader sees it.

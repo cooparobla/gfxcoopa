@@ -23,7 +23,7 @@
 layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_world_normal;
 layout(location = 2) in vec2 frag_uv;
-layout(location = 3) in mat3 frag_TBN;   // matches pbr.vert's outputs; unused here
+layout(location = 3) in mat3 frag_TBN;   // matches pbr.vert's outputs; rotates u_normal_map into world space
 
 // Set 0: Camera UBO (probe's per-face view/proj/position)
 layout(set = 0, binding = 0) uniform CameraUBO {
@@ -55,6 +55,13 @@ layout(set = 1, binding = 0) uniform LightUBO {
 // Set 2: BRDF LUT (reused from GiSystem's already-built BRDFLUT)
 layout(set = 2, binding = 0) uniform sampler2D u_brdf_lut;
 
+// Set 3: material textures -- see engine::util::MaterialTextureCache. Binding 0 (alpha mask)
+// intentionally left undeclared: probe capture, like the main G-buffer's Blend materials,
+// performs no alpha test (this shader has none today, and adding one is out of scope here).
+layout(set = 3, binding = 1) uniform sampler2D u_albedo_map;
+layout(set = 3, binding = 2) uniform sampler2D u_normal_map;
+layout(set = 3, binding = 3) uniform sampler2D u_metallic_roughness_map;
+
 // Push constants: identical 32-byte layout to GBufferPipeline/TransparentPass.
 // model/normal_matrix moved to the per-instance vertex stream (see pbr.vert).
 layout(push_constant) uniform PushConstants {
@@ -68,12 +75,21 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec4 out_color;
 
 void main() {
-    vec3  albedo    = material.albedo.rgb;
-    float metallic  = material.metallic;
-    float roughness = material.roughness;
+    vec4 albedo_tex = texture(u_albedo_map, frag_uv);
+    // glTF packing: metallic in B, roughness in G. Fallback is opaque white, so mr ==
+    // vec2(1.0, 1.0) and the two lines below collapse to today's untextured values.
+    vec2 mr = texture(u_metallic_roughness_map, frag_uv).bg;
+
+    vec3  albedo    = material.albedo.rgb * albedo_tex.rgb;
+    float metallic  = material.metallic  * mr.x;
+    float roughness = material.roughness * mr.y;
     float ao        = material.ao;
 
-    vec3 N = normalize(frag_world_normal);
+    // Tangent-space normal map rotated into world space -- see gbuffer_fs.glsl's identical
+    // derivation and its doc on why the flat-normal fallback round-trips to frag_world_normal
+    // (up to ~0.32 degrees, not bit-identical). frag_TBN was previously unused here (see this
+    // file's own comment on line 26, now stale).
+    vec3 N = normalize(frag_TBN * (texture(u_normal_map, frag_uv).xyz * 2.0 - 1.0));
     vec3 V = normalize(camera.camera_pos - frag_world_pos); // camera_pos == probe position
 
     vec3 F0 = mix(vec3(0.04), albedo, metallic);

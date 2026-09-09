@@ -12,6 +12,11 @@
  * is defined once, in gfxcoopa's own CMakeLists.txt) — moved down from
  * uicoopa, which had the only image decoder in the whole workspace despite
  * gfxcoopa being where texture-mapped materials actually need one.
+ *
+ * Color space: every upload now goes through declare_color_space() (see below) rather than
+ * guessing. This closes the gap the class used to document here — an albedo map decoded and
+ * uploaded as if it were linear data rendered visibly washed out, since sRGB gamma-encoded
+ * bytes were being interpreted as linear intensities.
  */
 
 #ifndef GFXCOOPA_ENGINE_LOADERS_TEXTURE_LOADER_H
@@ -19,17 +24,22 @@
 
 #include <coopa/asset/asset_loader.h>
 #include <coopa/asset/asset_source.h>
+#include <coopa/asset/asset_id.h>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/engine/data/texture.h>
+#include <gfxcoopa/types/enums.h>
+#include <gfxcoopa/types/format.h>
+#include <gfxcoopa/types/sampler_desc.h>
 
 #include <stb/stb_image.h>
 
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <cstdint>
 
@@ -52,22 +62,85 @@ struct DecodedImage {
  * @class TextureLoader
  * @brief Registers as the coopa::asset loader for gfx::data::Texture.
  *
- * Always decodes to RGBA8 and uploads as VK_FORMAT_R8G8B8A8_UNORM. sRGB
- * vs. linear interpretation (needed once material textures are actually
- * bound into the G-buffer pipeline's descriptor sets — a separate, not-yet-
- * implemented change, see gfxcoopa's asset-system integration plan) is left
- * for that follow-up rather than guessed at here.
+ * Always decodes to RGBA8. The upload *format* (RGBA8_Srgb vs. RGBA8_Unorm) is chosen per
+ * asset by declare_color_space() — call it with a path's ColorSpace before the matching
+ * load()/load_async() call for that path; finalize_typed() looks up what was declared (default
+ * ColorSpace::Linear when nothing was) and uploads accordingly. A caller that never declares
+ * anything gets today's behavior: every texture linear.
+ *
+ * Both declare_color_space() and finalize_typed() run on the main thread — the former from
+ * scene/material parsing, the latter from AssetManager::update() (or a synchronous load()'s
+ * caller) — so the color-space map needs no locking despite decode_typed() itself running off
+ * thread via load_async().
  *
  * @code
  * assets.register_loader<gfx::data::Texture>(
  *     std::make_unique<TextureLoader>(device, allocator, cmd_pool));
- * auto tex = assets.load<gfx::data::Texture>("textures/brick.png");
+ *
+ * // declare_color_space() takes the RESOLVED path (see its own doc) -- reach the registered
+ * // loader back through the AssetManager rather than holding onto a separate reference, so
+ * // this works whether the caller declared the loader inline (as above) or received it from
+ * // elsewhere.
+ * auto* loader = dynamic_cast<TextureLoader*>(assets.loader<gfx::data::Texture>());
+ * std::string resolved = assets.source().resolve("textures/brick_albedo.png");
+ * loader->declare_color_space(resolved, ColorSpace::Srgb);
+ *
+ * auto tex = assets.load<gfx::data::Texture>("textures/brick_albedo.png");
  * @endcode
  */
 class TextureLoader : public coopa::asset::TypedAssetLoader<data::Texture, DecodedImage> {
 public:
-    TextureLoader(core::Device& device, memory::Allocator& allocator, command::CommandPool& cmd_pool)
-        : device_(device), allocator_(allocator), cmd_pool_(cmd_pool) {}
+    /**
+     * @param device        Logical device.
+     * @param allocator     VMA allocator.
+     * @param cmd_pool      Command pool for the one-shot upload command buffer.
+     * @param sampler_desc  Sampler every texture this loader uploads is given. Defaults to
+     *   bilinear + repeat (every prior caller's behavior); pass SamplerDesc::pixel_art() for a
+     *   pixel-art engine, where bilinear filtering blurs texel edges (see toyengine's
+     *   registration of this loader in core/engine.h).
+     */
+    TextureLoader(core::Device& device, memory::Allocator& allocator, command::CommandPool& cmd_pool,
+                 SamplerDesc sampler_desc = SamplerDesc::linear_repeat())
+        : device_(device), allocator_(allocator), cmd_pool_(cmd_pool), sampler_desc_(sampler_desc) {}
+
+    /**
+     * @brief Declares the color space `virtual_path` should be uploaded as, ahead of loading it.
+     *
+     * Must be called before the matching load()/load_async() call for this path — finalize_typed()
+     * consults this map once, when the texture is first uploaded, and the declaration is not
+     * retroactive. Calling this again for a path whose texture has already been uploaded (or with
+     * a conflicting ColorSpace before the first upload) logs a warning and keeps the
+     * first-declared value, rather than silently reuploading or picking one arbitrarily.
+     *
+     * @param resolved_path The SAME path AssetManager::load()/load_async() will resolve this
+     *   asset to (i.e. AssetSource::resolve()'s return value, not the raw virtual path a caller
+     *   passes to load_async() directly) -- AssetManager builds its own AssetId from the
+     *   resolved path (see asset_manager.h's load_async()), and this must agree with that or the
+     *   declaration is never found. A caller working from a virtual_path/base_dir pair, like
+     *   register.h's material parser, should call assets.source().resolve(virtual_path, base_dir)
+     *   first and pass the result here.
+     * @param color_space  ColorSpace::Srgb for albedo/base-color maps; ColorSpace::Linear
+     *   (the default when nothing is declared) for normal maps, metallic/roughness maps, and masks.
+     */
+    void declare_color_space(const std::string& resolved_path, ColorSpace color_space) {
+        auto id = coopa::asset::AssetId::from_path(resolved_path);
+        auto it = color_spaces_.find(id);
+        if (it != color_spaces_.end()) {
+            if (it->second != color_space) {
+                // Two materials disagree about what this one path means (e.g. reused as both
+                // an albedo map and a mask) -- keep whichever was declared first rather than
+                // guessing, and surface it loudly since a silent pick would be a hard-to-spot
+                // rendering bug (washed-out or over-dark texture).
+                fprintf(stderr,
+                       "[TextureLoader] declare_color_space('%s') conflicts with an earlier "
+                       "declaration -- keeping the first one. Use texture_color_space: to "
+                       "resolve this explicitly if the same file is meant as both.\n",
+                       resolved_path.c_str());
+            }
+            return;
+        }
+        color_spaces_.emplace(id, color_space);
+    }
 
     std::shared_ptr<DecodedImage> decode_typed(const coopa::asset::AssetId& id,
                                                const coopa::asset::LoadContext& ctx) override {
@@ -87,12 +160,15 @@ public:
     }
 
     std::shared_ptr<data::Texture> finalize_typed(std::shared_ptr<DecodedImage> decoded,
-                                                  const coopa::asset::AssetId&,
+                                                  const coopa::asset::AssetId& id,
                                                   const coopa::asset::LoadContext&) override {
+        auto it = color_spaces_.find(id);
+        ColorSpace cs = (it != color_spaces_.end()) ? it->second : ColorSpace::Linear;
+        Format format = format_from_channels(4, cs == ColorSpace::Srgb);
         return std::make_shared<data::Texture>(
             data::Texture::upload(device_, allocator_, cmd_pool_,
                                   decoded->pixels.data(), decoded->width, decoded->height,
-                                  /*srgb=*/false));
+                                  format, sampler_desc_));
     }
 
     const char* type_name() const override { return "Texture"; }
@@ -101,6 +177,8 @@ private:
     core::Device&         device_;
     memory::Allocator&     allocator_;
     command::CommandPool&  cmd_pool_;
+    SamplerDesc            sampler_desc_;
+    std::unordered_map<coopa::asset::AssetId, ColorSpace> color_spaces_;
 };
 
 } // namespace loaders

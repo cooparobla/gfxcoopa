@@ -65,12 +65,25 @@ public:
         int32_t face;
     };
 
+    /**
+     * @param device        Logical device.
+     * @param face_pass     Depth-inclusive render pass (targets::CubemapTarget::render_pass()).
+     * @param camera_layout Set 0.
+     * @param light_layout  Set 1.
+     * @param brdf_layout   Set 2 (BRDF LUT).
+     * @param shaders       Resolves this pass's own .spv paths.
+     * @param material_layout Optional material set (see engine::util::MaterialTextureCache),
+     *                      appended as set 3. Null (the default) omits the set entirely, same
+     *                      "declared iff bound" contract GBufferPipeline's material_layout
+     *                      already follows. See bind_material()/probe_capture.frag's set 3.
+     */
     ProbeCapturePass(coopa::gfx::core::Device& device,
                      coopa::gfx::pipeline::RenderPass& face_pass,
                      const coopa::gfx::pipeline::DescriptorSetLayout& camera_layout,
                      const coopa::gfx::pipeline::DescriptorSetLayout& light_layout,
                      const coopa::gfx::pipeline::DescriptorSetLayout& brdf_layout,
-                     const coopa::gfx::pipeline::ShaderLibrary& shaders)
+                     const coopa::gfx::pipeline::ShaderLibrary& shaders,
+                     const coopa::gfx::pipeline::DescriptorSetLayout* material_layout = nullptr)
         : device_(device)
     {
         // --- Sky background pipeline ---
@@ -107,6 +120,10 @@ public:
         geom_desc.depth.test  = true;
         geom_desc.depth.write = true;
         geom_desc.descriptor_layouts = {&camera_layout, &light_layout, &brdf_layout};
+        material_set_index_ = static_cast<uint32_t>(geom_desc.descriptor_layouts.size());
+        if (material_layout != nullptr) {
+            geom_desc.descriptor_layouts.push_back(material_layout);
+        }
         geom_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
 
         geom_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, face_pass, geom_desc);
@@ -132,6 +149,13 @@ public:
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
     }
 
+    /// Binds `set` at the material set index (see ctor's material_layout doc) -- call after
+    /// bind_geometry(), alongside sets 0-2, before push()/draws. Only meaningful when a
+    /// non-null material_layout was passed to the ctor.
+    void bind_material(coopa::gfx::command::CommandBuffer& cmd, const coopa::gfx::pipeline::DescriptorSet& set) const {
+        cmd.bind_descriptor_set(set, material_set_index_);
+    }
+
     VkPipelineLayout geometry_layout() const { return geom_pipeline_->layout(); }
 
 private:
@@ -144,6 +168,7 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::Shader> geom_vert_;
     std::unique_ptr<coopa::gfx::pipeline::Shader> geom_frag_;
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> geom_pipeline_;
+    uint32_t material_set_index_ = 0;
 };
 
 } // namespace passes

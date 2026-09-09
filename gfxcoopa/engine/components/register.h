@@ -40,6 +40,8 @@
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/engine/data/texture.h>
+#include <gfxcoopa/engine/loaders/texture_loader.h>
+#include <gfxcoopa/types/enums.h>
 
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/components/camera_component.h>
@@ -154,20 +156,55 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
         };
     }
 
+    // Optional per-path color-space override, keyed by the same path a texture_* field below
+    // names (relative to this material's scene_dir, matching load_async()'s own resolution).
+    // Only needed for the rare case of one PNG reused as both a color map and a non-color map
+    // across materials -- every other path gets its slot's default (albedo -> sRGB, everything
+    // else -> linear) below without needing an entry here. See
+    // gfx::loaders::TextureLoader::declare_color_space()'s doc for what happens on conflict.
+    std::unordered_map<std::string, ColorSpace> color_space_overrides;
+    if (mat_node.contains("texture_color_space")) {
+        for (auto item : mat_node.at("texture_color_space").map_items()) {
+            std::string path   = item.key().get_value<std::string>();
+            std::string cs_str = item.value().get_value<std::string>();
+            color_space_overrides[path] = (cs_str == "srgb" || cs_str == "Srgb")
+                ? ColorSpace::Srgb : ColorSpace::Linear;
+        }
+    }
+    // nullptr when the caller registered no Texture loader (or a substitute loader without this
+    // method) -- declare_*() calls below are then simply skipped, and every texture uploads
+    // linear, same as before color-space declaration existed.
+    auto* texture_loader = dynamic_cast<loaders::TextureLoader*>(assets.loader<data::Texture>());
+    auto declare_color_space = [&](const std::string& path, ColorSpace slot_default) {
+        if (!texture_loader) return;
+        // declare_color_space() keys on AssetId::from_path() of whatever string it's given, and
+        // AssetManager::load_async() below builds ITS AssetId from the *resolved* path (see
+        // asset_manager.h's load_async()) -- resolving here first, the same way, is what makes
+        // the two agree on which asset this is, rather than declaring a color space for a
+        // virtual-path AssetId the loader's finalize_typed() will never look up.
+        std::string resolved = assets.source().resolve(path, ctx.scene_dir);
+        auto it = color_space_overrides.find(path);
+        texture_loader->declare_color_space(resolved, it != color_space_overrides.end() ? it->second : slot_default);
+    };
+
     if (mat_node.contains("texture_albedo")) {
         material.texture_albedo = mat_node.at("texture_albedo").get_value<std::string>();
+        declare_color_space(material.texture_albedo, ColorSpace::Srgb);
         material.albedo_handle = assets.load_async<data::Texture>(material.texture_albedo, ctx.scene_dir);
     }
     if (mat_node.contains("texture_normal")) {
         material.texture_normal = mat_node.at("texture_normal").get_value<std::string>();
+        declare_color_space(material.texture_normal, ColorSpace::Linear);
         material.normal_handle = assets.load_async<data::Texture>(material.texture_normal, ctx.scene_dir);
     }
     if (mat_node.contains("texture_metallic_roughness")) {
         material.texture_metallic_roughness = mat_node.at("texture_metallic_roughness").get_value<std::string>();
+        declare_color_space(material.texture_metallic_roughness, ColorSpace::Linear);
         material.metallic_roughness_handle = assets.load_async<data::Texture>(material.texture_metallic_roughness, ctx.scene_dir);
     }
     if (mat_node.contains("texture_alpha_mask")) {
         material.texture_alpha_mask = mat_node.at("texture_alpha_mask").get_value<std::string>();
+        declare_color_space(material.texture_alpha_mask, ColorSpace::Linear);
         material.alpha_mask_handle = assets.load_async<data::Texture>(material.texture_alpha_mask, ctx.scene_dir);
     }
 
