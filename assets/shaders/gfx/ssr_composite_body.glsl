@@ -103,7 +103,8 @@ void main() {
 
     // The one call that guarantees this cancels against the lighting pass -- see
     // gfx/indirect_specular.glsl.
-    GfxIndirectSpecular ind = gfx_indirect_specular(P, N, V, F0, roughness, pc.sky_intensity);
+    GfxIndirectSpecular ind = gfx_indirect_specular(P, N, V, F0, roughness, pc.sky_intensity,
+                                                    pc.sky_zenith.rgb, pc.sky_horizon.rgb, pc.sky_ground.rgb);
 
     // ind.value is already premultiplied by ssr_color's own confidence... no -- ssr_color
     // (u_ssr_map.rgb) is premultiplied by confidence (ssr.frag); ind.value (env/sky specular)

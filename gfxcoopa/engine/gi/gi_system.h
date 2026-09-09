@@ -419,7 +419,6 @@ private:
         if (auto* dir_light = scene.find_first_component<DirectionalLightComponent>()) {
             lu.dir_direction     = glm::vec4(glm::normalize(dir_light->direction), dir_light->intensity);
             lu.dir_color         = glm::vec4(dir_light->color, 1.0f);
-            lu.dir_ambient       = glm::vec4(dir_light->ambient, 1.0f);
             lu.dir_shadow_params = glm::vec4(0.0f); // z = shadow_enabled = 0
             lu.light_counts.x    = 1;
         }

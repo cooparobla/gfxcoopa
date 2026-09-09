@@ -319,12 +319,6 @@ inline void register_render_components(core::Device& device,
             if (node.contains("intensity")) {
                 dl->intensity = node.at("intensity").get_value<float>();
             }
-            if (node.contains("ambient")) {
-                const auto& a = node.at("ambient");
-                dl->ambient.r = a.contains("r") ? a.at("r").get_value<float>() : dl->ambient.r;
-                dl->ambient.g = a.contains("g") ? a.at("g").get_value<float>() : dl->ambient.g;
-                dl->ambient.b = a.contains("b") ? a.at("b").get_value<float>() : dl->ambient.b;
-            }
             if (node.contains("cast_shadows")) {
                 dl->cast_shadows = node.at("cast_shadows").get_value<bool>();
             }

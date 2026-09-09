@@ -36,8 +36,11 @@ namespace components {
  *   direction: { x: -0.577, y: -0.577, z: -0.577 }
  *   color:     { r: 1.0, g: 0.95, b: 0.85 }
  *   intensity: 1.2
- *   ambient:   { r: 0.1, g: 0.1, b: 0.15 }
  * @endcode
+ *
+ * Ambient/indirect light is NOT configured per-light: it comes from the
+ * renderer's sky gradient (see IndirectParams in render_features.h), scaled
+ * and coloured engine-wide, not per directional light.
  */
 class DirectionalLightComponent : public coopa::scene::Component {
 public:
@@ -53,9 +56,6 @@ public:
 
     /** Scalar intensity multiplier applied to color. */
     float intensity = 1.0f;
-
-    /** RGB ambient light color (indirect/fill light floor). */
-    glm::vec3 ambient = glm::vec3(0.1f, 0.1f, 0.1f);
 
     /** Whether this directional light casts shadows. */
     bool cast_shadows = true;

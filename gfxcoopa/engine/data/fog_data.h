@@ -66,6 +66,14 @@ struct alignas(16) FogUBO {
                                                  near-horizon geometry and the sky converge to the same
                                                  transmittance instead of meeting at a visible seam. */
     FogVolumeGPU volumes[MAX_FOG_VOLUMES];
+
+    // Configurable sky colour fog blends toward when sky_blend > 0 (height_params.z).
+    // Appended after volumes, like LightUBO's own trailing sky_zenith/horizon/ground,
+    // so no existing member's offset moves. Must match the lighting pass's colours --
+    // see IndirectParams' doc (render_features.h).
+    glm::vec4 sky_zenith  = glm::vec4(0.05f, 0.18f, 0.55f, 0.0f);
+    glm::vec4 sky_horizon = glm::vec4(0.25f, 0.35f, 0.45f, 0.0f);
+    glm::vec4 sky_ground  = glm::vec4(0.05f, 0.045f, 0.04f, 0.0f);
 };
 
 /**

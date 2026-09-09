@@ -33,6 +33,9 @@ layout(set = 1, binding = 0) uniform FogUBO {
     vec4 height_params;
     vec4 misc_params;
     FogVolume volumes[8];
+    vec4 sky_zenith;   // xyz used; see IndirectParams (render_features.h)
+    vec4 sky_horizon;
+    vec4 sky_ground;
 } u_fog;
 
 #include <gfx/fog.glsl>
@@ -134,7 +137,8 @@ void main() {
     }
 
     vec3 base_color = gfx_fog_base_color(u_fog.fog_color.rgb, view_dir, u_fog.sun_direction.xyz,
-                                         u_fog.sun_color.rgb, u_fog.height_params, u_fog.misc_params);
+                                         u_fog.sun_color.rgb, u_fog.height_params, u_fog.misc_params,
+                                         u_fog.sky_zenith.rgb, u_fog.sky_horizon.rgb, u_fog.sky_ground.rgb);
 
     vec3 fog_color = base_color;
     if (tau_local > 1e-5) {

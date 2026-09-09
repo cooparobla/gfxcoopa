@@ -7,6 +7,8 @@
 #ifndef GFXCOOPA_ENGINE_RENDER_FEATURES_H
 #define GFXCOOPA_ENGINE_RENDER_FEATURES_H
 
+#include <glm/glm.hpp>
+
 namespace coopa {
 namespace gfx {
 namespace engine {
@@ -35,6 +37,18 @@ struct IndirectParams {
                                       ///< (a consumer with no SSGI concept of its own, e.g.
                                       ///< blendy, simply never sets this above its default).
     float ssgi_distance     = 0.5f;  ///< World-space offset along N for the bounce sample point.
+
+    /// The three colours gfx/sky.glsl's sky_gradient() mixes between, straight
+    /// up / at the horizon / straight down (engine is Z-up). Defaulted to that
+    /// file's own SKY_ZENITH/SKY_HORIZON/SKY_GROUND constants so a consumer
+    /// that never touches these renders identically to before they existed.
+    /// Kept in this struct, not passed separately, for the same reason as
+    /// ambient_intensity/sky_intensity above: the lighting pass and the SSR
+    /// composite must see the same colours or SSR's subtraction leaves a
+    /// visible residue.
+    glm::vec3 sky_zenith  = glm::vec3(0.05f, 0.18f, 0.55f);
+    glm::vec3 sky_horizon = glm::vec3(0.25f, 0.35f, 0.45f);
+    glm::vec3 sky_ground  = glm::vec3(0.05f, 0.045f, 0.04f);
 };
 
 /**

@@ -26,7 +26,7 @@ struct PointLight {
 layout(set = 1, binding = 0) uniform LightUBO {
     vec4 dir_direction;
     vec4 dir_color;
-    vec4 dir_ambient;
+    vec4 _reserved_was_dir_ambient; // was dir_ambient; see LightUBO's C++ doc (light_data.h)
     mat4 dir_light_space_matrix;
     vec4 dir_shadow_params; // x=bias, y=pcf_samples, z=shadow_enabled
 
@@ -310,13 +310,11 @@ void main() {
     vec3 kD_indirect = (vec3(1.0) - kS_indirect) * (1.0 - metallic);
     vec3 ambient = (kD_indirect * albedo * indirect_diffuse + indirect_specular) * ao;
 
-    // Fallback constant ambient if no GI probes are present
+    // Fallback constant ambient if no GI probes are present. (Used to special-case
+    // lights.light_counts.x > 0 with a per-light ambient colour -- DirectionalLight::ambient
+    // was removed as dead everywhere else, so this is now one flat constant regardless.)
     if (gi.grid_counts.w == 0 && gi.gi_params.w == 0.0) {
-        if (lights.light_counts.x > 0) {
-            ambient = lights.dir_ambient.rgb * albedo * ao;
-        } else {
-            ambient = vec3(0.03) * albedo * ao;
-        }
+        ambient = vec3(0.03) * albedo * ao;
     }
 
     vec3 color = ambient + Lo;

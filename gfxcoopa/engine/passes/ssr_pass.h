@@ -94,7 +94,19 @@ public:
                                           // or the env-specular subtraction below leaves a residue
         float     ssgi_intensity = 0.0f; // offset 28 -- 0 disables the diffuse-bounce term
         float     ssgi_distance  = 0.5f; // offset 32 -- world-space offset along N for the bounce sample
-    };                                 // 36 bytes
+        // offset 36..47: explicit padding up to the next 16-byte boundary, so the vec4s below
+        // land at the same offset a hand-written GLSL push_constant block would place them at
+        // (std430 requires vec4 to start on a 16-byte boundary).
+        float     _pad0 = 0.0f;
+        float     _pad1 = 0.0f;
+        float     _pad2 = 0.0f;
+        // Sky colours -- MUST match the lighting pass's, same reasoning as sky_intensity above.
+        glm::vec4 sky_zenith  = glm::vec4(0.05f, 0.18f, 0.55f, 0.0f);  // offset 48
+        glm::vec4 sky_horizon = glm::vec4(0.25f, 0.35f, 0.45f, 0.0f);  // offset 64
+        glm::vec4 sky_ground  = glm::vec4(0.05f, 0.045f, 0.04f, 0.0f); // offset 80
+    };                                 // 96 bytes
+    static_assert(sizeof(CompositePushConstants) == 96,
+                 "ssr_composite.frag's PushConstants block must match this layout byte-for-byte");
 
     /// Per-frame parameters for execute(). Collapsed into a struct because the argument list
     /// kept growing phase over phase (scale-relative tuning, then reprojection, then the
@@ -135,6 +147,12 @@ public:
         float sky_intensity    = 1.0f;
         float ssgi_intensity   = 0.0f;
         float ssgi_distance    = 0.5f;
+        // Sky colours the env-specular subtraction must cancel exactly -- same
+        // IndirectParams instance the lighting pass reads, same requirement as
+        // sky_intensity above (see CompositePushConstants' doc).
+        glm::vec3 sky_zenith   = glm::vec3(0.05f, 0.18f, 0.55f);
+        glm::vec3 sky_horizon  = glm::vec3(0.25f, 0.35f, 0.45f);
+        glm::vec3 sky_ground   = glm::vec3(0.05f, 0.045f, 0.04f);
         // Secondary source -- see SsrPushConstants' own doc. max_hiz_mip_b/max_color_mip_b are
         // meaningless when has_secondary is false and left at their defaults in that case.
         bool  has_secondary    = false;
@@ -687,6 +705,9 @@ public:
         cpc.sky_intensity     = params.sky_intensity;
         cpc.ssgi_intensity    = params.ssgi_intensity;
         cpc.ssgi_distance     = params.ssgi_distance;
+        cpc.sky_zenith        = glm::vec4(params.sky_zenith, 0.0f);
+        cpc.sky_horizon       = glm::vec4(params.sky_horizon, 0.0f);
+        cpc.sky_ground        = glm::vec4(params.sky_ground, 0.0f);
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, cpc);
 
         cmd.bind_descriptor_set(camera_set, 0);

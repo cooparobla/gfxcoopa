@@ -44,7 +44,7 @@ struct PointLight {
 layout(set = 1, binding = 0) uniform LightUBO {
     vec4 dir_direction;
     vec4 dir_color;
-    vec4 dir_ambient;
+    vec4 _reserved_was_dir_ambient; // was dir_ambient; see LightUBO's C++ doc (light_data.h)
     mat4 dir_light_space_matrix; // unused (no shadows)
     vec4 dir_shadow_params;      // z forced 0 by GiSystem
 

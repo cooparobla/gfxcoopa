@@ -42,13 +42,31 @@ struct alignas(16) LightUBO {
     // Directional Light
     glm::vec4 dir_direction          = glm::vec4(0.0f); /**< xyz = light direction (normalized), w = intensity */
     glm::vec4 dir_color              = glm::vec4(0.0f); /**< xyz = RGB color, w = unused */
-    glm::vec4 dir_ambient            = glm::vec4(0.0f); /**< xyz = RGB ambient, w = unused */
+    /**< Formerly dir_ambient (DirectionalLight::ambient, RGB). That field had
+     * exactly one reader anywhere -- pbr.frag's legacy fallback branch, in
+     * PbrPipeline, which no consumer ever instantiates -- so it was dead.
+     * Kept as unused padding, not deleted, so this slot's offset (and every
+     * later field's) stays identical across the ~11 shader LightUBO blocks
+     * in gfxcoopa/toyengine/blendy that must byte-match this struct;
+     * reclaiming it would require editing all of them atomically for zero
+     * behavioural gain. Sky colour instead lives in the new trailing fields
+     * below (see IndirectParams, which is where the config value now lives). */
+    glm::vec4 _reserved_was_dir_ambient = glm::vec4(0.0f);
     glm::mat4 dir_light_space_matrix = glm::mat4(1.0f); /**< Light projection * view matrix for directional shadows */
     glm::vec4 dir_shadow_params      = glm::vec4(0.005f, 0.0f, 1.0f, 0.0f); /**< x=bias, y=pcf_samples, z=shadow_enabled (1 or 0) */
 
     // Light counts and Point Lights
     glm::uvec4 light_counts = glm::uvec4(0); /**< x = num_directional (0 or 1), y = num_point_lights */
     PointLightGPU point_lights[MAX_POINT_LIGHTS];
+
+    // Configurable sky/ambient colour (see IndirectParams in render_features.h).
+    // Appended after point_lights so no existing member's offset moves --
+    // a shader that doesn't care about sky colour can keep declaring this
+    // block without these three fields; std140 only requires a matching
+    // *prefix*.
+    glm::vec4 sky_zenith  = glm::vec4(0.05f, 0.18f, 0.55f, 0.0f);  /**< xyz = zenith colour, straight up. */
+    glm::vec4 sky_horizon = glm::vec4(0.25f, 0.35f, 0.45f, 0.0f);  /**< xyz = horizon colour. */
+    glm::vec4 sky_ground  = glm::vec4(0.05f, 0.045f, 0.04f, 0.0f); /**< xyz = ground colour, straight down. */
 };
 
 /**

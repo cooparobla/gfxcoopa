@@ -20,6 +20,7 @@
 #include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/engine/util/sampler.h>
+#include <gfxcoopa/engine/render_features.h>
 
 namespace coopa {
 namespace gfx {
@@ -32,7 +33,13 @@ class SkyboxPass {
 public:
     struct SkyboxPushConstants {
         glm::mat4 inv_view_proj;
-    };
+        // Trailing sky colours, sourced from the same IndirectParams the lighting
+        // pass and SSR composite read -- see IndirectParams' doc (render_features.h)
+        // for why these three must never be plumbed from a different instance.
+        glm::vec4 sky_zenith  = glm::vec4(0.05f, 0.18f, 0.55f, 0.0f);
+        glm::vec4 sky_horizon = glm::vec4(0.25f, 0.35f, 0.45f, 0.0f);
+        glm::vec4 sky_ground  = glm::vec4(0.05f, 0.045f, 0.04f, 0.0f);
+    }; // 112 bytes
 
     SkyboxPass(coopa::gfx::core::Device& device,
                coopa::gfx::pipeline::RenderPass& offscreen_pass,
@@ -81,7 +88,8 @@ public:
               const coopa::gfx::pipeline::DescriptorSet& camera_set,
               const glm::mat4& view,
               const glm::mat4& proj,
-              uint32_t viewport_w, uint32_t viewport_h) const
+              uint32_t viewport_w, uint32_t viewport_h,
+              const IndirectParams& indirect = IndirectParams{}) const
     {
         cmd.bind_pipeline(*pipeline_);
         cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
@@ -89,6 +97,9 @@ public:
 
         SkyboxPushConstants pc{};
         pc.inv_view_proj = glm::inverse(proj * view);
+        pc.sky_zenith    = glm::vec4(indirect.sky_zenith, 0.0f);
+        pc.sky_horizon   = glm::vec4(indirect.sky_horizon, 0.0f);
+        pc.sky_ground    = glm::vec4(indirect.sky_ground, 0.0f);
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
 
         cmd.bind_descriptor_set(camera_set, 0);

@@ -14,6 +14,11 @@ layout(push_constant) uniform CompositePushConstants {
     float sky_intensity;       // offset 24 -- MUST match the lighting pass's sky_intensity
     float ssgi_intensity;      // offset 28 -- 0 disables the diffuse-bounce term
     float ssgi_distance;       // offset 32 -- world-space offset along N for the bounce sample
+    // std430 auto-aligns vec4 to the next 16-byte boundary, so these start at offset 48
+    // (matching SsrPass::CompositePushConstants' explicit _pad0/_pad1/_pad2 on the C++ side).
+    vec4  sky_zenith;          // offset 48 -- MUST match the lighting pass's sky colours
+    vec4  sky_horizon;         // offset 64
+    vec4  sky_ground;          // offset 80
 } pc;
 
 #endif // GFX_SSR_COMPOSITE_PC_GLSL

@@ -173,18 +173,27 @@ float gfx_fog_hg(float cos_theta, float g) {
     return (1.0 - g2) / (4.0 * 3.14159265 * pow(max(denom, 1e-4), 1.5));
 }
 
-/// Base fog colour: config colour, optionally blended toward the shared sky
-/// gradient, plus an additive Henyey-Greenstein sun tint. `height_params` =
-/// FogUBO::height_params (z=sky_blend, w=sun_amount), `misc_params.x` = HG g.
+/// Explicit-colour overload (see gfx/sky.glsl's own overload for why this is a
+/// second function, not a signature change, on the existing 6-arg one below).
 vec3 gfx_fog_base_color(vec3 fog_color, vec3 view_dir, vec3 sun_dir, vec3 sun_color,
-                        vec4 height_params, vec4 misc_params) {
-    vec3 color = mix(fog_color, sky_gradient(view_dir), height_params.z);
+                        vec4 height_params, vec4 misc_params,
+                        vec3 sky_zenith, vec3 sky_horizon, vec3 sky_ground) {
+    vec3 color = mix(fog_color, sky_gradient(view_dir, sky_zenith, sky_horizon, sky_ground), height_params.z);
     float sun_amount = height_params.w;
     if (sun_amount > 0.0) {
         float cos_theta = dot(view_dir, -sun_dir);
         color += sun_color * gfx_fog_hg(cos_theta, misc_params.x) * sun_amount;
     }
     return color;
+}
+
+/// Base fog colour: config colour, optionally blended toward the shared sky
+/// gradient, plus an additive Henyey-Greenstein sun tint. `height_params` =
+/// FogUBO::height_params (z=sky_blend, w=sun_amount), `misc_params.x` = HG g.
+vec3 gfx_fog_base_color(vec3 fog_color, vec3 view_dir, vec3 sun_dir, vec3 sun_color,
+                        vec4 height_params, vec4 misc_params) {
+    return gfx_fog_base_color(fog_color, view_dir, sun_dir, sun_color, height_params, misc_params,
+                              SKY_ZENITH, SKY_HORIZON, SKY_GROUND);
 }
 
 #endif // GFX_FOG_GLSL
