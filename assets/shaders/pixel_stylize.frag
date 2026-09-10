@@ -131,6 +131,12 @@ vec3 aces_film(vec3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
+// Exact inverse of upscale.frag's srgb_decode() -- see this pass's main() for why it runs
+// here, right after the tonemap curve.
+vec3 srgb_encode(vec3 c) {
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
 vec3 quantize_to_palette(vec3 color) {
     int count = int(params.palette_count);
     if (count <= 0) return color;
@@ -164,7 +170,20 @@ void main() {
         color += texture(bloom_tex, in_uv).rgb * params.bloom_intensity;
     }
 
-    if (params.exposure > 0.0) color = aces_film(color * params.exposure);
+    // Tonemap, then encode to sRGB so the 8-bit UNORM write below quantizes in perceptual
+    // space instead of linear -- linear quantization wastes almost all 256 codes on the top
+    // half of the range and leaves darks (exactly where a bloom falloff or a sky gradient
+    // lives) with a handful of codes each, which is what was producing visible banding
+    // through this pass's low-slope regions. Everything from here down (outline_color, the
+    // dither, palette_lut) is authored/stored display-referred, so this is also the one place
+    // in the pass where the switch has to happen. Gated on the same exposure>0 branch as the
+    // tonemap itself: a consumer with its own tonemap chain (exposure<=0, see this file's
+    // PixelStylizePass doc) feeds already-tonemapped, already-encoded LDR and must not have
+    // this reapplied.
+    if (params.exposure > 0.0) {
+        color = aces_film(color * params.exposure);
+        color = srgb_encode(color);
+    }
 
     vec3 n0 = texture(scene_normal, in_uv).rgb;
     if (params.outline_thickness > 0.0 && !is_background(n0) &&

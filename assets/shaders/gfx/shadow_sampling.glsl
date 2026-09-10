@@ -211,6 +211,17 @@ float gfx_shadow_cube_hard(samplerCubeShadow map, vec3 dir, float current_dist, 
 
 /// 8-tap Rodrigues-rotated cube-corner PCF against a point/spot light's depth
 /// cube, hardware-compare taps (see the family doc above).
+///
+/// CAUTION: `gfx_rotate_around_axis` rotates each `GFX_CUBE_PCF_OFFSETS_8`
+/// corner AROUND `dir`, which by construction preserves that corner's
+/// component ALONG `dir` -- a no-op for a direction-only cubemap lookup. So
+/// each tap's effective spread ranges from 0 to `sqrt(3) * disk_radius`
+/// depending purely on the angle between that corner and `dir`, and the
+/// realized penumbra width is direction-dependent rather than a clean
+/// function of `disk_radius`. Kept only for existing callers
+/// (deferred_lighting.frag, transparent.frag, pbr.frag) that already tune
+/// their radius around this behavior; new callers should use
+/// gfx_shadow_cube_pcf_vogel below instead.
 float gfx_shadow_cube_pcf(samplerCubeShadow map, vec3 dir, float current_dist, float bias,
                           float disk_radius, float rotation_angle) {
     float shadow = 0.0;
@@ -220,6 +231,41 @@ float gfx_shadow_cube_pcf(samplerCubeShadow map, vec3 dir, float current_dist, f
         shadow += texture(map, vec4(sample_dir, current_dist - bias));
     }
     return shadow / 8.0;
+}
+
+/// Rotated Vogel-disk PCF against a point/spot light's depth cube,
+/// hardware-compare taps, with a caller-chosen tap count instead of a fixed 8.
+///
+/// Unlike gfx_shadow_cube_pcf above, taps are placed in the tangent PLANE
+/// perpendicular to `dir` (a `tx`/`ty` basis built off `dir`, the same shape
+/// as a normal-mapping TBN), on the same Vogel spiral
+/// (radius_i = sqrt((i+0.5)/n), angle_i = i * golden_angle) that
+/// gfx_shadow_dir_pcf_vogel uses. `disk_radius` is therefore EXACTLY the
+/// tangent-space offset applied to a unit `dir` -- no sqrt(3) inflation, no
+/// direction-dependent collapse -- so it degrades gracefully with
+/// `sample_count` the same way the directional Vogel kernel does.
+///
+/// `disk_radius` is in the same unit as `dir`: a tangent offset on the unit
+/// sphere. To express it as a cube-face texel count, note a cube face spans
+/// [-1, 1] in face-local tangent coordinates across `resolution` texels, so
+/// texels -> tangent offset is `texels * (2.0 / resolution)`. `sample_count`
+/// must not exceed 32.
+float gfx_shadow_cube_pcf_vogel(samplerCubeShadow map, vec3 dir, float current_dist, float bias,
+                                float disk_radius, float rotation_angle, int sample_count) {
+    const float GOLDEN_ANGLE = 2.39996323;
+    vec3 up = abs(dir.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tx = normalize(cross(up, dir));
+    vec3 ty = cross(dir, tx);
+
+    float shadow = 0.0;
+    for (int i = 0; i < 32; ++i) {
+        if (i >= sample_count) break;
+        float r = sqrt((float(i) + 0.5) / float(sample_count));
+        float a = float(i) * GOLDEN_ANGLE + rotation_angle;
+        vec3 offset = (tx * cos(a) + ty * sin(a)) * (r * disk_radius);
+        shadow += texture(map, vec4(dir + offset, current_dist - bias));
+    }
+    return shadow / float(sample_count);
 }
 
 #endif // GFX_SHADOW_SAMPLING_GLSL

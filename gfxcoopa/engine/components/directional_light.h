@@ -36,6 +36,7 @@ namespace components {
  *   direction: { x: -0.577, y: -0.577, z: -0.577 }
  *   color:     { r: 1.0, g: 0.95, b: 0.85 }
  *   intensity: 1.2
+ *   shadow_intensity: 0.75
  * @endcode
  *
  * Ambient/indirect light is NOT configured per-light: it comes from the
@@ -59,6 +60,14 @@ public:
 
     /** Whether this directional light casts shadows. */
     bool cast_shadows = true;
+
+    /**
+     * @brief How dark this light's shadows are: 1.0 = full occlusion (the pre-existing
+     *        behaviour), 0.0 = the light is unshadowed. Values in between let some direct
+     *        light through, which reads far better under a banded/cel-shaded style than a
+     *        hard black cutoff. Has no effect when `cast_shadows` is false.
+     */
+    float shadow_intensity = 1.0f;
 
     // -------------------------------------------------------------------------
     // Component interface.

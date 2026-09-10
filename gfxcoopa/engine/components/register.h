@@ -359,6 +359,9 @@ inline void register_render_components(core::Device& device,
             if (node.contains("cast_shadows")) {
                 dl->cast_shadows = node.at("cast_shadows").get_value<bool>();
             }
+            if (node.contains("shadow_intensity")) {
+                dl->shadow_intensity = node.at("shadow_intensity").get_value<float>();
+            }
         });
 
     SceneLoader::register_component_parser("PointLight",
