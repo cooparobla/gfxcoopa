@@ -46,6 +46,17 @@ struct PBRMaterial {
     AlphaMode alpha_mode   = AlphaMode::Opaque; /**< Selects the draw list this material joins. */
     float     alpha_cutoff = 0.5f;              /**< Only meaningful for AlphaMode::Mask. */
 
+    /// Backface culling for this material, in the stock (no `shader:` override) G-buffer/Mask
+    /// pipeline only. true (default) matches every material's behavior before this field
+    /// existed. false renders both winding orders -- for a mesh that is not a closed solid, or
+    /// where the CUTOUT/Mask alpha test intentionally exposes the interior (see
+    /// assets/scenes/pixel_demo/scene.yaml's cutout_sphere.000). Ignored when `shader` is set
+    /// (a named SurfaceShaderDesc's own `cull` always wins -- see GBufferPipeline::add_variant())
+    /// and by the forward BLEND transparent pass (TransparentPass hardcodes CullMode::Back for
+    /// every BLEND material -- see that pass's add_variant() doc). NOT consumed by
+    /// SdfRenderer, same treatment as refraction/ior below -- parses and stores without effect.
+    bool      cull_backfaces = true;
+
     /// Emissive radiance colour, linear space, before emissive_strength. Added to the
     /// shaded result *after* AO/SSAO attenuation -- an emissive surface glows even in a
     /// dark crevice. Not a real-time light source: no pass gathers emissive into direct

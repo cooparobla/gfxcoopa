@@ -122,6 +122,12 @@ public:
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
         pipeline_ = create_pipeline_(*vert_shader_, *frag_shader_, coopa::gfx::CullMode::Back);
+        // Second stock pipeline, same shader modules, CullMode::None -- selected per-material at
+        // bind time via PBRMaterial::cull_backfaces (see bind()'s doc below). Built eagerly
+        // alongside pipeline_ rather than lazily on first use: this is the only pipeline object
+        // the engine builds mid-frame (add_variant() is always a startup-time call), so a lazy
+        // build would risk creating a VkPipeline while a command buffer is mid-recording.
+        pipeline_no_cull_ = create_pipeline_(*vert_shader_, *frag_shader_, coopa::gfx::CullMode::None);
     }
 
     ~GBufferPipeline() {
@@ -133,6 +139,9 @@ public:
         }
         if (pipeline_ != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_.handle(), pipeline_, nullptr);
+        }
+        if (pipeline_no_cull_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_.handle(), pipeline_no_cull_, nullptr);
         }
         if (pipeline_layout_ != VK_NULL_HANDLE) {
             vkDestroyPipelineLayout(device_.handle(), pipeline_layout_, nullptr);
@@ -183,12 +192,21 @@ public:
     }
 
     /**
-     * @brief Binds a named variant's pipeline, or the stock pipeline if `name` is empty
-     *        or unregistered (see PBRMaterial::shader's doc: empty means "stock").
+     * @brief Binds a named variant's pipeline, or one of the two stock pipelines if `name`
+     *        is empty or unregistered (see PBRMaterial::shader's doc: empty means "stock").
+     *
+     * @param cull_backfaces Selects between the stock pipelines when `name` doesn't resolve
+     *                       to a variant -- see PBRMaterial::cull_backfaces's doc. Ignored
+     *                       (a variant's own SurfaceShaderDesc::cull always wins) when `name`
+     *                       does resolve. Defaults to true so every pre-existing call site
+     *                       (this bind() signature predates the field) keeps compiling and
+     *                       keeps binding exactly the pipeline it always has.
      */
-    void bind(coopa::gfx::command::CommandBuffer& cmd, const std::string& name) const {
+    void bind(coopa::gfx::command::CommandBuffer& cmd, const std::string& name,
+             bool cull_backfaces = true) const {
         auto it = variants_.find(name);
-        VkPipeline p = (it != variants_.end()) ? it->second.pipeline : pipeline_;
+        VkPipeline p = (it != variants_.end()) ? it->second.pipeline
+                                               : (cull_backfaces ? pipeline_ : pipeline_no_cull_);
         vkCmdBindPipeline(cmd.handle(), VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     }
 
@@ -313,8 +331,9 @@ private:
 
     std::unique_ptr<coopa::gfx::pipeline::Shader> vert_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Shader> frag_shader_;
-    VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
-    VkPipeline       pipeline_        = VK_NULL_HANDLE;
+    VkPipelineLayout pipeline_layout_   = VK_NULL_HANDLE;
+    VkPipeline       pipeline_          = VK_NULL_HANDLE; // stock, CullMode::Back
+    VkPipeline       pipeline_no_cull_  = VK_NULL_HANDLE; // stock, CullMode::None -- see bind()
 
     std::map<std::string, Variant> variants_;
 };

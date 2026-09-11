@@ -42,9 +42,17 @@ enum class CameraType {
  *   ortho_scale:  Orthographic scale factor (ORTHO)
  *   clip_start:   Near clip plane
  *   clip_end:     Far clip plane
- *   lens:         Focal length in mm (informational)
- *   sensor_width: Sensor width in mm (informational)
- *   sensor_height:Sensor height in mm (informational)
+ *   lens:         Focal length in mm -- read by DofPass's thin-lens CoC (see
+ *                 aperture/focus_distance below) when a render config's
+ *                 dof_focal_length override is <= 0; otherwise still informational
+ *   sensor_width: Sensor width in mm -- same DofPass fallback role as lens
+ *   sensor_height:Sensor height in mm (informational; DofPass only needs sensor_width)
+ *   aperture:     f-stop; <= 0 inherits the render config's dof_aperture
+ *   focus_distance: Metres to the sharp plane; <= 0 inherits dof_focus_distance
+ *   focus_object: ':'-separated scene path (e.g. "sdf_blob:sdf_blob_sphere") to keep in
+ *                 focus; non-empty puts THIS camera in object-focus mode regardless of the
+ *                 render config's dof_focus_mode, and overrides focus_distance above --
+ *                 see PixelRenderPipeline::resolve_dof_focus_() for the resolution order
  *
  * For isometric rendering, use CameraType::Orthographic. The isometric
  * viewing angle is baked into the scene object's Transform, not the projection.
@@ -72,9 +80,12 @@ public:
     float orthographic_size     = 3.0f;    /**< Orthographic half-height in world units (Unity Camera.orthographicSize). */
     float clip_start            = 0.1f;    /**< Near clip distance (alias: near_clip_plane). */
     float clip_end              = 1000.0f; /**< Far clip distance (alias: far_clip_plane). */
-    float lens                  = 50.0f;   /**< Lens focal length (informational). */
-    float sensor_width          = 36.0f;   /**< Sensor width in mm (informational). */
+    float lens                  = 50.0f;   /**< Lens focal length in mm; read by DofPass as a fallback (see class doc). */
+    float sensor_width          = 36.0f;   /**< Sensor width in mm; read by DofPass as a fallback (see class doc). */
     float sensor_height         = 24.0f;   /**< Sensor height in mm (informational). */
+    float aperture              = 0.0f;    /**< f-stop; <= 0 inherits the render config's dof_aperture. */
+    float focus_distance        = 0.0f;    /**< Metres to the sharp plane; <= 0 inherits dof_focus_distance. */
+    std::string focus_object    = "";      /**< ':'-separated scene path to keep in focus; empty inherits the render config (see class doc). */
     bool is_main                = false;   /**< Claims the main-camera singleton in start() (alias: main). */
 
     // Legacy alias for orthographic scale (full height = orthographic_size * 2)

@@ -6,7 +6,12 @@
 // gates gfx_surface_fragment() the same way GFX_SURFACE_VERTEX gates
 // gfx_surface_vertex() there. The backbone -- not the hook -- owns the
 // CUTOUT alpha test and the MRT writeout, so every derived shader keeps
-// exactly one alpha-test policy and one G-Buffer layout.
+// exactly one alpha-test policy and one G-Buffer layout. Also flips the
+// normal on a back face (see main()) so a double-sided material
+// (PBRMaterial::cull_backfaces == false, or a CullMode::None shader variant
+// like foliage) shades its interior with an outward-relative-to-viewer
+// normal instead of the mesh's fixed geometric one -- same fix
+// transparent_fs.glsl already has for the BLEND path.
 
 layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_world_normal;
@@ -101,6 +106,12 @@ void main() {
     // engine::util::MaterialTextureCache's doc, which makes the same call for the same reason.
     s.tbn         = frag_TBN;
     s.normal_ws   = normalize(s.tbn * (texture(u_normal_map, frag_uv).xyz * 2.0 - 1.0));
+    if (!gl_FrontFacing) s.normal_ws = -s.normal_ws; // correct for double-sided materials
+                                                      // (PBRMaterial::cull_backfaces == false)
+                                                      // and any CullMode::None shader variant
+                                                      // (e.g. foliage) -- see gbuffer_fs.glsl's
+                                                      // file doc and transparent_fs.glsl's
+                                                      // identical fix for the BLEND path.
     s.position_ws = frag_world_pos;
     s.uv          = frag_uv;
 

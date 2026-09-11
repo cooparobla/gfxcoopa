@@ -140,6 +140,7 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
     if (mat_node.contains("alpha_mode")) {
         material.alpha_mode = parse_alpha_mode_(mat_node.at("alpha_mode").get_value<std::string>());
     }
+    if (mat_node.contains("cull_backfaces")) material.cull_backfaces = mat_node.at("cull_backfaces").get_value<bool>();
 
     // Mesh-only (forward MESH transparent pass); parsed here regardless of renderer type
     // since this function is shared with SdfRenderer, but ignored by every SDF pass -- see
@@ -328,6 +329,13 @@ inline void register_render_components(core::Device& device,
             if (node.contains("lens"))          cam->lens          = node.at("lens").get_value<float>();
             if (node.contains("sensor_width"))  cam->sensor_width  = node.at("sensor_width").get_value<float>();
             if (node.contains("sensor_height")) cam->sensor_height = node.at("sensor_height").get_value<float>();
+
+            // Per-camera depth-of-field overrides; aperture/focus_distance default to 0 and
+            // focus_object to "", all meaning "inherit the render config" (see CameraComponent's
+            // own field docs), so omitting them leaves an existing scene byte-for-byte unchanged.
+            if (node.contains("aperture"))       cam->aperture       = node.at("aperture").get_value<float>();
+            if (node.contains("focus_distance")) cam->focus_distance = node.at("focus_distance").get_value<float>();
+            if (node.contains("focus_object"))   cam->focus_object   = node.at("focus_object").get_value<std::string>();
 
             if (node.contains("main")) {
                 cam->is_main = node.at("main").get_value<bool>();

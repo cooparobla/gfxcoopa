@@ -378,19 +378,35 @@ private:
         attachments[0].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         // 1: the G-Buffer's own depth image, read-only -- this pass tests against it but
-        // never writes it. storeOp is DONT_CARE, not STORE: nothing here ever modifies depth
-        // (depth_write=false above, and the READ_ONLY layout disallows it regardless), so there
-        // is nothing to preserve -- and DONT_CARE matters beyond the pass itself: sync
-        // validation (VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT) models any
-        // depth/stencil attachment with storeOp=STORE as a WRITE access at vkCmdEndRenderPass
-        // regardless of the actual layout or pipeline state, which produced a false
-        // WRITE_AFTER_WRITE hazard for any barrier a caller issues afterward to read this same
-        // depth image again later in the frame (e.g. toyengine's PixelStylizePass usage, which
-        // samples it for outline detection right after this pass runs).
+        // never writes it.
+        //
+        // storeOp MUST be STORE, even though nothing here modifies depth. This previously read
+        // DONT_CARE on the reasoning that "nothing wrote it, so there is nothing to preserve",
+        // which is not what DONT_CARE means: per the spec the attachment's contents become
+        // UNDEFINED after the render pass whether or not this pass wrote them, and the driver is
+        // free to act on that. On a tiled/depth-compressed implementation it does -- the
+        // G-Buffer depth came back as mostly zeroes (with scattered blocks of surviving real
+        // depth, at compression-block granularity) for every LATER pass in the frame that
+        // samples it. Those consumers exist and are the whole reason this attachment is
+        // preserved across the pass: toyengine's PixelStylizePass outline edge detector and
+        // DofPass, which re-linearizes it into a thin-lens circle of confusion. With the depth
+        // reading ~0, DofPass computed a large negative (near-field) CoC across the entire
+        // frame, so the focus subject was blurred and the actual background was not -- the exact
+        // inversion of what depth of field is supposed to do. The bug stayed latent until a
+        // consumer was switched on: outline_enabled defaults to false.
+        //
+        // The sync-validation false positive that motivated DONT_CARE is real but is the lesser
+        // problem, and belongs to the barrier rather than the store op: sync validation
+        // (VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT) models a depth/stencil
+        // attachment with storeOp=STORE as a WRITE at vkCmdEndRenderPass regardless of the
+        // actual layout or pipeline state, so a caller reading this image later in the frame can
+        // see a spurious WRITE_AFTER_WRITE. toyengine's
+        // transition_gbuffer_depth_to_shader_read_() already covers that with a deliberately
+        // conservative ALL_COMMANDS_BIT source stage -- see its own comment.
         attachments[1].format         = VK_FORMAT_D32_SFLOAT;
         attachments[1].samples        = VK_SAMPLE_COUNT_1_BIT;
         attachments[1].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
-        attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
         attachments[1].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         attachments[1].initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
