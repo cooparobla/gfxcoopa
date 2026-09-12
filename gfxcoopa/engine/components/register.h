@@ -50,7 +50,7 @@
 #include <gfxcoopa/engine/components/environment_light.h>
 #include <gfxcoopa/engine/components/gi_probe_volume.h>
 #include <gfxcoopa/engine/components/reflection_probe.h>
-#include <gfxcoopa/engine/components/fog_volume.h>
+#include <gfxcoopa/engine/components/volume.h>
 #include <gfxcoopa/engine/components/sdf_renderer.h>
 #include <gfxcoopa/engine/components/sdf_shape.h>
 
@@ -232,7 +232,7 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
 /// Parses a `{x:, y:, z:}` node into a glm::vec3, leaving components at
 /// `fallback`'s when absent -- the same partial-override convention every
 /// other vec3 field in this file already follows (DirectionalLight's
-/// direction/color, FogVolume's extent/color, etc.).
+/// direction/color, Volume's extent/color, etc.).
 inline glm::vec3 parse_vec3_(const fkyaml::node& node, const glm::vec3& fallback) {
     glm::vec3 v = fallback;
     if (node.contains("x")) v.x = node.at("x").get_value<float>();
@@ -421,29 +421,86 @@ inline void register_render_components(core::Device& device,
             if (node.contains("gi_intensity"))
                 gv->gi_intensity = node.at("gi_intensity").get_value<float>();
         });
-
-    SceneLoader::register_component_parser("FogVolume",
+    // Local volume -- the single local-volume concept. Fog is GLOBAL only and
+    // config-driven; everything bounded (including a static fog pocket) is one of
+    // these, raymarched by VolumetricsPass. `kind` picks the density function.
+    //
+    // `kind` is read FIRST and applies kind-specific defaults before any other
+    // field is parsed: the three kinds want very different values, a C++ struct
+    // can only carry one set, and this is what lets a scene declare `kind: haze`
+    // plus a transform and get haze. Read it out of order and every volume
+    // silently keeps the Wind defaults.
+    SceneLoader::register_component_parser("Volume",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
-            auto* fv = obj.add_component<FogVolumeComponent>();
+            auto* vol = obj.add_component<VolumeComponent>();
+
+            if (node.contains("kind")) {
+                std::string k = node.at("kind").get_value<std::string>();
+                if      (k == "fog"  || k == "Fog")  vol->kind = VolumeKind::Fog;
+                else if (k == "haze" || k == "Haze") vol->kind = VolumeKind::Haze;
+                else                                 vol->kind = VolumeKind::Wind;
+            }
+            switch (vol->kind) {
+                case VolumeKind::Fog:
+                    // A static pocket: no noise, no advection, and it veils rather
+                    // than glows -- a static pocket of mist rather than moving air.
+                    vol->speed = 0.0f;  vol->density = 0.5f;  vol->occlusion = 0.8f;
+                    vol->sun_amount = 0.2f;  vol->height_falloff = 0.0f;
+                    vol->color = glm::vec3(0.8f, 0.85f, 0.9f);
+                    break;
+                case VolumeKind::Haze:
+                    // Large, soft, slow, and CONTINUOUS: coverage 0 and gate_scale 0
+                    // together are what keep it a medium rather than isolated blobs.
+                    vol->speed = 0.6f;  vol->density = 0.10f;
+                    vol->noise_scale = 0.05f;  vol->streak = 1.5f;
+                    vol->coverage = 0.0f;      vol->gate_scale = 0.0f;
+                    vol->flow_warp = 3.0f;     vol->flow_scale = 0.03f;
+                    vol->octaves = 3;          vol->height_falloff = 12.0f;
+                    vol->occlusion = 0.6f;     vol->sun_amount = 0.4f;
+                    vol->color = glm::vec3(0.72f, 0.75f, 0.82f);
+                    break;
+                case VolumeKind::Wind:
+                    break;  // the struct's own defaults are the tuned Wind values
+            }
+
             if (node.contains("shape")) {
-                std::string shape = node.at("shape").get_value<std::string>();
-                fv->shape = (shape == "sphere" || shape == "Sphere")
-                            ? FogVolumeShape::Sphere : FogVolumeShape::Box;
+                std::string sh = node.at("shape").get_value<std::string>();
+                vol->shape = (sh == "sphere" || sh == "Sphere") ? VolumeShape::Sphere : VolumeShape::Box;
             }
             if (node.contains("extent")) {
                 const auto& e = node.at("extent");
-                fv->extent.x = e.contains("x") ? e.at("x").get_value<float>() : fv->extent.x;
-                fv->extent.y = e.contains("y") ? e.at("y").get_value<float>() : fv->extent.y;
-                fv->extent.z = e.contains("z") ? e.at("z").get_value<float>() : fv->extent.z;
+                vol->extent.x = e.contains("x") ? e.at("x").get_value<float>() : vol->extent.x;
+                vol->extent.y = e.contains("y") ? e.at("y").get_value<float>() : vol->extent.y;
+                vol->extent.z = e.contains("z") ? e.at("z").get_value<float>() : vol->extent.z;
+            }
+            if (node.contains("direction")) {
+                const auto& d = node.at("direction");
+                vol->direction.x = d.contains("x") ? d.at("x").get_value<float>() : vol->direction.x;
+                vol->direction.y = d.contains("y") ? d.at("y").get_value<float>() : vol->direction.y;
+                vol->direction.z = d.contains("z") ? d.at("z").get_value<float>() : vol->direction.z;
             }
             if (node.contains("color")) {
                 const auto& c = node.at("color");
-                fv->color.r = c.contains("r") ? c.at("r").get_value<float>() : fv->color.r;
-                fv->color.g = c.contains("g") ? c.at("g").get_value<float>() : fv->color.g;
-                fv->color.b = c.contains("b") ? c.at("b").get_value<float>() : fv->color.b;
+                vol->color.r = c.contains("r") ? c.at("r").get_value<float>() : vol->color.r;
+                vol->color.g = c.contains("g") ? c.at("g").get_value<float>() : vol->color.g;
+                vol->color.b = c.contains("b") ? c.at("b").get_value<float>() : vol->color.b;
             }
-            if (node.contains("density")) fv->density = node.at("density").get_value<float>();
-            if (node.contains("falloff")) fv->falloff = node.at("falloff").get_value<float>();
+            if (node.contains("falloff"))        vol->falloff        = node.at("falloff").get_value<float>();
+            if (node.contains("speed"))          vol->speed          = node.at("speed").get_value<float>();
+            if (node.contains("density"))        vol->density        = node.at("density").get_value<float>();
+            if (node.contains("noise_scale"))    vol->noise_scale    = node.at("noise_scale").get_value<float>();
+            if (node.contains("streak"))         vol->streak         = node.at("streak").get_value<float>();
+            if (node.contains("coverage"))       vol->coverage       = node.at("coverage").get_value<float>();
+            if (node.contains("sharpness"))      vol->sharpness      = node.at("sharpness").get_value<float>();
+            if (node.contains("gate_scale"))     vol->gate_scale     = node.at("gate_scale").get_value<float>();
+            if (node.contains("flow_warp"))      vol->flow_warp      = node.at("flow_warp").get_value<float>();
+            if (node.contains("flow_scale"))     vol->flow_scale     = node.at("flow_scale").get_value<float>();
+            if (node.contains("octaves"))        vol->octaves        = node.at("octaves").get_value<int>();
+            if (node.contains("detail_gain"))    vol->detail_gain    = node.at("detail_gain").get_value<float>();
+            if (node.contains("height_base"))    vol->height_base    = node.at("height_base").get_value<float>();
+            if (node.contains("height_falloff")) vol->height_falloff = node.at("height_falloff").get_value<float>();
+            if (node.contains("occlusion"))      vol->occlusion      = node.at("occlusion").get_value<float>();
+            if (node.contains("sun_amount"))     vol->sun_amount     = node.at("sun_amount").get_value<float>();
         });
 
     SceneLoader::register_component_parser("SdfRenderer",

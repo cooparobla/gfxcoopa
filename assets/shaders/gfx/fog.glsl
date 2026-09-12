@@ -78,7 +78,7 @@ float gfx_fog_transmittance(vec3 A, vec3 B, vec4 mode_density, vec4 height_param
 
 /// Ray/AABB slab test against a box centered at the origin with half-extent
 /// `extent`, in the box's own local space (ray already transformed by
-/// FogVolumeGPU::inv_world). Returns [t_enter, t_exit]; t_enter > t_exit
+/// VolumeGPU::inv_world). Returns [t_enter, t_exit]; t_enter > t_exit
 /// means no intersection.
 ///
 /// Guards the classic slab-test instability: when a ray is nearly parallel to an axis (that
@@ -159,6 +159,24 @@ float gfx_fog_box_edge_weight(vec3 p_local, vec3 extent, float falloff_frac) {
 /// (the sphere is centered at the local origin), is nearly perpendicular to
 /// the ray direction. 1 = ray passes through dead-center (full density),
 /// 0 = tangent/grazing (fully faded).
+/// Soft containment weight of a POINT inside a local sphere: 1 deep inside,
+/// ramping to 0 at the surface. The sphere counterpart to
+/// gfx_fog_box_edge_weight, which is already point-based.
+///
+/// Distinct from gfx_fog_sphere_edge_weight below, which takes a ray DIRECTION
+/// and fades on grazing alignment -- that one answers "how softly does this ray
+/// graze the volume", which is what an analytic single-sample integral needs. A
+/// raymarcher evaluating density per sample needs this one instead.
+///
+/// @param p_local      Sample point in the volume's local space.
+/// @param radius       Sphere radius in that space.
+/// @param falloff_frac Edge softness as a fraction of the radius, in [0,1].
+float gfx_fog_sphere_point_weight(vec3 p_local, float radius, float falloff_frac) {
+    float d = 1.0 - length(p_local) / max(radius, 1e-4);
+    float f = clamp(falloff_frac, 1e-3, 1.0);
+    return smoothstep(0.0, f, d);
+}
+
 float gfx_fog_sphere_edge_weight(vec3 p_local, vec3 rd_local, float falloff_frac) {
     float alignment = abs(dot(normalize(p_local), normalize(rd_local)));
     float f = clamp(falloff_frac, 1e-3, 1.0);

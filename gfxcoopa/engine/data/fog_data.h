@@ -1,6 +1,6 @@
 /**
  * @file fog_data.h
- * @brief Per-frame global + local fog uniform buffer.
+ * @brief Per-frame global fog uniform buffer.
  *
  * Self-contained (own inv_view_proj/camera_pos rather than extending
  * CameraData in camera_ubo.h) so adding fog never touches the std140 layout
@@ -22,30 +22,13 @@ namespace gfx {
 namespace engine {
 namespace data {
 
-/// Maximum simultaneous local fog volumes. A plain UBO array (not an SSBO)
-/// deliberately -- see FogPass's doc for why this stays a uniform binding.
-static constexpr uint32_t MAX_FOG_VOLUMES = 8;
-
-/**
- * @struct FogVolumeGPU
- * @brief std140-aligned local fog volume (box or sphere), in gfx/fog.glsl's vocabulary.
- */
-struct alignas(16) FogVolumeGPU {
-    glm::mat4 inv_world     = glm::mat4(1.0f); /**< World -> volume local space (TRS inverse). */
-    glm::vec4 extent_shape  = glm::vec4(1.0f); /**< xyz = local half-extent (Sphere uses .x as radius), w = 0 Box / 1 Sphere. */
-    glm::vec4 color_density = glm::vec4(0.0f); /**< rgb = fog colour, a = density (extinction per world unit). */
-    glm::vec4 falloff       = glm::vec4(0.0f); /**< x = edge softness, as a fraction of a dimensionless [0,1]
-                                                 surface metric (0 = hard edge, 1 = maximally soft); NOT a
-                                                 world distance. See gfx_fog_box_edge_weight/
-                                                 gfx_fog_sphere_edge_weight in gfx/fog.glsl -- the fade is
-                                                 evaluated at the ray's entry point on the volume's surface
-                                                 so it looks the same from any viewing angle, unlike a
-                                                 chord-length-based fade. yzw unused. */
-};
-
 /**
  * @struct FogUBO
- * @brief std140-aligned global fog parameters plus up to MAX_FOG_VOLUMES local volumes.
+ * @brief std140-aligned global fog parameters.
+ *
+ * Fog is GLOBAL ONLY and config-driven. Local volumes of every kind (including
+ * static fog pockets) are raymarched by VolumetricsPass instead -- see
+ * VolumeComponent -- so this carries no volume array.
  *
  * Layout intentionally keeps every scalar packed into a vec4 alongside related fields
  * (matching PointLightGPU/LightUBO's convention in light_data.h) rather than declaring
@@ -59,18 +42,16 @@ struct alignas(16) FogUBO {
     glm::vec4 sun_color      = glm::vec4(0.0f); /**< rgb = sun colour * intensity, for the HG in-scatter tint. */
     glm::vec4 mode_density   = glm::vec4(0.0f); /**< x = mode (0 Linear/1 Exp/2 Exp2), y = density, z = linear_start, w = linear_end. */
     glm::vec4 height_params  = glm::vec4(0.0f); /**< x = height_base, y = height_falloff (<=0 disables), z = sky_blend, w = sun_amount. */
-    glm::vec4 misc_params    = glm::vec4(0.0f); /**< x = sun anisotropy g, y = max_opacity, z = volume_count,
+    glm::vec4 misc_params    = glm::vec4(0.0f); /**< x = sun anisotropy g, y = max_opacity,
+                                                 z = UNUSED (was the local volume count, before fog
+                                                 became global-only),
                                                  w = fog_max_distance -- the distance the global fog term
                                                  saturates at, and the distance sky pixels are evaluated at
                                                  (rather than a hard-coded "no fog"), so a grazing ray's
                                                  near-horizon geometry and the sky converge to the same
                                                  transmittance instead of meeting at a visible seam. */
-    FogVolumeGPU volumes[MAX_FOG_VOLUMES];
-
     // Configurable sky colour fog blends toward when sky_blend > 0 (height_params.z).
-    // Appended after volumes, like LightUBO's own trailing sky_zenith/horizon/ground,
-    // so no existing member's offset moves. Must match the lighting pass's colours --
-    // see IndirectParams' doc (render_features.h).
+    // Must match the lighting pass's colours -- see IndirectParams' doc (render_features.h).
     glm::vec4 sky_zenith  = glm::vec4(0.05f, 0.18f, 0.55f, 0.0f);
     glm::vec4 sky_horizon = glm::vec4(0.25f, 0.35f, 0.45f, 0.0f);
     glm::vec4 sky_ground  = glm::vec4(0.05f, 0.045f, 0.04f, 0.0f);
@@ -83,8 +64,7 @@ struct alignas(16) FogUBO {
  * Mirrors LightData's shape (light_data.h): a host-visible, persistently-mapped
  * uniform buffer, re-uploaded once per frame via update(). Call the returned
  * data() reference's fields directly then upload(), rather than a monolithic
- * setter, since the caller (PbrRenderPipeline) fills global params and a
- * variable-length volume list from two different code paths.
+ * setter, since the caller fills these fields from several code paths.
  */
 class FogData {
 public:

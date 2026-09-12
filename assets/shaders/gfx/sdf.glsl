@@ -109,7 +109,7 @@ float gfx_sdf_smooth_intersect(float a, float b, float k) {
 /// then corrupts the combined min/max bound instead of being cleanly
 /// rejected. Adapted here from gfx_fog_box_intersect()'s centered-extent form
 /// to this function's min/max form, since the SDF renderer's world AABB is
-/// not generally centered on the ray-space origin the way a FogVolume's
+/// not generally centered on the ray-space origin the way a Volume's
 /// local-space box is.
 vec2 gfx_sdf_aabb_intersect(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
     bvec3 parallel = lessThan(abs(rd), vec3(1e-8));

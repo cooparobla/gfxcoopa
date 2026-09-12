@@ -72,8 +72,8 @@ The `coopa::gfx::engine` module provides high-level rendering engine abstraction
 - **Details**: 128-byte layout containing model matrix (`mat4`) and normal matrix (`mat4 normal_matrix = transpose(inverse(model))`).
 
 #### [fog_data.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/engine/data/fog_data.h)
-- **Role**: Host-visible uniform buffer for global Unity-style fog parameters plus up to 8 local fog volumes.
-- **Key Classes / Structs**: `FogVolumeGPU`, `FogUBO`, `FogData`.
+- **Role**: Host-visible uniform buffer for GLOBAL Unity-style fog parameters. Fog is global-only; bounded volumes live in `volumetrics_data.h`.
+- **Key Classes / Structs**: `FogUBO`, `FogData`.
 - **Details**: Self-contained (own `inv_view_proj`/`camera_pos`) so it never touches CameraUBO/LightData's std140 layout; consumed by `FogPass`.
 
 ### Global Illumination Submodule (`engine/gi`)
