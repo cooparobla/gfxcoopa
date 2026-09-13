@@ -49,14 +49,23 @@ public:
      * is created. The window is non-resizable by default; call
      * set_resizable(true) before construction or use the extended constructor.
      *
+     * A `visible = false` window is never mapped by the window system, so it
+     * can neither appear on screen nor take input focus -- but it still owns a
+     * real, correctly-sized surface that Vulkan presents to normally, which is
+     * what makes it the right shape for an automated render test: the frames
+     * are genuine, and nothing interrupts whoever is using the desktop. There
+     * is no way to un-hide it afterwards; construct it visible if you want to
+     * see it.
+     *
      * @param title Window title bar string.
      * @param width Window width in pixels.
      * @param height Window height in pixels.
      * @param resizable Allow the user to resize the window.
+     * @param visible False creates the window without mapping it -- see above.
      * @throws std::runtime_error if GLFW init or window creation fails.
      */
     Window(const std::string& title, uint32_t width, uint32_t height,
-           bool resizable = false)
+           bool resizable = false, bool visible = true)
         : width_(width), height_(height)
     {
         // glfwInit() itself is safe to call repeatedly (GLFW documents it as
@@ -77,6 +86,7 @@ public:
         // No OpenGL context — Vulkan provides its own surface.
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE,  resizable ? GLFW_TRUE : GLFW_FALSE);
+        glfwWindowHint(GLFW_VISIBLE,    visible   ? GLFW_TRUE : GLFW_FALSE);
 
         window_ = glfwCreateWindow(
             static_cast<int>(width_),

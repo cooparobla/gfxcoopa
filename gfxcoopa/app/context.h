@@ -59,6 +59,14 @@ struct ContextConfig {
     uint32_t    width      = 1280;
     uint32_t    height     = 720;
     bool        resizable  = true;
+    /**
+     * @brief False creates the window without ever mapping it -- see
+     * presentation::Window's constructor. Rendering and presentation are
+     * unaffected; the window simply never appears and never takes focus,
+     * which is what an automated render test wants on a desktop someone is
+     * still using.
+     */
+    bool        visible    = true;
     bool        vsync      = true;
     bool        validation = true;
     Format      depth_format = Format::D32_Sfloat;
@@ -143,7 +151,7 @@ public:
     explicit Context(const ContextConfig& config = {})
         : config_(config)
     {
-        window_   = std::make_unique<presentation::Window>(config.title, config.width, config.height, config.resizable);
+        window_   = std::make_unique<presentation::Window>(config.title, config.width, config.height, config.resizable, config.visible);
         instance_ = std::make_unique<core::Instance>(config.title, config.validation);
         surface_  = std::make_unique<core::Surface>(*instance_, *window_);
         device_   = std::make_unique<core::Device>(*instance_, *surface_);
