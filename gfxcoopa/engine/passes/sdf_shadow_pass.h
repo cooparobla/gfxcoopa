@@ -84,7 +84,6 @@ public:
                  const std::string& dir_frag_spv,
                  const std::string& cube_vert_spv,
                  const std::string& cube_frag_spv)
-        : device_(device)
     {
         dir_vert_ = std::make_unique<pipeline::Shader>(device, dir_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         dir_frag_ = std::make_unique<pipeline::Shader>(device, dir_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -130,7 +129,6 @@ public:
     }
 
 private:
-    core::Device&                       device_;
     std::unique_ptr<pipeline::Shader>   dir_vert_;
     std::unique_ptr<pipeline::Shader>   dir_frag_;
     std::unique_ptr<pipeline::Pipeline> dir_pipeline_;

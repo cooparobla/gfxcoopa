@@ -76,7 +76,7 @@ public:
                   const std::string& vert_spv,
                   const std::string& frag_spv,
                   ExtraSets extra = {})
-        : device_(device), extra_(std::move(extra))
+        : extra_(std::move(extra))
     {
         extra_.validate("SdfForwardPass");
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
@@ -130,7 +130,6 @@ public:
     }
 
 private:
-    coopa::gfx::core::Device& device_;
     std::unique_ptr<coopa::gfx::pipeline::Shader>   vert_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Shader>   frag_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> pipeline_;

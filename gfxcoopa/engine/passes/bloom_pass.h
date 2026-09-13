@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/targets/offscreen_target.h>
 /**
  * @file bloom_pass.h
  * @brief Additive HDR bloom: bright-pass threshold -> progressive multi-tap
@@ -40,6 +39,7 @@
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
+#include <gfxcoopa/engine/targets/offscreen_target.h>
 #include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/types/texture_view.h>
 
@@ -47,8 +47,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace passes {
-
-
 
 class BloomPass {
 public:

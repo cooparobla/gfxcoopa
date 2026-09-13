@@ -22,6 +22,7 @@
 #include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/engine/targets/offscreen_target.h>
+#include <gfxcoopa/engine/targets/gbuffer_target.h>
 #include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/memory/image.h>
 #include <gfxcoopa/memory/image_upload.h>
@@ -32,8 +33,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace passes {
-
-
 
 class SsrPass {
 public:
@@ -196,8 +195,8 @@ public:
             const std::string& blur_vert_spv = "",
             const std::string& blur_frag_spv = "")
         : device_(device), allocator_(allocator), width_(width), height_(height), half_res_(half_res),
-          composite_extra_(std::move(composite_extra)),
-          blur_enabled_(!blur_vert_spv.empty() && !blur_frag_spv.empty())
+          blur_enabled_(!blur_vert_spv.empty() && !blur_frag_spv.empty()),
+          composite_extra_(std::move(composite_extra))
     {
         composite_extra_.validate("SsrPass composite");
 

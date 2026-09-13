@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/sampler.h>
 /**
  * @file cubemap_target.h
  * @brief HDR color cubemap render target for reflection probe capture.
@@ -26,8 +25,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace targets {
-
-
 
 /**
  * @class CubemapTarget

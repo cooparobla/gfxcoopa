@@ -28,8 +28,6 @@ namespace gfx {
 namespace engine {
 namespace gi {
 
-
-
 using namespace util;
 
 struct SceneBox {
@@ -93,7 +91,6 @@ public:
     {
         const int Nx = volume.grid_resolution.x;
         const int Ny = volume.grid_resolution.y;
-        const int Nz = volume.grid_resolution.z;
         const int total_probes = volume.total_probes();
 
         std::vector<gi::SHProbe> probes(total_probes);

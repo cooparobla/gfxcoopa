@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
 /**
  * @file tonemapping_pass.h
  * @brief Fullscreen tonemapping and FXAA render pass header for gfxcoopa.
@@ -10,7 +9,6 @@
 #include <volk/volk.h>
 #include <memory>
 #include <string>
-#include <vector>
 #include <cstdint>
 
 #include <gfxcoopa/core/device.h>
@@ -25,8 +23,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace passes {
-
-
 
 class ToneMappingPass {
 public:
@@ -45,8 +41,7 @@ public:
                     const util::Sampler& linear_sampler,
                     const std::string& vert_spv,
                     const std::string& frag_spv)
-        : device_(device),
-          exposure_(1.0f),
+        :           exposure_(1.0f),
           fxaa_enabled_(1),
           subpixel_quality_(0.75f),
           edge_threshold_(0.166f),
@@ -128,7 +123,6 @@ public:
     }
 
 private:
-    coopa::gfx::core::Device& device_;
     float   exposure_;
     int32_t fxaa_enabled_;
     float   subpixel_quality_;

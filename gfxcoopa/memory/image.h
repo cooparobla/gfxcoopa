@@ -3,8 +3,11 @@
  * @brief 2D Vulkan image and image view management via VMA.
  *
  * Provides a 2D Image backed by a VMA allocation, automatically creating a
- * matching VkImageView. Supports layout transitions and pixel data upload
- * via a staging buffer. Analogous to OpenGL's texture objects.
+ * matching VkImageView covering it. Analogous to OpenGL's texture objects.
+ *
+ * Image owns storage and identity only. Recording work against it lives
+ * elsewhere: command::CommandBuffer::transition() for layout changes, and
+ * memory::upload_image_2d() (memory/image_upload.h) for staged texel upload.
  */
 
 #ifndef COOPA_GFX_MEMORY_IMAGE_H
@@ -36,9 +39,11 @@ namespace memory {
  * @class Image
  * @brief RAII 2D Vulkan image with an auto-created VkImageView.
  *
- * Wraps VkImage + VmaAllocation + VkImageView into a single object.
- * Provides transition_layout() for pipeline barrier-based layout changes
- * and upload() for texel data upload (like glTexSubImage2D).
+ * Wraps VkImage + VmaAllocation + VkImageView into a single object, and
+ * tracks the TextureUsage it was last transitioned to (see current_usage()).
+ *
+ * Single-mip, single-layer, 2D only. Mip chains, cube faces and array layers
+ * are built directly against Vulkan by the engine targets that need them.
  */
 class Image {
 public:
@@ -74,10 +79,9 @@ public:
      * @brief Creates a 2D image using gfxcoopa's sealed Format/ImageUsage/
      * MemoryResidency/SampleCount vocabulary instead of raw Vulkan/VMA types.
      *
-     * The aspect mask (color vs. depth[+stencil]) is derived automatically
-     * from `format` -- callers never pass VK_IMAGE_ASPECT_COLOR_BIT by hand,
-     * which is exactly the hardcoded-to-COLOR assumption that forced the
-     * pre-seal depth-image barrier workarounds downstream.
+     * The aspect mask (color vs. depth[+stencil]) is derived from `format`,
+     * so a depth image gets a depth aspect without the caller having to know
+     * to ask for one.
      *
      * @param device    The logical device.
      * @param allocator The VMA allocator.
@@ -152,78 +156,18 @@ public:
      */
     uint32_t height() const { return height_; }
 
-    // --- Layout transition ---
-
     /**
-     * @brief Inserts a pipeline barrier to transition this image's layout.
+     * @brief Returns the TextureUsage this image was last transitioned to,
+     * or TextureUsage::Undefined if it has never been transitioned.
      *
-     * Analogous to ensuring a texture is in the correct mip state before
-     * sampling. The src/dst stage and access masks are inferred from the
-     * old and new layouts.
+     * This is what lets CommandBuffer::transition() take only a destination
+     * usage: the Image tracks its own, so a caller never has to separately
+     * track (and risk getting wrong) what layout it was last left in.
      *
-     * @param cmd        Command buffer to record the barrier into.
-     * @param old_layout Current layout.
-     * @param new_layout Target layout.
-     */
-    void transition_layout(VkCommandBuffer cmd,
-                           VkImageLayout   old_layout,
-                           VkImageLayout   new_layout) const
-    {
-        VkImageMemoryBarrier barrier{};
-        barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.oldLayout           = old_layout;
-        barrier.newLayout           = new_layout;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image               = image_;
-
-        barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier.subresourceRange.baseMipLevel   = 0;
-        barrier.subresourceRange.levelCount     = 1;
-        barrier.subresourceRange.baseArrayLayer = 0;
-        barrier.subresourceRange.layerCount     = 1;
-
-        VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-        VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-
-        // Infer access masks from well-known layout pairs.
-        if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED &&
-            new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-        {
-            barrier.srcAccessMask = 0;
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-            dst_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        }
-        else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
-                 new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-        {
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-            dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        }
-        else {
-            // Generic fallback: full pipeline stall.
-            barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-        }
-
-        vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0,
-                             0, nullptr, 0, nullptr,
-                             1, &barrier);
-    }
-
-    /**
-     * @brief Returns the TextureUsage this image was last transitioned to
-     * via command::CommandBuffer::transition(), or TextureUsage::Undefined
-     * if it has never been transitioned that way (including images only
-     * ever touched via the raw transition_layout() above).
-     *
-     * This is what lets CommandBuffer::transition() drop the "from"
-     * argument entirely: the Image remembers its own current usage, so a
-     * caller never has to separately track (and risk getting wrong) what
-     * layout an image was last left in.
+     * Only CommandBuffer::transition() and mark_transitioned() update this.
+     * A render pass's automatic attachment transition does NOT, so an image
+     * used as a render target carries a stale reading until something calls
+     * one of those two -- see util/image_readback.h, which corrects for it.
      */
     TextureUsage current_usage() const { return current_usage_; }
 
@@ -234,10 +178,8 @@ public:
      *
      * Advanced/internal: only needed by code that records its own raw
      * `vkCmdPipelineBarrier` outside CommandBuffer::transition() -- e.g.
-     * memory::upload_image_2d(), a pre-seal free function that predates
-     * this tracking and is not being rewritten to use CommandBuffer here.
-     * Ordinary application code should never need this; call transition()
-     * instead, which keeps this in sync automatically.
+     * memory::upload_image_2d(). Ordinary application code should never
+     * need this; call transition() instead, which stays in sync on its own.
      *
      * @param usage The usage this image has actually just been left in.
      */

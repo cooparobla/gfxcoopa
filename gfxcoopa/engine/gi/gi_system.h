@@ -54,8 +54,6 @@ using components::PointLightComponent;
 using components::GiProbeVolumeComponent;
 using components::ReflectionProbeComponent;
 
-
-
 class GiSystem {
 public:
     GiSystem(coopa::gfx::core::Device& device,

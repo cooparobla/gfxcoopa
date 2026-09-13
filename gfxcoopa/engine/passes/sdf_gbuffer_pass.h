@@ -58,7 +58,6 @@ public:
                   const coopa::gfx::pipeline::DescriptorSetLayout& sdf_layout,
                   const std::string& vert_spv,
                   const std::string& frag_spv)
-        : device_(device)
     {
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -97,7 +96,6 @@ public:
     }
 
 private:
-    coopa::gfx::core::Device& device_;
     std::unique_ptr<coopa::gfx::pipeline::Shader>   vert_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Shader>   frag_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> pipeline_;

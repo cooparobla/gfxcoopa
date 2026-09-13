@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/sampler.h>
 /**
  * @file gbuffer_target.h
  * @brief G-Buffer render target for deferred rendering pass.
@@ -24,8 +23,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace targets {
-
-
 
 class GBufferTarget {
 public:

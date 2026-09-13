@@ -27,8 +27,6 @@ namespace gfx {
 namespace engine {
 namespace util {
 
-
-
 /// Cosine-weighted-ish hemisphere sample kernel (tangent space, z >= 0), uploaded once into a
 /// UBO sized for the maximum sample count so ssao.frag's runtime-tunable kernel_size can shrink
 /// without ever reading past what was uploaded. Samples are biased toward the origin (Crysis/

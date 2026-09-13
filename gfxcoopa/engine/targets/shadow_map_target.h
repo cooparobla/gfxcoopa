@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/sampler.h>
 /**
  * @file shadow_map_target.h
  * @brief Depth render targets for Directional Light and Point Light Cubemap shadow maps.
@@ -25,8 +24,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace targets {
-
-
 
 /**
  * @class ShadowMapTarget

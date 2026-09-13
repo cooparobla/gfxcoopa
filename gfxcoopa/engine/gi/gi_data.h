@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/sh_math.h>
 /**
  * @file gi_data.h
  * @brief GPU buffers for Global Illumination (GI) probe volumes and reflection probes.
@@ -21,8 +20,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace gi {
-
-
 
 /// Maximum number of reflection probes blended together per pixel. Matches
 /// this codebase's existing point-shadow-map cap (also 4) -- small enough
@@ -63,7 +60,7 @@ struct alignas(16) ReflectionProbeUniforms {
 class GiData {
 public:
     GiData(core::Device& device, memory::Allocator& allocator, uint32_t max_probes = 4096)
-        : device_(device), allocator_(allocator), max_probes_(max_probes)
+        : allocator_(allocator), max_probes_(max_probes)
     {
         uniforms_buf_ = std::make_unique<memory::Buffer>(
             memory::Buffer::uniform(device, allocator, sizeof(GiUniforms))
@@ -127,7 +124,6 @@ public:
     const memory::Buffer& reflection_buffer() const { return *reflection_buf_; }
 
 private:
-    core::Device& device_;
     memory::Allocator& allocator_;
     GiUniforms uniforms_{};
     ReflectionProbeUniforms reflection_uniforms_{};

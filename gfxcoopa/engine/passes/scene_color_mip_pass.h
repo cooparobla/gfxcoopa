@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
 /**
  * @file scene_color_mip_pass.h
  * @brief Prefiltered mip chain of the deferred-lit HDR scene colour, for SSR cone tracing.
@@ -30,8 +29,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace passes {
-
-
 
 /// Same per-mip render infrastructure as HiZPass (bypasses memory::Image, which hardcodes
 /// mipLevels = 1, and calls vmaCreateImage directly), but for the deferred-lit HDR scene colour

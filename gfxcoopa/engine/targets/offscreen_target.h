@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/sampler.h>
 /**
  * @file offscreen_target.h
  * @brief Low-resolution render target for the retro rendering pipeline.
@@ -32,8 +31,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace targets {
-
-
 
 /**
  * @class OffscreenTarget

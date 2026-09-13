@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/sh_math.h>
 /**
  * @file brdf_lut.h
  * @brief BRDF Integration LUT generation & management for PBR indirect specular split-sum approximation.
@@ -30,8 +29,6 @@ namespace gfx {
 namespace engine {
 namespace gi {
 
-
-
 /**
  * @class BRDFLUT
  * @brief Generates and stores a 512x512 R16G16_SFLOAT BRDF Integration Look-Up Table.
@@ -42,7 +39,6 @@ public:
             memory::Allocator& allocator,
             command::CommandPool& cmd_pool,
             const pipeline::ShaderLibrary& shaders)
-        : device_(device)
     {
         // 1. Create 512x512 R16G16_SFLOAT Image
         lut_image_ = std::make_unique<memory::Image>(
@@ -133,7 +129,6 @@ private:
         vkDestroyFramebuffer(device.handle(), framebuffer, nullptr);
     }
 
-    core::Device& device_;
     std::unique_ptr<memory::Image> lut_image_;
     std::unique_ptr<util::Sampler>       lut_sampler_;
 };

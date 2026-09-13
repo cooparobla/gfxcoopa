@@ -31,15 +31,11 @@ namespace pipeline {
 
 /**
  * @enum BlendMode
- * @brief Richer blend equations than PipelineConfig::blending's single bool covers.
- *
- * None means "let PipelineConfig::blending decide" (see the resolution rule
- * on PipelineConfig::blend_mode) — every pre-existing caller that only ever
- * set `blending` keeps its exact prior behavior. The other modes are opt-in.
+ * @brief The blend equation a pipeline's color attachments use.
  */
 enum class BlendMode {
-    None,                ///< No blending (defers to PipelineConfig::blending).
-    Alpha,                ///< Straight alpha: src*srcA + dst*(1-srcA). Same as blending=true today. Destination alpha is REPLACED by the source's.
+    None,                ///< Blending disabled; the source fragment replaces the destination.
+    Alpha,                ///< Straight alpha: src*srcA + dst*(1-srcA). Destination alpha is REPLACED by the source's.
     AlphaOver,            ///< Straight alpha like Alpha, but destination alpha ACCUMULATES coverage: dstA*(1-srcA) + srcA. For drawing into a transparent-cleared layer that is itself composited later; identical to Alpha over an opaque destination.
     PremultipliedAlpha,   ///< src*1 + dst*(1-srcA). For premultiplied-alpha source data (e.g. a sprite atlas composited with coverage baked in).
     Additive,             ///< src*srcA + dst*1. Glow/particle-style accumulation.
@@ -60,8 +56,7 @@ struct PipelineConfig {
     VkFrontFace            front_face             = VK_FRONT_FACE_COUNTER_CLOCKWISE;     /**< CCW winding is front-facing. */
     bool                   depth_test             = true;                                 /**< Enable depth testing. */
     bool                   depth_write            = true;                                 /**< Enable depth writing. */
-    bool                   blending               = false;                                /**< Enable alpha blending (see blend_mode). */
-    BlendMode               blend_mode             = BlendMode::None;                      /**< Blend equation; None defers to `blending` (see BlendMode). */
+    BlendMode              blend_mode             = BlendMode::None;                      /**< Blend equation; None disables blending. */
     float                  line_width             = 1.0f;                                 /**< Rasterized line width. */
     VkSampleCountFlagBits  samples                = VK_SAMPLE_COUNT_1_BIT;               /**< MSAA sample count. */
     VkCompareOp             depth_compare_op       = VK_COMPARE_OP_LESS;                  /**< Depth comparison function. */
@@ -261,7 +256,6 @@ public:
         config.depth_write      = desc.depth.write;
         config.depth_compare_op = detail::to_vk(desc.depth.compare);
         config.blend_mode       = desc.blend.mode;
-        config.blending         = desc.blend.mode != BlendMode::None;
         config.samples          = detail::to_vk(render_pass.samples());
         config.color_attachment_count = desc.blend.color_attachment_count != 0
                                            ? desc.blend.color_attachment_count
@@ -340,7 +334,6 @@ public:
         config.depth_write      = desc.depth.write;
         config.depth_compare_op = detail::to_vk(desc.depth.compare);
         config.blend_mode       = desc.blend.mode;
-        config.blending         = desc.blend.mode != BlendMode::None;
         config.color_attachment_count = desc.blend.color_attachment_count; // 0 -> PipelineConfig's own default (1)
 
         create_pipeline(render_pass.handle, desc.shaders, vk_bindings, vk_attributes, config);
@@ -509,17 +502,8 @@ private:
 
         // Color blending. The same attachment state is replicated across
         // config.color_attachment_count attachments (defaults to 1).
-        //
-        // blend_mode == None defers entirely to the legacy `blending` bool, so
-        // every pre-existing PipelineConfig{} (which never sets blend_mode)
-        // produces byte-identical blend state to before BlendMode existed.
-        BlendMode effective_mode = config.blend_mode;
-        if (effective_mode == BlendMode::None && config.blending) {
-            effective_mode = BlendMode::Alpha;
-        }
-
         VkPipelineColorBlendAttachmentState blend_attachment{};
-        switch (effective_mode) {
+        switch (config.blend_mode) {
         case BlendMode::Alpha:
             blend_attachment.blendEnable         = VK_TRUE;
             blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;

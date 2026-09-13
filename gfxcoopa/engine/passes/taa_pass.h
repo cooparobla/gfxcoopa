@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
 /**
  * @file taa_pass.h
  * @brief Temporal Anti-Aliasing (TAA) pass.
@@ -21,14 +20,13 @@
 #include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/pipeline/shader.h>
+#include <gfxcoopa/engine/targets/offscreen_target.h>
 #include <gfxcoopa/memory/image.h>
 
 namespace coopa {
 namespace gfx {
 namespace engine {
 namespace passes {
-
-
 
 class TaaPass {
 public:

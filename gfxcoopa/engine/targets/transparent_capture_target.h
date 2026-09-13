@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/sampler.h>
 /**
  * @file transparent_capture_target.h
  * @brief Forward capture target for transparent geometry, used ONLY as a second reflection
@@ -37,8 +36,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace targets {
-
-
 
 class TransparentCaptureTarget {
 public:

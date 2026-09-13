@@ -1,5 +1,3 @@
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
-#include <gfxcoopa/engine/util/sampler.h>
 /**
  * @file env_prefilter_pass.h
  * @brief GGX-prefiltered analytic-sky bake into a reflection probe cubemap.
@@ -27,8 +25,6 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
-
-
 /// GGX-prefilters mips 1..N-1 of a targets::CubemapTarget from its real mip-0 capture
 /// (see probe_capture.frag / probe_sky_background.frag, which write mip 0).
 /// Reads the source via a samplerCube bound to targets::CubemapTarget::mip0_cube_view()
@@ -45,7 +41,6 @@ public:
                      const std::string& vert_spv,
                      const std::string& frag_spv,
                      const coopa::gfx::pipeline::DescriptorSetLayout& source_layout)
-        : device_(device)
     {
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -93,8 +88,6 @@ public:
     }
 
 private:
-    coopa::gfx::core::Device& device_;
-
     std::unique_ptr<coopa::gfx::pipeline::Shader>   vert_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Shader>   frag_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> pipeline_;

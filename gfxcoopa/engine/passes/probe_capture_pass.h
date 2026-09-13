@@ -1,5 +1,3 @@
-#include <gfxcoopa/engine/targets/cubemap_target.h>
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
 /**
  * @file probe_capture_pass.h
  * @brief Renders real scene geometry into one reflection-probe cubemap face.
@@ -28,9 +26,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace passes {
-
-
-
 
 /// Two pipelines, both built against a depth-inclusive render pass (in
 /// practice targets::CubemapTarget::render_pass()), used together within a single
@@ -84,7 +79,6 @@ public:
                      const coopa::gfx::pipeline::DescriptorSetLayout& brdf_layout,
                      const coopa::gfx::pipeline::ShaderLibrary& shaders,
                      const coopa::gfx::pipeline::DescriptorSetLayout* material_layout = nullptr)
-        : device_(device)
     {
         // --- Sky background pipeline ---
         sky_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(
@@ -159,8 +153,6 @@ public:
     VkPipelineLayout geometry_layout() const { return geom_pipeline_->layout(); }
 
 private:
-    coopa::gfx::core::Device& device_;
-
     std::unique_ptr<coopa::gfx::pipeline::Shader> sky_vert_;
     std::unique_ptr<coopa::gfx::pipeline::Shader> sky_frag_;
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> sky_pipeline_;

@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
 /**
  * @file transparent_capture_pass.h
  * @brief Forward-shaded, depth-tested capture of transparent geometry -- a second reflection
@@ -41,8 +40,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace passes {
-
-
 
 class TransparentCapturePass {
 public:

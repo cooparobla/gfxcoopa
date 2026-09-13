@@ -1,5 +1,3 @@
-#include <gfxcoopa/engine/targets/gbuffer_target.h>
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
 /**
  * @file deferred_lighting_pass.h
  * @brief Deferred lighting pass header for gfxcoopa.
@@ -27,8 +25,6 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
-
-
 class DeferredLightingPass {
 public:
     DeferredLightingPass(coopa::gfx::core::Device& device,
@@ -41,7 +37,7 @@ public:
                          const std::string& frag_spv,
                          ExtraSets extra = {},
                          std::vector<coopa::gfx::pipeline::PushConstantRange> pc_ranges = {})
-        : device_(device), extra_(std::move(extra))
+        : extra_(std::move(extra))
     {
         extra_.validate("DeferredLightingPass");
 
@@ -186,8 +182,6 @@ private:
 
         cmd.draw(3); // Fullscreen triangle
     }
-
-    coopa::gfx::core::Device& device_;
 
     std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;

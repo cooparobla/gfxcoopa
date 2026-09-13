@@ -1,5 +1,3 @@
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
-#include <gfxcoopa/engine/util/ssao_kernel.h>
 /**
  * @file ssao_pass.h
  * @brief Screen-Space Ambient Occlusion: world-space hemisphere sampling, temporal resolve, and
@@ -34,8 +32,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace passes {
-
-
 
 /// Bundles three sub-stages behind one object -- raw hemisphere sample, temporal resolve, and a
 /// bilateral blur -- the same multi-stage-bundling shape SsrPass uses for its raymarch/resolve/

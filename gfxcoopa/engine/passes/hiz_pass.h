@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
 /**
  * @file hiz_pass.h
  * @brief Hierarchical Z-Buffer (Hi-Z) Depth Pyramid Generation Pass.
@@ -30,8 +29,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace passes {
-
-
 
 class HiZPass {
 public:

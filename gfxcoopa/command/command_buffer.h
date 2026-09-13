@@ -337,24 +337,21 @@ public:
 
     // --- Image state transitions, copies, and blits ---
     //
-    // These give CommandBuffer everywhere raw vkCmdPipelineBarrier /
-    // vkCmdCopy*/vkCmdBlitImage calls were previously needed downstream
-    // (screenshot readback, depth-buffer barriers, texture uploads).
-    // handle() below stays available for anything not yet covered here.
+    // Covers the barrier/copy/blit work a consumer needs for screenshot
+    // readback, depth-buffer barriers and texture uploads without naming a
+    // Vk* type. handle() stays available for anything not covered here.
 
     /**
      * @brief Transitions an image to a new TextureUsage, inferring the
      * correct access/pipeline-stage masks (and, via the image's own
      * Format, the correct aspect mask) automatically.
      *
-     * Unlike memory::Image::transition_layout() (which takes an explicit
-     * "from" layout the caller must track correctly themselves), this reads
-     * the image's current usage via memory::Image::current_usage() and
-     * updates it afterward -- the "from" argument that caused every
-     * pre-seal hand-rolled-barrier bug simply does not exist here.
+     * There is no "from" parameter: the source usage is read from
+     * memory::Image::current_usage() and updated afterward, so the caller
+     * cannot describe a transition the image is not actually in.
      *
      * @param image The image to transition. Must be a single-mip,
-     *   single-layer image (memory::Image's only supported shape today).
+     *   single-layer image (memory::Image's only supported shape).
      * @param to    The usage to transition into.
      */
     void transition(memory::Image& image, TextureUsage to) {

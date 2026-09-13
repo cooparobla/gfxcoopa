@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
 /**
  * @file gbuffer_pipeline.h
  * @brief Pipeline for rendering geometry into G-Buffer attachments.
@@ -26,8 +25,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace passes {
-
-
 
 class GBufferPipeline {
 public:

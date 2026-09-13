@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
 /**
  * @file smaa_pass.h
  * @brief Subpixel Morphological Anti-Aliasing (SMAA 1x) post-processing pass for gfxcoopa.
@@ -30,8 +29,6 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
-
-
 class SmaaPass {
 public:
     struct EdgePush {
@@ -56,7 +53,7 @@ public:
              uint32_t width, uint32_t height,
              const util::Sampler& linear_sampler,
              const coopa::gfx::pipeline::ShaderLibrary& shaders)
-        : device_(device), allocator_(allocator), width_(width), height_(height)
+        : allocator_(allocator), width_(width), height_(height)
     {
         smaa_textures_ = std::make_unique<util::SmaaTextures>(device, allocator, cmd_pool);
 
@@ -203,7 +200,6 @@ public:
     }
 
 private:
-    coopa::gfx::core::Device&      device_;
     coopa::gfx::memory::Allocator& allocator_;
     uint32_t width_;
     uint32_t height_;

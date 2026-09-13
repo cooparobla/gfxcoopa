@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
 /**
  * @file present_pass.h
  * @brief Blits final post-processed (Tonemapped + FXAA) offscreen color target to the Vulkan swapchain.
@@ -25,8 +24,6 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
-
-
 class PresentPass {
 public:
     PresentPass(coopa::gfx::core::Device& device,
@@ -34,7 +31,6 @@ public:
                 const util::Sampler& linear_sampler,
                 const std::string& vert_spv,
                 const std::string& frag_spv)
-        : device_(device)
     {
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -82,8 +78,6 @@ public:
     }
 
 private:
-    coopa::gfx::core::Device& device_;
-
     std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> desc_layout_;

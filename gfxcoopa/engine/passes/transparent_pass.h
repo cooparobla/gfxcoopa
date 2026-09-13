@@ -1,4 +1,3 @@
-#include <gfxcoopa/engine/util/fullscreen_quad.h>
 /**
  * @file transparent_pass.h
  * @brief Forward BLEND transparent geometry pass.
@@ -37,8 +36,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace passes {
-
-
 
 class TransparentPass {
 public:

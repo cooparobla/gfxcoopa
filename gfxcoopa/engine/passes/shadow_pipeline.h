@@ -25,9 +25,6 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
-
-
-
 /**
  * @struct DirectionalShadowPushConstants
  * @brief Push constant block for directional shadow depth pass (68 bytes).

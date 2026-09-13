@@ -285,9 +285,9 @@ inline BarrierMasks barrier_masks_for(TextureUsage u, bool is_depth_format) {
 }
 
 /// @brief The aspect mask for an image of the given Format -- depth(+stencil)
-/// for depth formats, color otherwise. This is what
-/// memory::Image::transition_layout hardcoded to COLOR before the seal,
-/// which is exactly why a hand-rolled depth barrier was needed downstream.
+/// for depth formats, color otherwise. Deriving it from the format is what
+/// lets barriers, views and copies handle a depth image without the caller
+/// having to supply an aspect mask by hand.
 inline VkImageAspectFlags aspect_mask_for(Format format) {
     if (!is_depth(format)) return VK_IMAGE_ASPECT_COLOR_BIT;
     VkImageAspectFlags mask = VK_IMAGE_ASPECT_DEPTH_BIT;
