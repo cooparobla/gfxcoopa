@@ -77,6 +77,23 @@ public:
         float sensor_width_mm = 36.0f;  ///< Resolved sensor width; sets the mm -> pixel scale.
         float aperture = 2.8f;          ///< f-stop N; aperture diameter = focal_length / N.
         float max_radius = 12.0f;       ///< |CoC| ceiling, in FULL-res pixels.
+        /// Half-width, in metres, of a band around the focal plane forced to zero CoC.
+        /// 0 is the pure thin-lens result. This is a DELIBERATE break from physical optics:
+        /// the physical sharp band is c*N*F(F-f)/f^2 and so collapses with the SQUARE of
+        /// focus distance, which no aperture or focal length can compensate for -- a subject
+        /// framed sharp at 11 m is ~90% defocused at 3 m. Set this to the subject's own
+        /// depth half-extent to keep it sharp at any distance (see toyengine's
+        /// PixelRenderPipeline::resolve_dof_focus_(), which fits it to the focus object's
+        /// bounds). The falloff OUTSIDE the band stays exactly physical -- see
+        /// gfx/dof_common.glsl's dof_signed_coc() for why it slides the depth rather than
+        /// widening a threshold.
+        float focus_range = 0.0f;
+        /// Plain multiplier on |CoC|, applied BEFORE the max_radius clamp. The blur-STRENGTH
+        /// dial, deliberately separate from both focus_range (which sets how WIDE the sharp
+        /// zone is) and max_radius (a safety ceiling -- see its own doc and config.yaml's
+        /// dof_max_radius comment for why using that as a strength dial was a bug). 0 is a
+        /// full DOF bypass.
+        float blur_scale = 1.0f;
         int   sample_count = 32;        ///< Spiral taps; clamped to [8, MAX_DOF_TAPS] in-shader.
         int   blade_count = 0;          ///< < 3 = perfect disc; else an N-sided polygonal iris.
         float blade_rotation_deg = 0.0f; ///< Iris rotation, degrees.
@@ -91,8 +108,9 @@ public:
         glm::vec4 camera;           // offset 16: near, far, is_perspective, max_radius (full-res px)
         glm::vec4 bokeh;            // offset 32: sample_count, blade_count, blade_rotation_rad, debug_view
         glm::vec2 inv_size;         // offset 48: 1/full_w, 1/full_h
+        glm::vec2 focus;            // offset 56: focus_range_m, blur_scale
     };
-    static_assert(sizeof(PushConstants) == 56,
+    static_assert(sizeof(PushConstants) == 64,
                  "PushConstants must match gfx/dof_common.glsl's DofPush byte-for-byte");
 
     /**
@@ -197,6 +215,11 @@ public:
                                glm::radians(params.blade_rotation_deg),
                                params.debug_view ? 1.0f : 0.0f);
         pc.inv_size = glm::vec2(1.0f / static_cast<float>(full_width_), 1.0f / static_cast<float>(full_height_));
+        // Floored rather than trusted: a negative range would make dof_signed_coc()'s depth
+        // slide move AWAY from the focal plane (inverting the falloff), and a negative scale
+        // would flip near and far field -- same class of bad-config guard as the aperture and
+        // sensor_width floors above.
+        pc.focus = glm::vec2(std::max(params.focus_range, 0.0f), std::max(params.blur_scale, 0.0f));
 
         begin_stage_(cmd, coc_target_, *coc_);
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
@@ -215,7 +238,8 @@ public:
     }
 
     /// @brief The finished, defocused HDR image, at (full_width, full_height) --
-    /// bit-identical to the source wherever the CoC is under the 1px early-out.
+    /// bit-identical to the source wherever the CoC is under the 1px early-out AND
+    /// no near-field blur reaches that far (see dof_bokeh.frag's near-field dilation).
     coopa::gfx::TextureView result_view_typed() const { return result_target_.color_view_typed(); }
     /// @brief Sealed sibling of result_view_typed(), for PNG readback.
     coopa::gfx::memory::Image& result_image() const { return *result_target_.color_image_object(); }

@@ -37,6 +37,8 @@ layout(push_constant) uniform DofPush {
     vec4 bokeh;    // x: sample_count, y: blade_count (< 3 = disc), z: blade_rotation_rad,
                    // w: debug_view (>= 0.5 => true)
     vec2 inv_size; // 1/full_w, 1/full_h
+    vec2 focus;    // x: focus_range_m (half-width of the forced-sharp band),
+                   // y: blur_scale (|CoC| multiplier, applied before the clamp)
 } pc;
 
 #include <gfx/depth.glsl>
@@ -50,16 +52,45 @@ layout(push_constant) uniform DofPush {
 // camera can be aimed with focal_length_m >= focus_distance_m during scene setup
 // or a bad config value -- this must degrade to "no blur" rather than a NaN/Inf
 // that would poison the gather's tap weights.
+//
+// FOCUS RANGE (pc.focus.x, metres). Everything within that half-width of the focal
+// plane is forced to zero CoC. This is the one deliberately NON-physical term here,
+// and it exists because the physical sharp band is
+//     Delta = c * N * F(F - f) / f^2
+// i.e. it collapses with the SQUARE of focus distance: a subject comfortably sharp
+// at 11 m has ~8 cm of depth of field at 3 m and is almost entirely defocused. No
+// aperture or focal length fixes that -- every dial only rescales a curve that is
+// still quadratic in F -- so keeping a SUBJECT sharp across a zoom range needs a
+// band whose width does not depend on F at all. DofPass::Params::focus_range's own
+// doc covers how toyengine fits it to the focus object's bounds.
+//
+// The band is applied by SLIDING the depth toward the focal plane by `range`, not by
+// widening a threshold. That matters: at |d - F| = range + eps the numerator becomes
+// eps, so CoC leaves the band continuously at 0 and the physical falloff outside is
+// bit-for-bit the unshifted curve, just re-origined. A thresholded version would step
+// from 0 straight to the CoC at `range`, and dof_bokeh.frag/dof_composite.frag's
+// shared 1px sharp cutoff and 1->2px blend band both assume CoC is continuous across
+// that boundary -- a step there reintroduces exactly the dim ring at every focal-plane
+// silhouette that keeping those two thresholds in matching units was meant to remove.
+// `range >= 0` (DofPass::execute() floors it) also keeps the slid depth positive, so
+// the denominator guard below still covers the degenerate focus <= f case.
 float dof_signed_coc(float view_depth_m) {
     float f = pc.lens.y;
     float focus = pc.lens.x;
     float aperture_diameter = pc.lens.z;
 
-    float denom = view_depth_m * (focus - f);
+    float delta = view_depth_m - focus;
+    float range = pc.focus.x;
+    if (abs(delta) <= range) return 0.0;
+    float d = view_depth_m - sign(delta) * range;
+
+    float denom = d * (focus - f);
     if (abs(denom) < 1e-6) return 0.0;
 
-    float coc_m  = aperture_diameter * f * (view_depth_m - focus) / denom;
-    float coc_px = coc_m * pc.lens.w;
+    float coc_m  = aperture_diameter * f * (d - focus) / denom;
+    // blur_scale multiplies BEFORE the clamp, so lowering it actually reduces the blur
+    // instead of just moving which pixels sit at the ceiling.
+    float coc_px = coc_m * pc.lens.w * pc.focus.y;
     return clamp(coc_px, -pc.camera.w, pc.camera.w);
 }
 
