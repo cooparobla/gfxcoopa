@@ -42,6 +42,7 @@
 #include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/command/command_buffer.h>
+#include <gfxcoopa/engine/passes/extra_sets.h>
 #include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/engine/data/texture.h>
 #include <gfxcoopa/presentation/renderer.h>
@@ -74,6 +75,20 @@ struct TexturedQuad2DDesc {
     uint32_t initial_max_verts   = 4096;
     uint32_t initial_max_indices = 6144;
     uint32_t max_textures        = 256;
+    /**
+     * Optional app-supplied descriptor sets, appended after this pass's own texture set
+     * (set 0) -- e.g. uicoopa's UiWorldPass taking a scene depth texture at set 1 so it
+     * can discard world-space UI fragments behind opaque geometry. Default-constructed
+     * ExtraSets is empty(), which leaves the pipeline layout byte-identical to before
+     * this field existed.
+     *
+     * Appended to EVERY pipeline this pass builds -- the stock one and every
+     * add_variant() -- deliberately, not per variant: draw() implementations here push
+     * their constants ONCE and then rebind pipelines per batch, which is only valid while
+     * all variants stay layout-compatible. A per-variant set would silently invalidate
+     * push constants on the first variant switch.
+     */
+    ExtraSets extra;
 };
 
 /**
@@ -109,6 +124,7 @@ public:
             throw std::runtime_error("[gfxcoopa] TexturedQuad2DPass: vertex_stride and "
                                      "push_constant_size are required");
         }
+        desc_.extra.validate("TexturedQuad2DPass");
 
         desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
@@ -163,6 +179,18 @@ public:
     void bind(coopa::gfx::command::CommandBuffer& cmd, const std::string& name) const {
         auto it = variants_.find(name);
         cmd.bind_pipeline(it != variants_.end() ? *it->second.pipeline : *pipeline_);
+    }
+
+    /**
+     * @brief Binds the caller's ExtraSets (if any), starting at set index 1 -- immediately
+     *        after this pass's own texture set.
+     *
+     * No-op when desc.extra was left empty. Must be called AFTER bind()/bind(name), which
+     * is what caches the pipeline layout on the CommandBuffer the sealed
+     * bind_descriptor_set() overload needs -- see extra_sets.h.
+     */
+    void bind_extra(coopa::gfx::command::CommandBuffer& cmd) const {
+        if (desc_.extra.bind) desc_.extra.bind(cmd, 1u);
     }
 
     /** @brief The 1x1 fallback texture's view -- callers seed their draw-list's default texture with this. */
@@ -237,6 +265,9 @@ private:
         pd.shaders = {&vert, &frag};
         pd.vertex  = desc_.vertex;
         pd.descriptor_layouts = {desc_layout_.get()};
+        for (const coopa::gfx::pipeline::DescriptorSetLayout* extra : desc_.extra.layouts) {
+            pd.descriptor_layouts.push_back(extra);
+        }
         pd.push_constants = {{coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment,
                               0, desc_.push_constant_size}};
         pd.raster.cull  = coopa::gfx::CullMode::None;

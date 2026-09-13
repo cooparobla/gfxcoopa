@@ -39,7 +39,8 @@ namespace pipeline {
  */
 enum class BlendMode {
     None,                ///< No blending (defers to PipelineConfig::blending).
-    Alpha,                ///< Straight alpha: src*srcA + dst*(1-srcA). Same as blending=true today.
+    Alpha,                ///< Straight alpha: src*srcA + dst*(1-srcA). Same as blending=true today. Destination alpha is REPLACED by the source's.
+    AlphaOver,            ///< Straight alpha like Alpha, but destination alpha ACCUMULATES coverage: dstA*(1-srcA) + srcA. For drawing into a transparent-cleared layer that is itself composited later; identical to Alpha over an opaque destination.
     PremultipliedAlpha,   ///< src*1 + dst*(1-srcA). For premultiplied-alpha source data (e.g. a sprite atlas composited with coverage baked in).
     Additive,             ///< src*srcA + dst*1. Glow/particle-style accumulation.
     Multiply,             ///< src*dst (color), dst unchanged (alpha). Tinting/shadow-style darkening.
@@ -526,6 +527,23 @@ private:
             blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
             blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::AlphaOver:
+            // Same colour equation as Alpha above -- the only difference is dstAlpha. Alpha's
+            // VK_BLEND_FACTOR_ZERO leaves the attachment's alpha equal to the LAST fragment's,
+            // which is meaningless as a coverage mask: an opaque glyph drawn under a translucent
+            // panel would end up stamping the panel's alpha over it. ONE_MINUS_SRC_ALPHA makes
+            // alpha accumulate the same way colour does, so the layer can be composited with a
+            // premultiplied "over" afterwards. Over an OPAQUE destination the two are identical
+            // (1*srcA + 1*(1-srcA) == 1), which is why switching an existing pass to this mode
+            // is a no-op unless it draws into a transparent-cleared target.
+            blend_attachment.blendEnable         = VK_TRUE;
+            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend_attachment.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
             break;
         case BlendMode::PremultipliedAlpha:
