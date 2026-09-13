@@ -11,6 +11,12 @@
  * Data is uploaded into host-visible vertex + index buffers via the
  * Buffer::vertex() and Buffer::index() factory methods. Since these are
  * already host-accessible (mapped), no staging copy is needed.
+ *
+ * A Mesh can also be built from in-memory arrays (from_arrays()) and, when
+ * created with more than one vertex buffer, rewritten every frame
+ * (update_vertices()) -- the path a CPU-simulated surface such as cloth needs.
+ * See from_arrays()'s doc for why that takes a buffer COUNT rather than
+ * flipping a "dynamic" bool.
  */
 
 #ifndef GFXCOOPA_ENGINE_DATA_MESH_H
@@ -31,6 +37,7 @@
 #include <vector>
 #include <array>
 #include <stdexcept>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 
@@ -338,6 +345,9 @@ public:
         vb.upload(vertices.data(), vb_size);
         ib.upload(indices.data(),  ib_size);
 
+        std::vector<memory::Buffer> vbs;
+        vbs.push_back(std::move(vb)); // a YAML-loaded mesh is static: exactly one buffer
+
         // Object-space AABB over the triangulated vertex stream (not the raw
         // `positions` array, which can contain entries no face references) --
         // this is exactly the geometry that gets drawn. Used by callers that
@@ -350,10 +360,116 @@ public:
             bounds_max = glm::max(bounds_max, v.position);
         }
 
-        return Mesh(std::move(vb), std::move(ib),
+        return Mesh(std::move(vbs), std::move(ib),
                     static_cast<uint32_t>(indices.size()),
+                    static_cast<uint32_t>(vertices.size()),
                     bounds_min, bounds_max);
     }
+
+    /**
+     * @brief Constructs a Mesh from already-interleaved vertex and index arrays.
+     *
+     * Unlike from_node(), which unwelds every triangle corner into its own Vertex, this keeps the
+     * caller's indexed topology exactly as given. That is the whole point for a simulated surface:
+     * a cloth with one Vertex per particle rewrites `particle_count` vertices per frame, where an
+     * unwelded copy would rewrite six times that and then have to average the duplicates' normals
+     * back together to avoid faceting.
+     *
+     * `buffer_count` is a COUNT, not a `bool dynamic`, because the correct number is a property of
+     * the presentation loop (how many frames it keeps in flight), not of the mesh -- and the
+     * caller is the only one who knows it. Pass 1 for a mesh that is uploaded once; pass
+     * `Context::frames_in_flight()` for one that is rewritten per frame. A single shared buffer
+     * would be wrong for the latter: this engine's pipeline never waits per frame, so a rewrite
+     * would race a still-in-flight GPU read of the previous frame -- the same reason
+     * toyengine's DebugLinePass keeps per-frame-in-flight buffers.
+     *
+     * @param device       Vulkan logical device.
+     * @param allocator    VMA allocator.
+     * @param vertices     Interleaved vertex data; must be non-empty.
+     * @param indices      32-bit index data; must be non-empty.
+     * @param buffer_count Number of vertex buffers to allocate (clamped to at least 1).
+     * @return A new GPU-resident Mesh.
+     * @throws std::runtime_error if either array is empty.
+     */
+    static Mesh from_arrays(core::Device&               device,
+                            memory::Allocator&          allocator,
+                            const std::vector<Vertex>&  vertices,
+                            const std::vector<uint32_t>& indices,
+                            uint32_t                    buffer_count = 1)
+    {
+        if (vertices.empty() || indices.empty()) {
+            throw std::runtime_error("[Mesh] from_arrays() needs non-empty vertex and index arrays.");
+        }
+
+        const VkDeviceSize vb_size = sizeof(Vertex) * vertices.size();
+        const VkDeviceSize ib_size = sizeof(uint32_t) * indices.size();
+        const uint32_t count = (buffer_count < 1u) ? 1u : buffer_count;
+
+        std::vector<memory::Buffer> vbs;
+        vbs.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            auto vb = memory::Buffer::vertex(device, allocator, vb_size);
+            vb.upload(vertices.data(), vb_size);   // seed every slot, so frame 0 draws correctly
+            vbs.push_back(std::move(vb));           // whichever slot it happens to land on
+        }
+
+        auto ib = memory::Buffer::index(device, allocator, ib_size);
+        ib.upload(indices.data(), ib_size);
+
+        glm::vec3 bounds_min(std::numeric_limits<float>::max());
+        glm::vec3 bounds_max(std::numeric_limits<float>::lowest());
+        for (const auto& v : vertices) {
+            bounds_min = glm::min(bounds_min, v.position);
+            bounds_max = glm::max(bounds_max, v.position);
+        }
+
+        return Mesh(std::move(vbs), std::move(ib),
+                    static_cast<uint32_t>(indices.size()),
+                    static_cast<uint32_t>(vertices.size()),
+                    bounds_min, bounds_max);
+    }
+
+    /**
+     * @brief Rewrites this frame's vertex buffer and makes it the one bind() will use.
+     *
+     * Call exactly once per frame, before the frame's command buffer is recorded, passing that
+     * frame's in-flight slot (Context::current_frame()). Writing into the slot the GPU is not
+     * currently reading is what makes this safe without a per-frame fence wait.
+     *
+     * The object-space bounds are recomputed here rather than left at their creation values: the
+     * directional shadow pass fits its ortho box to bounds_min()/bounds_max(), so a cloth that has
+     * drooped well outside its rest-pose box would have its shadow clipped.
+     *
+     * @param data       Vertices to upload; must hold at least `count` entries.
+     * @param count      Number of vertices to write. Must not exceed vertex_count().
+     * @param frame_slot In-flight frame index; taken modulo the buffer count, so passing a
+     *                   monotonically increasing frame counter also works.
+     * @throws std::runtime_error if `count` exceeds the allocated vertex count.
+     */
+    void update_vertices(const Vertex* data, std::size_t count, uint32_t frame_slot) {
+        if (!data || count == 0) return;
+        if (count > vertex_count_) {
+            throw std::runtime_error("[Mesh] update_vertices() exceeds the allocated vertex count.");
+        }
+        const uint32_t slot = frame_slot % static_cast<uint32_t>(vertex_buffers_.size());
+        vertex_buffers_[slot].upload(data, sizeof(Vertex) * count);
+        active_slot_ = slot;
+
+        glm::vec3 lo(std::numeric_limits<float>::max());
+        glm::vec3 hi(std::numeric_limits<float>::lowest());
+        for (std::size_t i = 0; i < count; ++i) {
+            lo = glm::min(lo, data[i].position);
+            hi = glm::max(hi, data[i].position);
+        }
+        bounds_min_ = lo;
+        bounds_max_ = hi;
+    }
+
+    /** @brief True if this mesh has more than one vertex buffer, i.e. is safe to rewrite per frame. */
+    bool is_dynamic() const { return vertex_buffers_.size() > 1; }
+
+    /** @brief Number of vertices the vertex buffers were allocated for. */
+    uint32_t vertex_count() const { return vertex_count_; }
 
     // --- Draw calls ---
 
@@ -362,7 +478,9 @@ public:
      * @param cmd Command buffer to record into.
      */
     void bind(command::CommandBuffer& cmd) const {
-        cmd.bind_vertex_buffer(vertex_buffer_);
+        // A static mesh has exactly one slot and active_slot_ never leaves 0, so this is the same
+        // single-buffer bind it always was; only a dynamic mesh ever advances the slot.
+        cmd.bind_vertex_buffer(vertex_buffers_[active_slot_]);
         cmd.bind_index_buffer(index_buffer_);
     }
 
@@ -407,20 +525,30 @@ public:
     Mesh& operator=(const Mesh&) = delete;
 
 private:
-    Mesh(memory::Buffer vb, memory::Buffer ib, uint32_t index_count,
-         const glm::vec3& bounds_min, const glm::vec3& bounds_max)
-        : vertex_buffer_(std::move(vb)),
+    Mesh(std::vector<memory::Buffer> vbs, memory::Buffer ib, uint32_t index_count,
+         uint32_t vertex_count, const glm::vec3& bounds_min, const glm::vec3& bounds_max)
+        : vertex_buffers_(std::move(vbs)),
           index_buffer_(std::move(ib)),
           index_count_(index_count),
+          vertex_count_(vertex_count),
           bounds_min_(bounds_min),
           bounds_max_(bounds_max)
     {}
 
-    memory::Buffer vertex_buffer_; /**< Interleaved vertex data. */
-    memory::Buffer index_buffer_;  /**< 32-bit index data. */
+    /** @brief One entry for a static mesh; one per frame-in-flight for a dynamic one. A vector
+     *         rather than a fixed array so a static mesh pays for exactly one buffer -- most
+     *         meshes in a scene are static, and triple-buffering all of them would waste GPU
+     *         memory proportional to the whole scene. */
+    std::vector<memory::Buffer> vertex_buffers_;
+    memory::Buffer index_buffer_;  /**< 32-bit index data; topology is fixed, so never per-frame. */
     uint32_t       index_count_;   /**< Total number of indices to draw. */
+    uint32_t       vertex_count_;  /**< Vertices each buffer was allocated for. */
     glm::vec3      bounds_min_;    /**< Object-space AABB minimum corner. */
     glm::vec3      bounds_max_;    /**< Object-space AABB maximum corner. */
+
+    /** @brief Which slot bind() uses. Mutable-free: only update_vertices() advances it, and that
+     *         runs before the frame is recorded, never during. */
+    uint32_t       active_slot_ = 0;
 };
 
 } // namespace data
