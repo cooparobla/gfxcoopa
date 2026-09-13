@@ -12,11 +12,10 @@
 #include <cstdint>
 
 #include <gfxcoopa/core/device.h>
-#include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/pipeline/render_pass.h>
-#include <gfxcoopa/pipeline/descriptor.h>
-#include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
+#include <gfxcoopa/types/texture_view.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/engine/util/sampler.h>
 
 namespace coopa {
@@ -36,54 +35,35 @@ public:
         float   edge_threshold_min = 0.0312f;
     };
 
+    /**
+     * @brief Builds the tonemapping pipeline and its descriptor set.
+     * @param device         Logical device.
+     * @param swapchain_pass Render pass this writes into.
+     * @param linear_sampler Accepted for signature compatibility and unused;
+     *   the sampler that matters is the one passed to set_source_image().
+     * @param vert_spv       Fullscreen-triangle vertex shader.
+     * @param frag_spv       Tonemap (+ optional FXAA) fragment shader.
+     */
     ToneMappingPass(coopa::gfx::core::Device& device,
                     coopa::gfx::pipeline::RenderPass& swapchain_pass,
                     const util::Sampler& linear_sampler,
                     const std::string& vert_spv,
                     const std::string& frag_spv)
-        :           exposure_(1.0f),
-          fxaa_enabled_(1),
-          subpixel_quality_(0.75f),
-          edge_threshold_(0.166f),
-          edge_threshold_min_(0.0312f)
+        : stage_(device, swapchain_pass, describe(vert_spv, frag_spv))
     {
-        vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
-        frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-
-        // Descriptor set layout: Binding 0 = sampler2D (HDR image)
-        desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .build(device)
-        );
-
-        desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder()
-                .add_sets(*desc_layout_, 1)
-                .build(device)
-        );
-
-        desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(
-            device, *desc_pool_, *desc_layout_
-        );
-
-        // Pipeline config: backface cull off, no depth test, no blending
-        coopa::gfx::pipeline::PipelineDesc desc;
-        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
-        desc.vertex  = coopa::gfx::VertexLayout::none();
-        desc.raster.cull = coopa::gfx::CullMode::None;
-        desc.depth.test  = false;
-        desc.depth.write = false;
-        desc.descriptor_layouts = {desc_layout_.get()};
-        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, swapchain_pass, desc);
-
         (void)linear_sampler;
     }
 
+    ToneMappingPass(const ToneMappingPass&) = delete;
+    ToneMappingPass& operator=(const ToneMappingPass&) = delete;
+
+    /**
+     * @brief Points the pass at the HDR image to tonemap.
+     * @param hdr_view       The HDR color image.
+     * @param linear_sampler Sampler used to read it.
+     */
     void set_source_image(coopa::gfx::TextureView hdr_view, const util::Sampler& linear_sampler) {
-        desc_set_->bind_image(0, hdr_view, linear_sampler);
+        stage_.set().bind_image(0, hdr_view, linear_sampler);
     }
 
     void set_exposure(float exposure) {
@@ -101,13 +81,13 @@ public:
         edge_threshold_min_ = threshold_min;
     }
 
+    /**
+     * @brief Records the fullscreen tonemap draw.
+     * @param cmd        Command buffer, inside the target render pass.
+     * @param viewport_w Target width in pixels.
+     * @param viewport_h Target height in pixels.
+     */
     void draw(coopa::gfx::command::CommandBuffer& cmd, uint32_t viewport_w, uint32_t viewport_h) const {
-        cmd.bind_pipeline(*pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
-        cmd.set_scissor(0, 0, viewport_w, viewport_h);
-
-        cmd.bind_descriptor_set(*desc_set_, 0);
-
         PushConstants pc{
             exposure_,
             static_cast<float>(viewport_w),
@@ -117,24 +97,28 @@ public:
             edge_threshold_,
             edge_threshold_min_
         };
-        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
-
-        cmd.draw(3); // Fullscreen triangle
+        stage_.draw(cmd, viewport_w, viewport_h, coopa::gfx::ShaderStage::Fragment, pc);
     }
 
 private:
+    /// @brief One sampled HDR image at binding 0, plus the fragment push constants.
+    static FullscreenStageDesc describe(const std::string& vert_spv, const std::string& frag_spv) {
+        FullscreenStageDesc d;
+        d.vert_spv = vert_spv;
+        d.frag_spv = frag_spv;
+        d.owned_sets = {{{0, coopa::gfx::DescriptorType::CombinedImageSampler,
+                          coopa::gfx::ShaderStage::Fragment, 1}}};
+        d.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
+        return d;
+    }
+
     float   exposure_;
     int32_t fxaa_enabled_;
     float   subpixel_quality_;
     float   edge_threshold_;
     float   edge_threshold_min_;
 
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> desc_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      desc_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       desc_set_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline>           pipeline_;
+    FullscreenStage stage_;
 };
 
 } // namespace passes

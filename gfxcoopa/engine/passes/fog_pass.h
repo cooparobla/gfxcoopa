@@ -21,11 +21,9 @@
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/buffer.h>
-#include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/pipeline/render_pass.h>
-#include <gfxcoopa/pipeline/descriptor.h>
-#include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/types/texture_view.h>
 #include <gfxcoopa/engine/util/sampler.h>
 
@@ -52,43 +50,10 @@ public:
             const coopa::gfx::memory::Buffer& fog_ubo,
             const std::string& vert_spv,
             const std::string& frag_spv)
-        : nearest_sampler_(coopa::gfx::engine::util::Sampler::nearest(device))
+        : nearest_sampler_(coopa::gfx::engine::util::Sampler::nearest(device)),
+          stage_(device, target_pass, describe(vert_spv, frag_spv))
     {
-        vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
-        frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-
-        // Set 0: scene colour + G-buffer normal/position, all fragment-stage combined samplers.
-        coopa::gfx::pipeline::DescriptorLayoutBuilder image_layout_builder;
-        for (uint32_t i = 0; i < 3; ++i) {
-            image_layout_builder.combined_sampler(i, coopa::gfx::ShaderStage::Fragment);
-        }
-        image_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(image_layout_builder.build(device));
-
-        // Set 1: the FogUBO.
-        ubo_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .uniform_buffer(0, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-
-        desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder()
-                .add_sets(*image_layout_, 1)
-                .add_sets(*ubo_layout_, 1)
-                .build(device));
-
-        image_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *image_layout_);
-        ubo_set_   = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *ubo_layout_);
-        ubo_set_->bind_buffer(0, fog_ubo);
-
-        coopa::gfx::pipeline::PipelineDesc desc;
-        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
-        desc.vertex  = coopa::gfx::VertexLayout::none();
-        desc.raster.cull = coopa::gfx::CullMode::None;
-        desc.depth.test  = false;
-        desc.depth.write = false;
-        desc.descriptor_layouts = {image_layout_.get(), ubo_layout_.get()};
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, target_pass, desc);
+        stage_.set(1).bind_buffer(0, fog_ubo);
     }
 
     FogPass(const FogPass&) = delete;
@@ -106,30 +71,35 @@ public:
      */
     void set_source_images(coopa::gfx::TextureView scene_color, coopa::gfx::TextureView g_normal,
                            coopa::gfx::TextureView g_position, const coopa::gfx::engine::util::Sampler& linear_sampler) {
-        image_set_->bind_image(0, scene_color, linear_sampler);
-        image_set_->bind_image(1, g_normal, nearest_sampler_);
-        image_set_->bind_image(2, g_position, nearest_sampler_);
+        stage_.set(0).bind_image(0, scene_color, linear_sampler);
+        stage_.set(0).bind_image(1, g_normal, nearest_sampler_);
+        stage_.set(0).bind_image(2, g_position, nearest_sampler_);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd, uint32_t viewport_w, uint32_t viewport_h) const {
-        cmd.bind_pipeline(*pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
-        cmd.set_scissor(0, 0, viewport_w, viewport_h);
-        cmd.bind_descriptor_set(*image_set_, 0);
-        cmd.bind_descriptor_set(*ubo_set_, 1);
-        cmd.draw(3);
+        stage_.bind(cmd, viewport_w, viewport_h);
+        stage_.draw(cmd);
     }
 
 private:
-    coopa::gfx::engine::util::Sampler                            nearest_sampler_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> image_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> ubo_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      desc_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       image_set_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       ubo_set_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline>            pipeline_;
+    /// @brief Set 0: scene colour + G-buffer normal/position. Set 1: the pass's UBO.
+    static FullscreenStageDesc describe(const std::string& vert_spv, const std::string& frag_spv) {
+        using coopa::gfx::DescriptorType;
+        using coopa::gfx::ShaderStage;
+        FullscreenStageDesc d;
+        d.vert_spv = vert_spv;
+        d.frag_spv = frag_spv;
+        d.owned_sets = {
+            {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
+             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
+             {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
+            {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
+        };
+        return d;
+    }
+
+    coopa::gfx::engine::util::Sampler nearest_sampler_;
+    FullscreenStage                   stage_;
 };
 
 } // namespace passes

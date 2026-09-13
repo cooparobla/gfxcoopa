@@ -21,12 +21,10 @@
 #include <string>
 
 #include <gfxcoopa/core/device.h>
-#include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/pipeline/render_pass.h>
-#include <gfxcoopa/pipeline/descriptor.h>
-#include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/types/texture_view.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/engine/util/sampler.h>
 
 namespace coopa {
@@ -58,56 +56,42 @@ public:
              coopa::gfx::pipeline::RenderPass& target_pass,
              const std::string& vert_spv,
              const std::string& frag_spv)
-    {
-        vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
-        frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-
-        layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-
-        desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*layout_, 1).build(device));
-        set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *layout_);
-
-        coopa::gfx::pipeline::PipelineDesc desc;
-        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
-        desc.vertex  = coopa::gfx::VertexLayout::none();
-        desc.raster.cull = coopa::gfx::CullMode::None;
-        desc.depth.test  = false;
-        desc.depth.write = false;
-        desc.descriptor_layouts = {layout_.get()};
-        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, target_pass, desc);
-    }
+        : stage_(device, target_pass, describe(vert_spv, frag_spv))
+    {}
 
     FxaaPass(const FxaaPass&) = delete;
     FxaaPass& operator=(const FxaaPass&) = delete;
 
     /** @brief Rebinds the LDR source image (linear-filtered, matching FXAA's own edge-search taps). */
     void set_source_image(coopa::gfx::TextureView color_view, const coopa::gfx::engine::util::Sampler& linear_sampler) {
-        set_->bind_image(0, color_view, linear_sampler);
+        stage_.set().bind_image(0, color_view, linear_sampler);
     }
 
+    /**
+     * @brief Records the fullscreen FXAA resolve.
+     * @param cmd        Command buffer, inside the target render pass.
+     * @param pc         Screen size and the three FXAA thresholds.
+     * @param viewport_w Target width in pixels.
+     * @param viewport_h Target height in pixels.
+     */
     void draw(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& pc,
               uint32_t viewport_w, uint32_t viewport_h) const {
-        cmd.bind_pipeline(*pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
-        cmd.set_scissor(0, 0, viewport_w, viewport_h);
-        cmd.bind_descriptor_set(*set_, 0);
-        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
-        cmd.draw(3);
+        stage_.draw(cmd, viewport_w, viewport_h, coopa::gfx::ShaderStage::Fragment, pc);
     }
 
 private:
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      desc_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       set_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline>            pipeline_;
+    /// @brief One sampled LDR image at binding 0, plus the fragment push constants.
+    static FullscreenStageDesc describe(const std::string& vert_spv, const std::string& frag_spv) {
+        FullscreenStageDesc d;
+        d.vert_spv = vert_spv;
+        d.frag_spv = frag_spv;
+        d.owned_sets = {{{0, coopa::gfx::DescriptorType::CombinedImageSampler,
+                          coopa::gfx::ShaderStage::Fragment, 1}}};
+        d.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
+        return d;
+    }
+
+    FullscreenStage stage_;
 };
 
 } // namespace passes
