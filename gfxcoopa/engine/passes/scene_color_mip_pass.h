@@ -18,7 +18,7 @@
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/command/command_buffer.h>
-#include <gfxcoopa/pipeline/pipeline.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/pipeline/descriptor.h>
@@ -57,9 +57,6 @@ public:
         // 1. Shaders. vert_spv is expected to be hiz_downsample.vert.spv -- it is a
         // byte-identical fullscreen-triangle generator to every other pass in this pipeline,
         // so no new vertex shader is needed here.
-        vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
-        frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-
         // 2. Sampler. max_lod and mipmap_mode are set in recreate() once mip_levels_ is known --
         // a sampler with maxLod = 0 silently clamps every explicit-LOD read back to mip 0 (the
         // exact trap documented in hiz_pass.h), and MIPMAP_MODE_NEAREST would make the cone LOD
@@ -76,23 +73,16 @@ public:
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         );
 
-        // 4. Descriptor Set Layout (Set 0: Binding 0 input colour)
-        desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-
-        // 5. Pipeline Configuration
-        coopa::gfx::pipeline::PipelineDesc desc;
-        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
-        desc.vertex  = coopa::gfx::VertexLayout::none();
-        desc.raster.cull = coopa::gfx::CullMode::None;
-        desc.depth.test  = false;
-        desc.depth.write = false;
-        desc.descriptor_layouts = {desc_layout_.get()};
-        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, *render_pass_, desc);
+        // One sampled image at binding 0 (the previous mip), plus the fragment push
+        // constants. One set per mip level, reallocated by rebuild_sets() whenever the
+        // chain length changes; the pipeline is built once and stays compatible.
+        FullscreenStageDesc sd;
+        sd.vert_spv = vert_spv;
+        sd.frag_spv = frag_spv;
+        sd.owned_sets = {{{0, coopa::gfx::DescriptorType::CombinedImageSampler,
+                           coopa::gfx::ShaderStage::Fragment, 1}}};
+        sd.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
+        stage_ = std::make_unique<FullscreenStage>(device, *render_pass_, sd);
     }
 
     ~SceneColorMipPass() {
@@ -181,29 +171,20 @@ public:
             GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb_info, nullptr, &mip_framebuffers_[m]));
         }
 
-        // Create Descriptor Pool & Descriptor Sets
-        desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*desc_layout_, mip_levels_).build(device_));
-
-        desc_sets_.resize(mip_levels_);
-        for (uint32_t m = 0; m < mip_levels_; ++m) {
-            desc_sets_[m] = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(
-                device_, *desc_pool_, *desc_layout_
-            );
-        }
+        stage_->rebuild_sets(mip_levels_);
     }
 
     void update_descriptors(coopa::gfx::TextureView scene_color_view) {
         if (mip_levels_ == 0) return;
         // Level 0 samples the deferred-lit HDR scene colour (post skybox).
-        desc_sets_[0]->bind_image(0, scene_color_view, *sampler_);
+        stage_->set(0, 0).bind_image(0, scene_color_view, *sampler_);
 
         // Level m >= 1 samples mip_views_[m-1] -- mip_views_ itself stays a raw
         // std::vector<VkImageView> (part of the mip-chain machinery with no sealed
         // equivalent), wrapped per-use via detail::wrap() since this is gfxcoopa's own
         // internal code (the leak gate only scopes consumer repos).
         for (uint32_t m = 1; m < mip_levels_; ++m) {
-            desc_sets_[m]->bind_image(0, coopa::gfx::detail::wrap(mip_views_[m - 1]), *sampler_);
+            stage_->set(0, m).bind_image(0, coopa::gfx::detail::wrap(mip_views_[m - 1]), *sampler_);
         }
     }
 
@@ -214,7 +195,7 @@ public:
         // already SHADER_READ_ONLY_OPTIMAL (matching the existing convention -- the SSR pass
         // already reads offscreen_target_->color_view() right after end() with no barrier).
 
-        cmd.bind_pipeline(*pipeline_);
+        cmd.bind_pipeline(stage_->pipeline());
 
         for (uint32_t m = 0; m < mip_levels_; ++m) {
             uint32_t mw = std::max(1u, width_ >> m);
@@ -243,9 +224,9 @@ public:
             cmd.set_viewport(0.0f, 0.0f, static_cast<float>(mw), static_cast<float>(mh));
             cmd.set_scissor(0, 0, mw, mh);
 
-            cmd.bind_descriptor_set(*desc_sets_[m], 0);
+            cmd.bind_descriptor_set(stage_->set(0, m), 0);
 
-            cmd.draw(3);
+            stage_->draw(cmd);
 
             cmd.end_render_pass();
 
@@ -301,8 +282,6 @@ private:
             color_image_ = VK_NULL_HANDLE;
             allocation_ = VK_NULL_HANDLE;
         }
-        desc_sets_.clear();
-        desc_pool_.reset();
     }
 
     coopa::gfx::core::Device&      device_;
@@ -320,13 +299,8 @@ private:
     std::vector<VkFramebuffer> mip_framebuffers_;
 
     std::unique_ptr<coopa::gfx::pipeline::RenderPass>          render_pass_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;
-    std::unique_ptr<util::Sampler>               sampler_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> desc_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      desc_pool_;
-    std::vector<std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> desc_sets_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline>           pipeline_;
+    std::unique_ptr<util::Sampler>   sampler_;
+    std::unique_ptr<FullscreenStage> stage_;
 };
 
 } // namespace passes

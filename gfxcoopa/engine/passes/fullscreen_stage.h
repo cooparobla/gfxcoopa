@@ -158,6 +158,34 @@ public:
     const pipeline::Pipeline& pipeline() const { return *pipeline_; }
 
     /**
+     * @brief Reallocates the owned descriptor sets for a new instance count,
+     * keeping the pipeline and shaders.
+     *
+     * For a pass whose instance count depends on something that changes at
+     * runtime -- a mip chain whose length follows the render resolution --
+     * where rebuilding the pipeline too would be wasted work. The layouts are
+     * unchanged, so the pipeline stays compatible.
+     *
+     * Every set is freshly allocated and unbound afterward; the caller must
+     * rebind each one. Safe only between frames, after a device wait_idle().
+     *
+     * @param instances New number of independent copies of the owned sets.
+     */
+    void rebuild_sets(uint32_t instances) {
+        if (layouts_.empty()) return;
+        sets_.clear();
+        pipeline::DescriptorPoolBuilder pool_builder;
+        for (const auto& layout : layouts_) pool_builder.add_sets(*layout, instances);
+        pool_ = std::make_unique<pipeline::DescriptorPool>(pool_builder.build(device_));
+        sets_.reserve(static_cast<size_t>(set_widths_) * instances);
+        for (uint32_t inst = 0; inst < instances; ++inst) {
+            for (const auto& layout : layouts_) {
+                sets_.push_back(std::make_unique<pipeline::DescriptorSet>(device_, *pool_, *layout));
+            }
+        }
+    }
+
+    /**
      * @brief Binds the pipeline, sets viewport and scissor to the full target,
      * and binds the stage's own descriptor set at set 0.
      *

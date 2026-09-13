@@ -37,7 +37,7 @@
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/memory/image.h>
-#include <gfxcoopa/pipeline/pipeline.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
@@ -98,41 +98,29 @@ public:
           h_target_(device, allocator, out_width, out_height),
           v_target_(device, allocator, out_width, out_height)
     {
-        vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
-        frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-
-        layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-
-        desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*layout_, 2).build(device));
-
-        h_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *layout_);
-        v_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *layout_);
-        // h_set_ samples the low-res source with NEAREST (the folded-upscale property);
-        // v_set_ samples h_target_'s already-full-resolution output with LINEAR, which is
-        // exact (not an approximation) at coc == 0: a bilinear tap sampled precisely at a
-        // texel centre returns that texel unchanged, so the sharp band survives both stages
-        // bit-identical to a plain nearest upscale -- see tilt_shift.frag's early-out.
-        h_set_->bind_image(0, source, nearest_sampler);
-        v_set_->bind_image(0, h_target_.color_view_typed(), linear_sampler_);
-
+        // Instance 0 is the horizontal stage, instance 1 the vertical: one layout and
+        // one pipeline, two sets.
+        //
         // h_target_ and v_target_ share format/size/sample-count, so their render passes
         // are Vulkan render-pass-compatible (resolution and the specific VkRenderPass
         // handle are not part of the compatibility rule -- see bloom_pass.h's identical
-        // reasoning). One Pipeline therefore serves both draws in execute() below.
-        coopa::gfx::pipeline::PipelineDesc desc;
-        desc.shaders            = {vert_shader_.get(), frag_shader_.get()};
-        desc.vertex             = coopa::gfx::VertexLayout::none();
-        desc.raster.cull        = coopa::gfx::CullMode::None;
-        desc.depth.test         = false;
-        desc.depth.write        = false;
-        desc.descriptor_layouts = {layout_.get()};
-        desc.push_constants     = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
+        // reasoning). One pipeline therefore serves both draws in execute() below.
+        FullscreenStageDesc sd;
+        sd.vert_spv = vert_spv;
+        sd.frag_spv = frag_spv;
+        sd.owned_sets = {{{0, coopa::gfx::DescriptorType::CombinedImageSampler,
+                           coopa::gfx::ShaderStage::Fragment, 1}}};
+        sd.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
+        sd.instances = 2;
+        stage_ = std::make_unique<FullscreenStage>(device, h_target_.render_pass_object(), sd);
 
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, h_target_.render_pass_object(), desc);
+        // Instance 0 samples the low-res source with NEAREST (the folded-upscale property);
+        // Instance 1 samples h_target_'s already-full-resolution output with LINEAR, which is
+        // exact (not an approximation) at coc == 0: a bilinear tap sampled precisely at a
+        // texel centre returns that texel unchanged, so the sharp band survives both stages
+        // bit-identical to a plain nearest upscale -- see tilt_shift.frag's early-out.
+        stage_->set(0, kHorizontal).bind_image(0, source, nearest_sampler);
+        stage_->set(0, kVertical).bind_image(0, h_target_.color_view_typed(), linear_sampler_);
     }
 
     TiltShiftPass(const TiltShiftPass&) = delete;
@@ -162,15 +150,15 @@ public:
         pc.shape = glm::vec4(params.blur_top, params.blur_bottom, axis.x, axis.y);
 
         pc.texel_step = glm::vec2(1.0f / static_cast<float>(out_width_), 0.0f);
-        begin_stage_(cmd, h_target_, *h_set_);
+        begin_stage_(cmd, h_target_, kHorizontal);
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
-        cmd.draw(3);
+        stage_->draw(cmd);
         h_target_.end(cmd);
 
         pc.texel_step = glm::vec2(0.0f, 1.0f / static_cast<float>(out_height_));
-        begin_stage_(cmd, v_target_, *v_set_);
+        begin_stage_(cmd, v_target_, kVertical);
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
-        cmd.draw(3);
+        stage_->draw(cmd);
         v_target_.end(cmd);
     }
 
@@ -188,13 +176,13 @@ private:
     /// for geometry passes), which would flip a fullscreen-triangle pass's output
     /// vertically -- see bloom_pass.h's begin_stage_() for the same override.
     void begin_stage_(coopa::gfx::command::CommandBuffer& cmd, const targets::OffscreenTarget& target,
-                      const coopa::gfx::pipeline::DescriptorSet& set) const {
+                      uint32_t instance) const {
         target.begin(cmd);
-        cmd.bind_pipeline(*pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(target.width()), static_cast<float>(target.height()));
-        cmd.set_scissor(0, 0, target.width(), target.height());
-        cmd.bind_descriptor_set(set, 0);
+        stage_->bind(cmd, target.width(), target.height(), instance);
     }
+
+    static constexpr uint32_t kHorizontal = 0;  ///< stage_ instance for the horizontal blur.
+    static constexpr uint32_t kVertical   = 1;  ///< stage_ instance for the vertical blur.
 
     uint32_t out_width_;
     uint32_t out_height_;
@@ -204,13 +192,7 @@ private:
     targets::OffscreenTarget h_target_;
     targets::OffscreenTarget v_target_;
 
-    std::unique_ptr<coopa::gfx::pipeline::Shader> vert_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader> frag_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      desc_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       h_set_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       v_set_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline>            pipeline_;
+    std::unique_ptr<FullscreenStage> stage_;
 };
 
 } // namespace passes
