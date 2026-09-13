@@ -20,7 +20,7 @@
 #include <gfxcoopa/memory/image_upload.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/command/command_buffer.h>
-#include <gfxcoopa/pipeline/pipeline.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/pipeline/descriptor.h>
@@ -118,10 +118,6 @@ public:
         raw_sampler_  = std::make_unique<util::Sampler>(device, nearest_clamp);
         blur_sampler_ = std::make_unique<util::Sampler>(device, nearest_clamp);
 
-        vert_shader_       = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
-        raw_frag_shader_   = std::make_unique<coopa::gfx::pipeline::Shader>(device, raw_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-        resolve_frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, resolve_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-        blur_frag_shader_  = std::make_unique<coopa::gfx::pipeline::Shader>(device, blur_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
         // Single R8_UNORM attachment, no depth -- same shape as HiZPass/SceneColorMipPass, just
         // one mip instead of a chain. All three sub-stages share this shape.
@@ -135,72 +131,51 @@ public:
             device, VK_FORMAT_R8_UNORM, VK_FORMAT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         );
 
-        // Set 1 for the raw pass (Set 0 is the caller's reused camera layout): G1 normal,
-        // G2 position, noise texture, kernel UBO.
-        raw_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
-                .uniform_buffer(3, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-        raw_desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*raw_desc_layout_, 1).build(device));
-        raw_desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *raw_desc_pool_, *raw_desc_layout_);
-        raw_desc_set_->bind_buffer(3, kernel_->buffer());
-        raw_desc_set_->bind_image(2, noise_->view_typed(), noise_->sampler());
+        // One FullscreenStage per stage.
+        using coopa::gfx::DescriptorType;
+        using coopa::gfx::ShaderStage;
+
+        auto sampled = [](uint32_t n) {
+            std::vector<coopa::gfx::pipeline::DescriptorBinding> b;
+            for (uint32_t i = 0; i < n; ++i) {
+                b.push_back({i, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1});
+            }
+            return b;
+        };
+
+        // Raw pass. Set 0 is the caller's camera layout; this stage's own set 1 holds
+        // G1 normal, G2 position, the noise texture and the kernel UBO.
+        FullscreenStageDesc raw_sd;
+        raw_sd.vert_spv = vert_spv;
+        raw_sd.frag_spv = raw_frag_spv;
+        raw_sd.leading_layouts = {&camera_layout};
+        raw_sd.owned_sets = {sampled(3)};
+        raw_sd.owned_sets[0].push_back({3, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1});
+        raw_sd.push_constants = {{ShaderStage::Fragment, 0, sizeof(PushConstants)}};
+        raw_ = std::make_unique<FullscreenStage>(device, *raw_render_pass_, raw_sd);
+
+        raw_->set().bind_buffer(3, kernel_->buffer());
+        raw_->set().bind_image(2, noise_->view_typed(), noise_->sampler());
         // Bindings 0/1 (G1/G2) are rebound every resize via update_descriptors(), the same
         // reason DeferredLightingPass::set_gbuffer_images() is called after every recreate() in
         // pbr_render_pipeline.h.
 
-        // Set 0 for the resolve pass (no camera set needed -- reprojection uses the prev_view_proj
-        // push constant, matching SsrPass's resolve set): current raw AO, history AO, G2 position,
-        // G1 normal (background early-out).
-        resolve_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(3, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-        resolve_desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*resolve_desc_layout_, 1).build(device));
-        resolve_desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *resolve_desc_pool_, *resolve_desc_layout_);
+        // Resolve pass. No camera set -- reprojection uses the prev_view_proj push constant,
+        // matching SsrPass's resolve set: current raw AO, history AO, G2 position, G1 normal.
+        FullscreenStageDesc resolve_sd;
+        resolve_sd.vert_spv = vert_spv;
+        resolve_sd.frag_spv = resolve_frag_spv;
+        resolve_sd.owned_sets = {sampled(4)};
+        resolve_sd.push_constants = {{ShaderStage::Fragment, 0, sizeof(ResolvePushConstants)}};
+        resolve_ = std::make_unique<FullscreenStage>(device, *resolve_render_pass_, resolve_sd);
 
-        // Set 0 for the blur pass: resolved AO, G1 normal, G2 position (bilateral weights).
-        blur_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-        blur_desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*blur_desc_layout_, 1).build(device));
-        blur_desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *blur_desc_pool_, *blur_desc_layout_);
-
-        coopa::gfx::pipeline::PipelineDesc common_desc;
-        common_desc.vertex = coopa::gfx::VertexLayout::none();
-        common_desc.raster.cull = coopa::gfx::CullMode::None;
-        common_desc.depth.test  = false;
-        common_desc.depth.write = false;
-
-        coopa::gfx::pipeline::PipelineDesc raw_desc = common_desc;
-        raw_desc.shaders = {vert_shader_.get(), raw_frag_shader_.get()};
-        raw_desc.descriptor_layouts = {&camera_layout, raw_desc_layout_.get()};
-        raw_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
-        raw_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, *raw_render_pass_, raw_desc);
-
-        coopa::gfx::pipeline::PipelineDesc resolve_desc = common_desc;
-        resolve_desc.shaders = {vert_shader_.get(), resolve_frag_shader_.get()};
-        resolve_desc.descriptor_layouts = {resolve_desc_layout_.get()};
-        resolve_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(ResolvePushConstants)}};
-        resolve_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, *resolve_render_pass_, resolve_desc);
-
-        coopa::gfx::pipeline::PipelineDesc blur_desc = common_desc;
-        blur_desc.shaders = {vert_shader_.get(), blur_frag_shader_.get()};
-        blur_desc.descriptor_layouts = {blur_desc_layout_.get()};
-        blur_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(BlurPushConstants)}};
-        blur_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, *blur_render_pass_, blur_desc);
+        // Blur pass: resolved AO, G1 normal, G2 position (bilateral weights).
+        FullscreenStageDesc blur_sd;
+        blur_sd.vert_spv = vert_spv;
+        blur_sd.frag_spv = blur_frag_spv;
+        blur_sd.owned_sets = {sampled(3)};
+        blur_sd.push_constants = {{ShaderStage::Fragment, 0, sizeof(BlurPushConstants)}};
+        blur_ = std::make_unique<FullscreenStage>(device, *blur_render_pass_, blur_sd);
     }
 
     ~SsaoPass() {
@@ -239,8 +214,8 @@ public:
         // raw_view_/resolved_view_ stay raw VkImageView (part of the render-target-triple
         // machinery with no sealed equivalent -- see create_target_()'s doc), wrapped per-use
         // via detail::wrap() since this is gfxcoopa's own internal code.
-        resolve_desc_set_->bind_image(0, coopa::gfx::detail::wrap(raw_view_), *raw_sampler_);
-        blur_desc_set_->bind_image(0, coopa::gfx::detail::wrap(resolved_view_), *raw_sampler_);
+        resolve_->set().bind_image(0, coopa::gfx::detail::wrap(raw_view_), *raw_sampler_);
+        blur_->set().bind_image(0, coopa::gfx::detail::wrap(resolved_view_), *raw_sampler_);
     }
 
     /// g1_view/g2_view: the live G-Buffer normal/position views (rebound every resize).
@@ -248,15 +223,15 @@ public:
     /// reprojected (non-texel-aligned) UV -- everything else here stays NEAREST.
     void update_descriptors(coopa::gfx::TextureView g1_view, coopa::gfx::TextureView g2_view,
                             const util::Sampler& linear_sampler) {
-        raw_desc_set_->bind_image(0, g1_view, linear_sampler);
-        raw_desc_set_->bind_image(1, g2_view, linear_sampler);
+        raw_->set().bind_image(0, g1_view, linear_sampler);
+        raw_->set().bind_image(1, g2_view, linear_sampler);
 
-        resolve_desc_set_->bind_image(1, history_image_->view_typed(), linear_sampler);
-        resolve_desc_set_->bind_image(2, g2_view, *raw_sampler_);
-        resolve_desc_set_->bind_image(3, g1_view, *raw_sampler_);
+        resolve_->set().bind_image(1, history_image_->view_typed(), linear_sampler);
+        resolve_->set().bind_image(2, g2_view, *raw_sampler_);
+        resolve_->set().bind_image(3, g1_view, *raw_sampler_);
 
-        blur_desc_set_->bind_image(1, g1_view, *raw_sampler_);
-        blur_desc_set_->bind_image(2, g2_view, *raw_sampler_);
+        blur_->set().bind_image(1, g1_view, *raw_sampler_);
+        blur_->set().bind_image(2, g2_view, *raw_sampler_);
     }
 
     void execute(coopa::gfx::command::CommandBuffer& cmd,
@@ -303,11 +278,8 @@ public:
 
         vkCmdBeginRenderPass(cmd.handle(), &raw_rp_info, VK_SUBPASS_CONTENTS_INLINE);
 
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(width_), static_cast<float>(height_));
-        cmd.set_scissor(0, 0, width_, height_);
-        cmd.bind_pipeline(*raw_pipeline_);
+        raw_->bind(cmd, width_, height_);
         cmd.bind_descriptor_set(camera_set, 0);
-        cmd.bind_descriptor_set(*raw_desc_set_, 1);
 
         PushConstants raw_pc{};
         raw_pc.radius         = params.radius;
@@ -318,7 +290,7 @@ public:
         raw_pc.noise_scale_y  = params.noise_scale_y;
         raw_pc.noise_rotation = params.temporal_enabled ? params.noise_rotation : 0;
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, raw_pc);
-        cmd.draw(3);
+        raw_->draw(cmd);
 
         cmd.end_render_pass();
 
@@ -349,10 +321,7 @@ public:
 
         vkCmdBeginRenderPass(cmd.handle(), &resolve_rp_info, VK_SUBPASS_CONTENTS_INLINE);
 
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(width_), static_cast<float>(height_));
-        cmd.set_scissor(0, 0, width_, height_);
-        cmd.bind_pipeline(*resolve_pipeline_);
-        cmd.bind_descriptor_set(*resolve_desc_set_, 0);
+        resolve_->bind(cmd, width_, height_);
 
         ResolvePushConstants resolve_pc{};
         resolve_pc.prev_view_proj = params.prev_view_proj;
@@ -364,7 +333,7 @@ public:
         // fresh-start/resize, so ANDing avoids reprojecting with a stale/identity matrix.
         resolve_pc.history_valid = (history_initialized_ && params.prev_view_proj_valid) ? 1 : 0;
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, resolve_pc);
-        cmd.draw(3);
+        resolve_->draw(cmd);
 
         cmd.end_render_pass();
 
@@ -387,15 +356,12 @@ public:
 
         vkCmdBeginRenderPass(cmd.handle(), &blur_rp_info, VK_SUBPASS_CONTENTS_INLINE);
 
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(width_), static_cast<float>(height_));
-        cmd.set_scissor(0, 0, width_, height_);
-        cmd.bind_pipeline(*blur_pipeline_);
-        cmd.bind_descriptor_set(*blur_desc_set_, 0);
+        blur_->bind(cmd, width_, height_);
 
         BlurPushConstants blur_pc{};
         blur_pc.radius = params.radius;
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, blur_pc);
-        cmd.draw(3);
+        blur_->draw(cmd);
 
         cmd.end_render_pass();
 
@@ -623,26 +589,9 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::RenderPass> raw_render_pass_;
     std::unique_ptr<coopa::gfx::pipeline::RenderPass> resolve_render_pass_;
     std::unique_ptr<coopa::gfx::pipeline::RenderPass> blur_render_pass_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>      vert_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>      raw_frag_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>      resolve_frag_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>      blur_frag_shader_;
-
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> raw_desc_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      raw_desc_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       raw_desc_set_;
-
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> resolve_desc_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      resolve_desc_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       resolve_desc_set_;
-
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> blur_desc_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      blur_desc_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       blur_desc_set_;
-
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline> raw_pipeline_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline> resolve_pipeline_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline> blur_pipeline_;
+    std::unique_ptr<FullscreenStage> raw_;      ///< Stage 1: hemisphere-kernel AO.
+    std::unique_ptr<FullscreenStage> resolve_;  ///< Stage 2: temporal reprojection.
+    std::unique_ptr<FullscreenStage> blur_;     ///< Stage 3: bilateral blur.
 };
 
 } // namespace passes

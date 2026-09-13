@@ -44,7 +44,7 @@
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/memory/image.h>
-#include <gfxcoopa/pipeline/pipeline.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
@@ -131,72 +131,40 @@ public:
           bokeh_target_(device, allocator, half_width_, half_height_, coopa::gfx::Format::RGBA16_Sfloat),
           result_target_(device, allocator, full_width, full_height, coopa::gfx::Format::RGBA16_Sfloat)
     {
-        vert_shader_      = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
-        coc_frag_         = std::make_unique<coopa::gfx::pipeline::Shader>(device, coc_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-        bokeh_frag_       = std::make_unique<coopa::gfx::pipeline::Shader>(device, bokeh_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-        composite_frag_   = std::make_unique<coopa::gfx::pipeline::Shader>(device, composite_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        // One layout shape per stage -- coc_layout_ (colour + depth), bokeh_layout_
-        // (its own half-res output only), composite_layout_ (sharp colour + bokeh +
-        // depth, recomputing its own full-res CoC -- see dof_composite.frag's doc).
-        coc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-        bokeh_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-        composite_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
+        // One FullscreenStage per stage. They differ only in fragment shader and how
+        // many images they sample: coc (colour + depth), bokeh (its own half-res output),
+        // composite (sharp colour + bokeh + depth, recomputing its own full-res CoC --
+        // see dof_composite.frag's doc).
+        using coopa::gfx::DescriptorType;
+        using coopa::gfx::ShaderStage;
 
-        desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder()
-                .add_sets(*coc_layout_, 1)
-                .add_sets(*bokeh_layout_, 1)
-                .add_sets(*composite_layout_, 1)
-                .build(device));
+        auto stage_desc = [&](const std::string& frag, uint32_t sampled) {
+            FullscreenStageDesc d;
+            d.vert_spv = vert_spv;
+            d.frag_spv = frag;
+            d.owned_sets.emplace_back();
+            for (uint32_t i = 0; i < sampled; ++i) {
+                d.owned_sets[0].push_back({i, DescriptorType::CombinedImageSampler,
+                                           ShaderStage::Fragment, 1});
+            }
+            d.push_constants = {{ShaderStage::Fragment, 0, sizeof(PushConstants)}};
+            return d;
+        };
 
-        coc_set_       = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *coc_layout_);
-        bokeh_set_     = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *bokeh_layout_);
-        composite_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *composite_layout_);
+        coc_       = std::make_unique<FullscreenStage>(device, coc_target_.render_pass_object(),
+                                                       stage_desc(coc_frag_spv, 2));
+        bokeh_     = std::make_unique<FullscreenStage>(device, bokeh_target_.render_pass_object(),
+                                                       stage_desc(bokeh_frag_spv, 1));
+        composite_ = std::make_unique<FullscreenStage>(device, result_target_.render_pass_object(),
+                                                       stage_desc(composite_frag_spv, 3));
 
-        coc_set_->bind_image(0, source_hdr, linear_sampler);
-        coc_set_->bind_image(1, source_depth, nearest_sampler);
-        bokeh_set_->bind_image(0, coc_target_.color_view_typed(), linear_sampler);
-        composite_set_->bind_image(0, source_hdr, nearest_sampler);
-        composite_set_->bind_image(1, bokeh_target_.color_view_typed(), linear_sampler);
-        composite_set_->bind_image(2, source_depth, nearest_sampler);
-
-        coopa::gfx::pipeline::PipelineDesc common;
-        common.vertex      = coopa::gfx::VertexLayout::none();
-        common.raster.cull = coopa::gfx::CullMode::None;
-        common.depth.test  = false;
-        common.depth.write = false;
-        common.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
-
-        coopa::gfx::pipeline::PipelineDesc coc_desc = common;
-        coc_desc.shaders = {vert_shader_.get(), coc_frag_.get()};
-        coc_desc.descriptor_layouts = {coc_layout_.get()};
-        coc_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, coc_target_.render_pass_object(), coc_desc);
-
-        coopa::gfx::pipeline::PipelineDesc bokeh_desc = common;
-        bokeh_desc.shaders = {vert_shader_.get(), bokeh_frag_.get()};
-        bokeh_desc.descriptor_layouts = {bokeh_layout_.get()};
-        bokeh_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, bokeh_target_.render_pass_object(), bokeh_desc);
-
-        coopa::gfx::pipeline::PipelineDesc composite_desc = common;
-        composite_desc.shaders = {vert_shader_.get(), composite_frag_.get()};
-        composite_desc.descriptor_layouts = {composite_layout_.get()};
-        composite_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, result_target_.render_pass_object(), composite_desc);
+        coc_->set().bind_image(0, source_hdr, linear_sampler);
+        coc_->set().bind_image(1, source_depth, nearest_sampler);
+        bokeh_->set().bind_image(0, coc_target_.color_view_typed(), linear_sampler);
+        composite_->set().bind_image(0, source_hdr, nearest_sampler);
+        composite_->set().bind_image(1, bokeh_target_.color_view_typed(), linear_sampler);
+        composite_->set().bind_image(2, source_depth, nearest_sampler);
     }
 
     DofPass(const DofPass&) = delete;
@@ -230,19 +198,19 @@ public:
                                params.debug_view ? 1.0f : 0.0f);
         pc.inv_size = glm::vec2(1.0f / static_cast<float>(full_width_), 1.0f / static_cast<float>(full_height_));
 
-        begin_stage_(cmd, coc_target_, *coc_pipeline_, *coc_set_);
+        begin_stage_(cmd, coc_target_, *coc_);
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
-        cmd.draw(3);
+        coc_->draw(cmd);
         coc_target_.end(cmd);
 
-        begin_stage_(cmd, bokeh_target_, *bokeh_pipeline_, *bokeh_set_);
+        begin_stage_(cmd, bokeh_target_, *bokeh_);
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
-        cmd.draw(3);
+        bokeh_->draw(cmd);
         bokeh_target_.end(cmd);
 
-        begin_stage_(cmd, result_target_, *composite_pipeline_, *composite_set_);
+        begin_stage_(cmd, result_target_, *composite_);
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
-        cmd.draw(3);
+        composite_->draw(cmd);
         result_target_.end(cmd);
     }
 
@@ -262,13 +230,9 @@ private:
     /// triangle pass's output vertically -- see TiltShiftPass::begin_stage_() /
     /// BloomPass::begin_stage_() for the same override.
     void begin_stage_(coopa::gfx::command::CommandBuffer& cmd, const targets::OffscreenTarget& target,
-                      const coopa::gfx::pipeline::Pipeline& pipe,
-                      const coopa::gfx::pipeline::DescriptorSet& set) const {
+                      const FullscreenStage& stage) const {
         target.begin(cmd);
-        cmd.bind_pipeline(pipe);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(target.width()), static_cast<float>(target.height()));
-        cmd.set_scissor(0, 0, target.width(), target.height());
-        cmd.bind_descriptor_set(set, 0);
+        stage.bind(cmd, target.width(), target.height());
     }
 
     uint32_t full_width_;
@@ -280,21 +244,9 @@ private:
     targets::OffscreenTarget bokeh_target_;
     targets::OffscreenTarget result_target_;
 
-    std::unique_ptr<coopa::gfx::pipeline::Shader> vert_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader> coc_frag_, bokeh_frag_, composite_frag_;
-
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> coc_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> bokeh_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> composite_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      desc_pool_;
-
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> coc_set_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> bokeh_set_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> composite_set_;
-
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline> coc_pipeline_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline> bokeh_pipeline_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline> composite_pipeline_;
+    std::unique_ptr<FullscreenStage> coc_;        ///< Stage 1: circle of confusion + downsample.
+    std::unique_ptr<FullscreenStage> bokeh_;      ///< Stage 2: half-res spiral bokeh gather.
+    std::unique_ptr<FullscreenStage> composite_;  ///< Stage 3: full-res composite.
 };
 
 } // namespace passes

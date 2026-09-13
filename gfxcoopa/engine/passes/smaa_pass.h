@@ -14,7 +14,7 @@
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
-#include <gfxcoopa/pipeline/pipeline.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/shader.h>
@@ -74,82 +74,52 @@ public:
             device, allocator, width, height, coopa::gfx::Format::RGBA8_Unorm, coopa::gfx::SampleCount::X1
         );
 
-        // --- Stage 1: Edge Detection ---
-        edge_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shaders("smaa_edge.vert"), VK_SHADER_STAGE_VERTEX_BIT);
-        edge_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shaders("smaa_edge.frag"), VK_SHADER_STAGE_FRAGMENT_BIT);
+        // One FullscreenStage per SMAA stage. All three share the same pipeline shape
+        // (fullscreen triangle, no depth, no blending) and differ only in their shaders,
+        // how many images they sample, and their push-constant block.
+        using coopa::gfx::DescriptorType;
+        using coopa::gfx::ShaderStage;
+        const auto both_stages = ShaderStage::Vertex | ShaderStage::Fragment;
 
-        edge_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-        edge_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*edge_layout_, 1).build(device));
-        edge_set_  = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *edge_pool_, *edge_layout_);
+        auto sampled = [](uint32_t n) {
+            std::vector<coopa::gfx::pipeline::DescriptorBinding> b;
+            for (uint32_t i = 0; i < n; ++i) {
+                b.push_back({i, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1});
+            }
+            return b;
+        };
 
-        coopa::gfx::pipeline::PipelineDesc common_desc;
-        common_desc.vertex = coopa::gfx::VertexLayout::none();
-        common_desc.raster.cull = coopa::gfx::CullMode::None;
-        common_desc.depth.test  = false;
-        common_desc.depth.write = false;
-        const auto both_stages = coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment;
+        FullscreenStageDesc edge_sd;
+        edge_sd.vert_spv = shaders("smaa_edge.vert");
+        edge_sd.frag_spv = shaders("smaa_edge.frag");
+        edge_sd.owned_sets = {sampled(1)};                 // scene colour
+        edge_sd.push_constants = {{both_stages, 0, sizeof(EdgePush)}};
+        edge_ = std::make_unique<FullscreenStage>(device, edges_target_->render_pass_object(), edge_sd);
 
-        coopa::gfx::pipeline::PipelineDesc edge_desc = common_desc;
-        edge_desc.shaders = {edge_vert_.get(), edge_frag_.get()};
-        edge_desc.descriptor_layouts = {edge_layout_.get()};
-        edge_desc.push_constants = {{both_stages, 0, sizeof(EdgePush)}};
-        edge_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, edges_target_->render_pass_object(), edge_desc);
+        FullscreenStageDesc blend_sd;
+        blend_sd.vert_spv = shaders("smaa_blend.vert");
+        blend_sd.frag_spv = shaders("smaa_blend.frag");
+        blend_sd.owned_sets = {sampled(3)};                // edges, area LUT, search LUT
+        blend_sd.push_constants = {{both_stages, 0, sizeof(BlendPush)}};
+        blend_ = std::make_unique<FullscreenStage>(device, blend_target_->render_pass_object(), blend_sd);
 
-        // --- Stage 2: Blending Weight Calculation ---
-        blend_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shaders("smaa_blend.vert"), VK_SHADER_STAGE_VERTEX_BIT);
-        blend_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shaders("smaa_blend.frag"), VK_SHADER_STAGE_FRAGMENT_BIT);
+        blend_->set().bind_image(0, edges_target_->color_view_typed(), linear_sampler);
+        blend_->set().bind_image(1, smaa_textures_->area_view_typed(), smaa_textures_->sampler());
+        blend_->set().bind_image(2, smaa_textures_->search_view_typed(), smaa_textures_->sampler());
 
-        blend_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-        blend_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*blend_layout_, 1).build(device));
-        blend_set_  = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *blend_pool_, *blend_layout_);
+        FullscreenStageDesc neigh_sd;
+        neigh_sd.vert_spv = shaders("smaa_neighborhood.vert");
+        neigh_sd.frag_spv = shaders("smaa_neighborhood.frag");
+        neigh_sd.owned_sets = {sampled(2)};                // scene colour, blend weights
+        neigh_sd.push_constants = {{both_stages, 0, sizeof(NeighborhoodPush)}};
+        neigh_ = std::make_unique<FullscreenStage>(device, output_render_pass, neigh_sd);
 
-        coopa::gfx::pipeline::PipelineDesc blend_desc = common_desc;
-        blend_desc.shaders = {blend_vert_.get(), blend_frag_.get()};
-        blend_desc.descriptor_layouts = {blend_layout_.get()};
-        blend_desc.push_constants = {{both_stages, 0, sizeof(BlendPush)}};
-        blend_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device, blend_target_->render_pass_object(), blend_desc);
-
-        blend_set_->bind_image(0, edges_target_->color_view_typed(), linear_sampler);
-        blend_set_->bind_image(1, smaa_textures_->area_view_typed(), smaa_textures_->sampler());
-        blend_set_->bind_image(2, smaa_textures_->search_view_typed(), smaa_textures_->sampler());
-
-        // --- Stage 3: Neighborhood Blending ---
-        neigh_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shaders("smaa_neighborhood.vert"), VK_SHADER_STAGE_VERTEX_BIT);
-        neigh_frag_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, shaders("smaa_neighborhood.frag"), VK_SHADER_STAGE_FRAGMENT_BIT);
-
-        neigh_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-        neigh_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*neigh_layout_, 1).build(device));
-        neigh_set_  = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *neigh_pool_, *neigh_layout_);
-
-        coopa::gfx::pipeline::PipelineDesc neigh_desc = common_desc;
-        neigh_desc.shaders = {neigh_vert_.get(), neigh_frag_.get()};
-        neigh_desc.descriptor_layouts = {neigh_layout_.get()};
-        neigh_desc.push_constants = {{both_stages, 0, sizeof(NeighborhoodPush)}};
-        neigh_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, output_render_pass, neigh_desc);
-
-        neigh_set_->bind_image(1, blend_target_->color_view_typed(), linear_sampler);
+        neigh_->set().bind_image(1, blend_target_->color_view_typed(), linear_sampler);
     }
 
     void set_source_image(coopa::gfx::TextureView color_view, const util::Sampler& linear_sampler) {
-        edge_set_->bind_image(0, color_view, linear_sampler);
-        neigh_set_->bind_image(0, color_view, linear_sampler);
+        edge_->set().bind_image(0, color_view, linear_sampler);
+        neigh_->set().bind_image(0, color_view, linear_sampler);
     }
 
     void recreate(uint32_t width, uint32_t height, const util::Sampler& linear_sampler) {
@@ -158,8 +128,8 @@ public:
         edges_target_->recreate(width, height);
         blend_target_->recreate(width, height);
 
-        blend_set_->bind_image(0, edges_target_->color_view_typed(), linear_sampler);
-        neigh_set_->bind_image(1, blend_target_->color_view_typed(), linear_sampler);
+        blend_->set().bind_image(0, edges_target_->color_view_typed(), linear_sampler);
+        neigh_->set().bind_image(1, blend_target_->color_view_typed(), linear_sampler);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd,
@@ -173,38 +143,29 @@ public:
 
         // Pass 1: Edge Detection
         edges_target_->begin(cmd);
-        cmd.bind_pipeline(*edge_pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
-        cmd.set_scissor(0, 0, viewport_w, viewport_h);
-        cmd.bind_descriptor_set(*edge_set_, 0);
+        edge_->bind(cmd, viewport_w, viewport_h);
 
         EdgePush pc_edge{rt_metrics, threshold};
         cmd.push_constants(both_stages, pc_edge);
-        cmd.draw(3);
+        edge_->draw(cmd);
         edges_target_->end(cmd);
 
         // Pass 2: Blending Weight Calculation
         blend_target_->begin(cmd);
-        cmd.bind_pipeline(*blend_pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
-        cmd.set_scissor(0, 0, viewport_w, viewport_h);
-        cmd.bind_descriptor_set(*blend_set_, 0);
+        blend_->bind(cmd, viewport_w, viewport_h);
 
         BlendPush pc_blend{rt_metrics, max_search_steps};
         cmd.push_constants(both_stages, pc_blend);
-        cmd.draw(3);
+        blend_->draw(cmd);
         blend_target_->end(cmd);
 
         // Pass 3: Neighborhood Blending into output render pass
         output_target.begin(cmd);
-        cmd.bind_pipeline(*neigh_pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
-        cmd.set_scissor(0, 0, viewport_w, viewport_h);
-        cmd.bind_descriptor_set(*neigh_set_, 0);
+        neigh_->bind(cmd, viewport_w, viewport_h);
 
         NeighborhoodPush pc_neigh{rt_metrics, exposure};
         cmd.push_constants(both_stages, pc_neigh);
-        cmd.draw(3);
+        neigh_->draw(cmd);
         output_target.end(cmd);
     }
 
@@ -217,23 +178,9 @@ private:
     std::unique_ptr<targets::OffscreenTarget> edges_target_;
     std::unique_ptr<targets::OffscreenTarget> blend_target_;
 
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              edge_vert_, edge_frag_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> edge_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      edge_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       edge_set_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline>           edge_pipeline_;
-
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              blend_vert_, blend_frag_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> blend_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      blend_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       blend_set_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline>           blend_pipeline_;
-
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              neigh_vert_, neigh_frag_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> neigh_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      neigh_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       neigh_set_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline>           neigh_pipeline_;
+    std::unique_ptr<FullscreenStage> edge_;   ///< Stage 1: edge detection.
+    std::unique_ptr<FullscreenStage> blend_;  ///< Stage 2: blending-weight calculation.
+    std::unique_ptr<FullscreenStage> neigh_;  ///< Stage 3: neighbourhood blend.
 };
 
 } // namespace passes
