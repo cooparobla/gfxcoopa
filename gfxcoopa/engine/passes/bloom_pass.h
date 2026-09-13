@@ -31,7 +31,7 @@
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
-#include <gfxcoopa/pipeline/pipeline.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
@@ -106,27 +106,10 @@ public:
               const std::string& prefilter_frag_spv,
               const std::string& downsample_frag_spv,
               const std::string& upsample_frag_spv)
-        : device_(device), allocator_(allocator)
+        : device_(device), allocator_(allocator),
+          vert_spv_(vert_spv), prefilter_frag_spv_(prefilter_frag_spv),
+          downsample_frag_spv_(downsample_frag_spv), upsample_frag_spv_(upsample_frag_spv)
     {
-        vert_shader_      = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
-        prefilter_frag_   = std::make_unique<coopa::gfx::pipeline::Shader>(device, prefilter_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-        downsample_frag_  = std::make_unique<coopa::gfx::pipeline::Shader>(device, downsample_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-        upsample_frag_    = std::make_unique<coopa::gfx::pipeline::Shader>(device, upsample_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-
-        // single_layout_: one combined sampler at binding 0 -- shared by the prefilter
-        // and downsample stages (both read exactly one source image). dual_layout_:
-        // two combined samplers (0 = coarser "low" level, 1 = same-resolution "high"
-        // level) for the upsample+combine stage. One DescriptorSetLayout per shape,
-        // reused across every level that needs it -- not one per level.
-        single_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-        dual_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
 
         recreate(full_width, full_height, source_hdr, linear_sampler);
     }
@@ -163,13 +146,9 @@ public:
 
         down_targets_.clear();
         up_targets_.clear();
-        down_sets_.clear();
-        up_sets_.clear();
-        prefilter_set_.reset();
-        desc_pool_.reset();
-        prefilter_pipeline_.reset();
-        downsample_pipeline_.reset();
-        upsample_pipeline_.reset();
+        prefilter_.reset();
+        downsample_.reset();
+        upsample_.reset();
 
         // down_targets_[0] is the prefilter output at (base_width_, base_height_);
         // down_targets_[i] is that halved i times.
@@ -202,57 +181,47 @@ public:
         // rule, and Pipeline always enables dynamic viewport/scissor -- see
         // pipeline.h). One Pipeline per stage type therefore suffices; only the
         // framebuffer/viewport changes per level in execute()'s loop.
-        coopa::gfx::pipeline::PipelineDesc common;
-        common.vertex      = coopa::gfx::VertexLayout::none();
-        common.raster.cull = coopa::gfx::CullMode::None;
-        common.depth.test  = false;
-        common.depth.write = false;
-        // blend left at its default (BlendMode::None): the upsample combine is done
-        // in the fragment shader (two sampler reads, summed via mix()), not by
-        // hardware blending -- see bloom_upsample.frag's own doc for why
-        // BlendMode::Additive cannot help under LOAD_OP_CLEAR.
+        // One FullscreenStage per stage, rebuilt here rather than in the constructor
+        // because the chain length -- and so the number of descriptor sets each stage
+        // needs -- follows the render resolution.
+        //
+        // Blend is left at BlendMode::None: the upsample combine happens in the fragment
+        // shader (two sampler reads summed via mix()), not in hardware -- see
+        // bloom_upsample.frag's own doc for why BlendMode::Additive cannot help under
+        // LOAD_OP_CLEAR.
+        using coopa::gfx::DescriptorType;
+        using coopa::gfx::ShaderStage;
 
-        coopa::gfx::pipeline::PipelineDesc prefilter_desc = common;
-        prefilter_desc.shaders = {vert_shader_.get(), prefilter_frag_.get()};
-        prefilter_desc.descriptor_layouts = {single_layout_.get()};
-        prefilter_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PrefilterPush)}};
-        prefilter_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device_, down_targets_[0]->render_pass_object(), prefilter_desc);
+        auto stage_desc = [&](const std::string& frag, uint32_t sampled, uint32_t push_size,
+                              uint32_t instances) {
+            FullscreenStageDesc d;
+            d.vert_spv = vert_spv_;
+            d.frag_spv = frag;
+            d.owned_sets.emplace_back();
+            for (uint32_t i = 0; i < sampled; ++i) {
+                d.owned_sets[0].push_back({i, DescriptorType::CombinedImageSampler,
+                                           ShaderStage::Fragment, 1});
+            }
+            d.push_constants = {{ShaderStage::Fragment, 0, push_size}};
+            d.instances = instances;
+            return d;
+        };
 
-        coopa::gfx::pipeline::PipelineDesc downsample_desc = common;
-        downsample_desc.shaders = {vert_shader_.get(), downsample_frag_.get()};
-        downsample_desc.descriptor_layouts = {single_layout_.get()};
-        downsample_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(DownsamplePush)}};
-        downsample_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-            device_, down_targets_[0]->render_pass_object(), downsample_desc);
+        prefilter_ = std::make_unique<FullscreenStage>(
+            device_, down_targets_[0]->render_pass_object(),
+            stage_desc(prefilter_frag_spv_, 1, sizeof(PrefilterPush), 1));
+
+        // One set per level. Index 0 is allocated but never bound, so set indices line
+        // up 1:1 with down_targets_.
+        downsample_ = std::make_unique<FullscreenStage>(
+            device_, down_targets_[0]->render_pass_object(),
+            stage_desc(downsample_frag_spv_, 1, sizeof(DownsamplePush), level_count_));
 
         if (!up_targets_.empty()) {
-            coopa::gfx::pipeline::PipelineDesc upsample_desc = common;
-            upsample_desc.shaders = {vert_shader_.get(), upsample_frag_.get()};
-            upsample_desc.descriptor_layouts = {dual_layout_.get()};
-            upsample_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(UpsamplePush)}};
-            upsample_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
-                device_, up_targets_[0]->render_pass_object(), upsample_desc);
-        }
-
-        // Pool sizing: level_count_ + 1 single-sampler sets -- one dedicated
-        // prefilter_set_, plus level_count_ down_sets_ entries (indices 1..level_count_-1
-        // are bound/used; down_sets_[0] is allocated but never bound, purely to keep
-        // indices aligned 1:1 with down_targets_). level_count_ - 1 dual-sampler sets
-        // cover the upsample chain.
-        coopa::gfx::pipeline::DescriptorPoolBuilder pool_builder;
-        pool_builder.add_sets(*single_layout_, level_count_ + 1);
-        if (level_count_ > 1) pool_builder.add_sets(*dual_layout_, level_count_ - 1);
-        desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(pool_builder.build(device_));
-
-        prefilter_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device_, *desc_pool_, *single_layout_);
-        down_sets_.resize(level_count_);
-        for (uint32_t i = 0; i < level_count_; ++i) {
-            down_sets_[i] = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device_, *desc_pool_, *single_layout_);
-        }
-        up_sets_.resize(up_targets_.size());
-        for (size_t i = 0; i < up_targets_.size(); ++i) {
-            up_sets_[i] = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device_, *desc_pool_, *dual_layout_);
+            upsample_ = std::make_unique<FullscreenStage>(
+                device_, up_targets_[0]->render_pass_object(),
+                stage_desc(upsample_frag_spv_, 2, sizeof(UpsamplePush),
+                           static_cast<uint32_t>(up_targets_.size())));
         }
 
         bind_static_descriptors_(source_hdr, linear_sampler);
@@ -275,24 +244,24 @@ public:
         static constexpr VkClearColorValue kBlack{{0.0f, 0.0f, 0.0f, 1.0f}};
 
         // --- Stage 1: bright-pass + first halving, full-res HDR -> down_targets_[0] ---
-        begin_stage_(cmd, *down_targets_[0], kBlack, *prefilter_pipeline_, *prefilter_set_);
+        begin_stage_(cmd, *down_targets_[0], kBlack, *prefilter_, 0);
         PrefilterPush pf{};
         pf.src_texel = glm::vec2(1.0f / static_cast<float>(full_width_), 1.0f / static_cast<float>(full_height_));
         pf.threshold = params.threshold;
         pf.soft_knee = params.soft_knee;
         pf.clamp_max = params.clamp_max;
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pf);
-        cmd.draw(3);
+        prefilter_->draw(cmd);
         down_targets_[0]->end(cmd);
 
         // --- Stage 2: progressive downsample ---
         for (uint32_t i = 1; i < level_count_; ++i) {
             const auto& src = *down_targets_[i - 1];
-            begin_stage_(cmd, *down_targets_[i], kBlack, *downsample_pipeline_, *down_sets_[i]);
+            begin_stage_(cmd, *down_targets_[i], kBlack, *downsample_, i);
             DownsamplePush ds{};
             ds.src_texel = glm::vec2(1.0f / static_cast<float>(src.width()), 1.0f / static_cast<float>(src.height()));
             cmd.push_constants(coopa::gfx::ShaderStage::Fragment, ds);
-            cmd.draw(3);
+            downsample_->draw(cmd);
             down_targets_[i]->end(cmd);
         }
 
@@ -300,13 +269,13 @@ public:
         for (int i = static_cast<int>(level_count_) - 2; i >= 0; --i) {
             const uint32_t ui = static_cast<uint32_t>(i);
             const auto& low = (ui + 2 == level_count_) ? *down_targets_[level_count_ - 1] : *up_targets_[ui + 1];
-            begin_stage_(cmd, *up_targets_[ui], kBlack, *upsample_pipeline_, *up_sets_[ui]);
+            begin_stage_(cmd, *up_targets_[ui], kBlack, *upsample_, static_cast<uint32_t>(ui));
             UpsamplePush us{};
             us.low_texel = glm::vec2(1.0f / static_cast<float>(low.width()), 1.0f / static_cast<float>(low.height()));
             us.radius    = params.radius;
             us.scatter   = params.scatter;
             cmd.push_constants(coopa::gfx::ShaderStage::Fragment, us);
-            cmd.draw(3);
+            upsample_->draw(cmd);
             up_targets_[ui]->end(cmd);
         }
     }
@@ -335,24 +304,20 @@ private:
     /// an upside-down bloom overlay. Every other fullscreen pass in this engine
     /// overrides it the same way -- see SmaaPass::draw() and PixelStylizePass::draw().
     void begin_stage_(coopa::gfx::command::CommandBuffer& cmd, targets::OffscreenTarget& target,
-                      VkClearColorValue clear, const coopa::gfx::pipeline::Pipeline& pipe,
-                      const coopa::gfx::pipeline::DescriptorSet& set) const {
+                      VkClearColorValue clear, const FullscreenStage& stage,
+                      uint32_t instance) const {
         target.begin(cmd, clear);
-        cmd.bind_pipeline(pipe);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(target.width()),
-                                     static_cast<float>(target.height()));
-        cmd.set_scissor(0, 0, target.width(), target.height());
-        cmd.bind_descriptor_set(set, 0);
+        stage.bind(cmd, target.width(), target.height(), instance);
     }
 
     /// Binds every descriptor this pass ever reads, ONCE. Never called again outside
     /// recreate() -- see the file doc's "no per-frame update_descriptors()" note.
     void bind_static_descriptors_(coopa::gfx::TextureView source_hdr,
                                   const coopa::gfx::engine::util::Sampler& linear_sampler) {
-        prefilter_set_->bind_image(0, source_hdr, linear_sampler);
+        prefilter_->set().bind_image(0, source_hdr, linear_sampler);
 
         for (uint32_t i = 1; i < level_count_; ++i) {
-            down_sets_[i]->bind_image(0, down_targets_[i - 1]->color_view_typed(), linear_sampler);
+            downsample_->set(0, i).bind_image(0, down_targets_[i - 1]->color_view_typed(), linear_sampler);
         }
 
         for (uint32_t i = 0; i + 1 < level_count_; ++i) {
@@ -362,8 +327,8 @@ private:
             coopa::gfx::TextureView low = (i + 2 == level_count_)
                 ? down_targets_[level_count_ - 1]->color_view_typed()
                 : up_targets_[i + 1]->color_view_typed();
-            up_sets_[i]->bind_image(0, low, linear_sampler);
-            up_sets_[i]->bind_image(1, down_targets_[i]->color_view_typed(), linear_sampler);
+            upsample_->set(0, static_cast<uint32_t>(i)).bind_image(0, low, linear_sampler);
+            upsample_->set(0, static_cast<uint32_t>(i)).bind_image(1, down_targets_[i]->color_view_typed(), linear_sampler);
         }
     }
 
@@ -381,20 +346,11 @@ private:
     /// up_targets_[i] is the same size as down_targets_[i], for i in [0, level_count_ - 1).
     std::vector<std::unique_ptr<targets::OffscreenTarget>> up_targets_;
 
-    std::unique_ptr<coopa::gfx::pipeline::Shader> vert_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader> prefilter_frag_, downsample_frag_, upsample_frag_;
+    std::string vert_spv_, prefilter_frag_spv_, downsample_frag_spv_, upsample_frag_spv_;
 
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> single_layout_;  ///< binding 0 (prefilter + downsample)
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> dual_layout_;    ///< bindings 0 (low) + 1 (high)
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      desc_pool_;
-
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>              prefilter_set_;
-    std::vector<std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> down_sets_;  ///< index i valid for i >= 1
-    std::vector<std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> up_sets_;    ///< index i in [0, level_count_ - 1)
-
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline> prefilter_pipeline_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline> downsample_pipeline_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline> upsample_pipeline_;
+    std::unique_ptr<FullscreenStage> prefilter_;   ///< Bright-pass threshold into down_targets_[0].
+    std::unique_ptr<FullscreenStage> downsample_;  ///< One set per level; index 0 unused.
+    std::unique_ptr<FullscreenStage> upsample_;    ///< One set per up-chain level; null when level_count_ == 1.
 };
 
 } // namespace passes
