@@ -334,6 +334,9 @@ inline VkBufferUsageFlags to_vk(BufferUsage u) {
 
 // --- MemoryResidency -> VMA -------------------------------------------------
 
+/// @brief A MemoryResidency split into the VMA usage + allocation flags pair it
+/// maps to. CpuToGpu/GpuToCpu always carry the persistently-mapped flags, so the
+/// two cannot be set inconsistently with each other.
 struct VmaResidency { VmaMemoryUsage usage; VmaAllocationCreateFlags flags; };
 
 inline VmaResidency to_vma(MemoryResidency r) {

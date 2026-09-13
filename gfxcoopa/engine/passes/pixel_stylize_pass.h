@@ -41,6 +41,15 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class PixelStylizePass
+ * @brief Composites bloom, an optional tonemap, depth/normal outlines, ordered
+ *        dither and palette quantization in one fullscreen draw.
+ *
+ * Samples scene colour, the G-buffer depth and normal, a palette LUT and an
+ * optional pre-blurred bloom image. Set PushConstants::exposure <= 0 when the
+ * source is already tonemapped.
+ */
 class PixelStylizePass {
 public:
     /**

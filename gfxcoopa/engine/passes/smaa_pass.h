@@ -29,6 +29,15 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class SmaaPass
+ * @brief Subpixel Morphological Anti-Aliasing (SMAA 1x) in three stages --
+ *        edge detection, blending-weight calculation, neighbourhood blend.
+ *
+ * Owns an OffscreenTarget per stage and the Jimenez area/search textures. The
+ * chained targets' render passes synchronize the stages, so execute() records
+ * no manual barriers.
+ */
 class SmaaPass {
 public:
     struct EdgePush {

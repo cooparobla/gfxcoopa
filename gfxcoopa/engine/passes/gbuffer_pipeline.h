@@ -26,6 +26,15 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class GBufferPipeline
+ * @brief The pipelines that rasterize opaque and alpha-masked geometry into the
+ *        G-buffer's four colour attachments.
+ *
+ * Holds the stock back-face-culled pipeline, a no-cull sibling, and one variant
+ * per named SurfaceShaderDesc registered through add_variant(). bind() selects
+ * between them by material shader name.
+ */
 class GBufferPipeline {
 public:
     // Per-batch material state only. model/normal_matrix are streamed

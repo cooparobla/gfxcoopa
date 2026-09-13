@@ -32,6 +32,13 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class VolumetricsPass
+ * @brief Composites wind-driven volumetric scattering over a scene colour image.
+ *
+ * Same shape as FogPass: scene colour plus G-buffer normal and position at set
+ * 0, the caller's VolumetricsData UBO at set 1, writing into its own target.
+ */
 class VolumetricsPass {
 public:
     /**

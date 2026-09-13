@@ -30,6 +30,15 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class HiZPass
+ * @brief Builds a hierarchical depth (Hi-Z) pyramid from the G-buffer depth,
+ *        each level the minimum of the four texels above it.
+ *
+ * Owns the pyramid image, one view and framebuffer per mip, and one descriptor
+ * set per mip. execute() records one fullscreen draw per level. SsrPass marches
+ * against the result.
+ */
 class HiZPass {
 public:
     struct PushConstants {

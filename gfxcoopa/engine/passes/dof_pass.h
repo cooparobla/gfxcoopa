@@ -57,6 +57,15 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class DofPass
+ * @brief Thin-lens depth of field: circle-of-confusion, half-resolution bokeh
+ *        gather, then full-resolution composite.
+ *
+ * Owns its three OffscreenTargets and one pipeline per stage. Every descriptor
+ * is bound at construction, so execute() needs no per-frame descriptor update
+ * and no device wait.
+ */
 class DofPass {
 public:
     /// Per-frame tunables. All are push constants -- unlike this pass's descriptor

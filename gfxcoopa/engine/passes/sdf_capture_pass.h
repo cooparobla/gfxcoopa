@@ -36,6 +36,13 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class SdfCapturePass
+ * @brief Raymarches every BLEND SdfRenderer into the transparent capture target.
+ *
+ * Drawn inside TransparentCaptureTarget's existing begin()/end() bracket. Owns
+ * only its pipeline; every descriptor set it reads belongs to the caller.
+ */
 class SdfCapturePass {
 public:
     struct PushConstants {

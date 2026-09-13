@@ -36,6 +36,15 @@ enum class AlphaMode {
     Blend   /**< Alpha-blended by the forward transparent pass. */
 };
 
+/**
+ * @struct PBRMaterial
+ * @brief A mesh's surface parameters, as authored in scene YAML.
+ *
+ * Covers the Cook-Torrance inputs (albedo, metallic, roughness, emissive), the
+ * alpha mode that decides which draw list the mesh joins, optional texture map
+ * paths, and the name of a SurfaceShaderDesc variant when the material overrides
+ * the stock pipeline.
+ */
 struct PBRMaterial {
     glm::vec3 albedo    = {0.8f, 0.8f, 0.8f};
     float     metallic  = 0.0f;

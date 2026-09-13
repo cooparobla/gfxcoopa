@@ -28,6 +28,15 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class TaaPass
+ * @brief Temporal anti-aliasing: blends the current frame against a reprojected
+ *        history buffer.
+ *
+ * Owns the history image and copies the resolved result back into it each frame
+ * (see update_history()). recreate() drops the history, since it no longer
+ * matches a new resolution.
+ */
 class TaaPass {
 public:
     struct PushConstants {

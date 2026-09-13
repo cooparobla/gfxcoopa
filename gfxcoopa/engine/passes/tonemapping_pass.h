@@ -23,6 +23,15 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class ToneMappingPass
+ * @brief Maps an HDR colour image to LDR, with FXAA optionally fused into the
+ *        same draw.
+ *
+ * Fusing FXAA here re-tonemaps every one of its taps; FxaaPass is the separate,
+ * already-LDR alternative. Exposure and the FXAA thresholds are pass state, set
+ * via set_exposure()/set_fxaa_config() and pushed at draw time.
+ */
 class ToneMappingPass {
 public:
     struct PushConstants {

@@ -26,6 +26,16 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class DeferredLightingPass
+ * @brief Shades the G-buffer into an HDR colour target, in one fullscreen draw.
+ *
+ * Owns the G-buffer/SSAO descriptor set (declared last in its pipeline layout,
+ * after camera, light, shadow and any caller-supplied ExtraSets) and the
+ * pipeline. The caller owns the camera/light/shadow sets and passes them to
+ * draw(); G-buffer images are bound once via set_gbuffer_images(), and the SSAO
+ * image is rebound every frame via set_ssao_image().
+ */
 class DeferredLightingPass {
 public:
     DeferredLightingPass(coopa::gfx::core::Device& device,

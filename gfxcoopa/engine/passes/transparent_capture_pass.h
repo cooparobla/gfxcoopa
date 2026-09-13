@@ -41,6 +41,14 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class TransparentCapturePass
+ * @brief Forward-shaded, depth-tested capture of transparent geometry into three
+ *        unblended colour attachments, for SSR to reflect.
+ *
+ * Unlike TransparentPass, nothing here blends: each attachment records the
+ * transparent surface's own shaded appearance rather than compositing it.
+ */
 class TransparentCapturePass {
 public:
     /// 32 bytes -- byte-identical to TransparentPass::PushConstants (alpha_cutoff/alpha are

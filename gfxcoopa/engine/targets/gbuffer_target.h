@@ -24,6 +24,15 @@ namespace gfx {
 namespace engine {
 namespace targets {
 
+/**
+ * @class GBufferTarget
+ * @brief The deferred G-buffer: four colour attachments plus depth, with the
+ *        render pass and framebuffer that write them.
+ *
+ * G0 albedo+AO, G1 normal+metallic, G2 position+roughness, G3 emissive. Cleared
+ * every frame. begin()/end() bracket the geometry passes that fill it; the
+ * depth attachment is left readable afterwards for passes that test against it.
+ */
 class GBufferTarget {
 public:
     GBufferTarget(coopa::gfx::core::Device& device,

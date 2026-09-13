@@ -42,6 +42,14 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class SdfForwardPass
+ * @brief Raymarches every BLEND SdfRenderer, lit and SSR-tracing, into the live
+ *        HDR frame.
+ *
+ * Built against TransparentPass's own render pass so SDF shapes and blended
+ * meshes interleave in one bracket. Owns only its pipeline.
+ */
 class SdfForwardPass {
 public:
     /// Vertex AND fragment both read this (same reasoning as

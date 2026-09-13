@@ -35,6 +35,14 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class SdfGBufferPass
+ * @brief Raymarches every OPAQUE/MASK SdfRenderer into the opaque G-buffer.
+ *
+ * Drawn inside GBufferTarget's existing begin()/end() bracket, after the mesh
+ * G-buffer pass, so SDF shapes depth-test against rasterized geometry. Owns
+ * only its pipeline.
+ */
 class SdfGBufferPass {
 public:
     /// Vertex AND fragment stages both read this -- vertex to know nothing

@@ -32,6 +32,14 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class FogPass
+ * @brief Composites Unity-style distance/height fog over a scene colour image.
+ *
+ * Owns two descriptor sets: scene colour plus the G-buffer normal and position
+ * at set 0, and the caller's FogData UBO at set 1, bound once at construction.
+ * Writes into a target the caller begins and ends.
+ */
 class FogPass {
 public:
     /**

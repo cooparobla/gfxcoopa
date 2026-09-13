@@ -54,6 +54,15 @@ using components::PointLightComponent;
 using components::GiProbeVolumeComponent;
 using components::ReflectionProbeComponent;
 
+/**
+ * @class GiSystem
+ * @brief Owns the global-illumination resources a frame binds: the SH probe
+ *        SSBO, the GI uniform buffer, the BRDF LUT and the reflection cubemaps.
+ *
+ * bake() runs once before the first frame is recorded, filling the probe grid
+ * (via GiBaker) and rendering each reflection probe's cubemap. After that the
+ * system is read-only and exposes one descriptor set for passes to bind.
+ */
 class GiSystem {
 public:
     GiSystem(coopa::gfx::core::Device& device,

@@ -50,6 +50,14 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class TiltShiftPass
+ * @brief Diorama-style tilt-shift blur: a horizontal then a vertical pass over
+ *        a screen-space focus band, with the upscale folded in.
+ *
+ * Owns both OffscreenTargets and one pipeline shared by the two stages, which
+ * differ only in their push constants and which set they bind.
+ */
 class TiltShiftPass {
 public:
     /// Per-frame tunables. All are push constants -- unlike this pass's descriptor

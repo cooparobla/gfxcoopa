@@ -34,6 +34,15 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class SsrPass
+ * @brief Screen-space reflections: Hi-Z raymarch, temporal resolve, optional
+ *        bilateral blur, then a BRDF composite back into the HDR frame.
+ *
+ * Owns the trace/resolve/blur targets, the reflection history image, and one
+ * pipeline per stage. The march can run at half resolution (see the
+ * constructor's half_res flag); the composite always runs at full resolution.
+ */
 class SsrPass {
 public:
     struct SsrPushConstants {

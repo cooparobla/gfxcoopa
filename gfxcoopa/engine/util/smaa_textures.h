@@ -33,6 +33,15 @@ namespace gfx {
 namespace engine {
 namespace util {
 
+/**
+ * @class SmaaTextures
+ * @brief Uploads the Jimenez SMAA reference area and search textures and owns
+ *        them for the lifetime of an SmaaPass.
+ *
+ * The source arrays come from the SMAA repository's Textures/ directory, located
+ * by the SMAA_TEXTURES_DIR CMake variable rather than vendored -- AreaTex.h
+ * alone is a 1.1 MB generated array.
+ */
 class SmaaTextures {
 public:
     SmaaTextures(coopa::gfx::core::Device& device,

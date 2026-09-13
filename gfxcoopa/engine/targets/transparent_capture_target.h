@@ -37,6 +37,15 @@ namespace gfx {
 namespace engine {
 namespace targets {
 
+/**
+ * @class TransparentCaptureTarget
+ * @brief Three colour attachments plus depth recording transparent surfaces'
+ *        shaded appearance, used only as a reflection source for SSR.
+ *
+ * Same clear-every-frame, depth-tested shape as GBufferTarget; it is a separate
+ * target because SSR must reflect transparent surfaces without them having been
+ * composited into the frame.
+ */
 class TransparentCaptureTarget {
 public:
     TransparentCaptureTarget(coopa::gfx::core::Device& device,

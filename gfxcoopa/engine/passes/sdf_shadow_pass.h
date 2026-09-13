@@ -63,6 +63,13 @@ struct SdfCubeShadowPushConstants {
     uint32_t  shadow_max_steps = 32; // see SdfDirectionalShadowPushConstants's doc
 };
 
+/**
+ * @class SdfShadowPass
+ * @brief Depth-only raymarch pipelines for directional and point-light shadows.
+ *
+ * Two pipelines, mirroring ShadowPipeline's shape, drawn inside the shadow
+ * targets' existing brackets so SDF shapes cast the same shadows meshes do.
+ */
 class SdfShadowPass {
 public:
     /**

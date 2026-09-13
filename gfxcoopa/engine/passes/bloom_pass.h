@@ -44,6 +44,15 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class BloomPass
+ * @brief Builds an additive HDR bloom image from a scene colour target.
+ *
+ * Owns the whole pyramid: one OffscreenTarget per level in each direction, and
+ * three pipelines (prefilter, downsample, upsample). The caller supplies the
+ * source HDR view once at construction or via recreate(), runs execute() inside
+ * its frame, and samples result_view_typed() afterwards.
+ */
 class BloomPass {
 public:
     /// Unity's default is 6 iterations from a half-resolution start. At this

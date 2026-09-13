@@ -37,6 +37,14 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class TransparentPass
+ * @brief Alpha-blends BLEND-mode geometry into the live HDR frame, depth-tested
+ *        against the G-buffer's opaque depth.
+ *
+ * Owns a raw VkRenderPass so it can load the existing colour and depth rather
+ * than clearing them, and one pipeline variant per named surface shader.
+ */
 class TransparentPass {
 public:
     /// 64 bytes -- the first 32 (through alpha_cutoff) are byte-identical to the first 32

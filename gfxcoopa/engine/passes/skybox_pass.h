@@ -25,6 +25,14 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class SkyboxPass
+ * @brief Fills the background pixels deferred lighting left blank with an
+ *        analytic sky gradient.
+ *
+ * Reads the G-buffer normal/metallic target to tell background from geometry.
+ * The caller's camera set is bound at set 0; this pass owns the set at 1.
+ */
 class SkyboxPass {
 public:
     struct SkyboxPushConstants {

@@ -32,6 +32,13 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
+/**
+ * @class FxaaPass
+ * @brief Resolves FXAA 3.11 over an already-tonemapped LDR image.
+ *
+ * Does no exposure or ACES work of its own -- feed it LDR. Writes into a target
+ * separate from the one it samples, which the caller begins and ends.
+ */
 class FxaaPass {
 public:
     /**

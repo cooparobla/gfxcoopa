@@ -30,6 +30,8 @@ namespace gi {
 
 using namespace util;
 
+/// @brief One axis-aligned box of scene geometry, with the surface properties a
+/// bounced ray needs. The baker's ray-scene intersection works against these.
 struct SceneBox {
     glm::vec3 box_min;
     glm::vec3 box_max;
@@ -37,6 +39,7 @@ struct SceneBox {
     glm::vec3 emissive; /**< Pre-multiplied (colour * strength) -- see PBRMaterial::gpu_emissive(). */
 };
 
+/// @brief Where a traced ray struck a SceneBox, and what it struck.
 struct HitInfo {
     bool hit = false;
     float t = 1e9f;
@@ -79,6 +82,15 @@ inline HitInfo intersect_box(const glm::vec3& O, const glm::vec3& D, const Scene
     return res;
 }
 
+/**
+ * @class GiBaker
+ * @brief Bakes a grid of spherical-harmonic light probes by tracing rays against
+ *        the scene's geometry on the CPU.
+ *
+ * Projects each probe's incoming radiance onto 9 second-order SH coefficients.
+ * Probes are independent, so the grid is baked in parallel over a flattened
+ * index range.
+ */
 class GiBaker {
 public:
     /// @brief JobType tag for GiBaker::bake_cpu's parallel_for dispatch (see coopa::job::JobType's doc).
