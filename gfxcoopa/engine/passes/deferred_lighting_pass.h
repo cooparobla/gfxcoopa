@@ -19,6 +19,7 @@
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/engine/passes/extra_sets.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 
 namespace coopa {
 namespace gfx {
@@ -41,56 +42,30 @@ public:
     {
         extra_.validate("DeferredLightingPass");
 
-        vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
-        frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-
-        // Descriptor set layout (the pass's last set -- see gbuffer_set_index_): 4
-        // G-Buffer samplers (albedo/ao, normal/metallic, position/roughness, emissive)
-        // + 1 SSAO sampler.
-        coopa::gfx::pipeline::DescriptorLayoutBuilder gbuffer_layout_builder;
-        for (uint32_t i = 0; i < 5; ++i) {
-            gbuffer_layout_builder.combined_sampler(i, coopa::gfx::ShaderStage::Fragment);
-        }
-        gbuffer_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            gbuffer_layout_builder.build(device)
-        );
-
-        gbuffer_desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder()
-                .add_sets(*gbuffer_desc_layout_, 1)
-                .build(device)
-        );
-
-        gbuffer_desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(
-            device, *gbuffer_desc_pool_, *gbuffer_desc_layout_
-        );
-
-        // Pipeline configuration
-        coopa::gfx::pipeline::PipelineDesc desc;
-        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
-        desc.vertex  = coopa::gfx::VertexLayout::none();
-        desc.raster.cull = coopa::gfx::CullMode::None;
-        desc.depth.test  = false;
-        desc.depth.write = false;
-
-        std::vector<const coopa::gfx::pipeline::DescriptorSetLayout*> layouts = {
-            &camera_layout,
-            &light_layout,
-            &shadow_layout
+        // Layout order: camera, light, shadow, then any caller extras, then this pass's
+        // own G-buffer/SSAO set LAST. Folding the first four into leading_layouts lets
+        // FullscreenStage place the owned set after them, and first_owned_set() then is
+        // the G-buffer set's index -- nothing here hardcodes either index.
+        std::vector<const coopa::gfx::pipeline::DescriptorSetLayout*> leading = {
+            &camera_layout, &light_layout, &shadow_layout
         };
-        // Both indices are derived, never hardcoded: they shift with the number of extra
-        // sets the caller supplies, and with any set this pass might later own ahead of them.
-        // A stale constant here means vkCmdBindDescriptorSets with a firstSet past the end of
-        // the layout -- a validation error and undefined behaviour.
-        extra_first_set_ = static_cast<uint32_t>(layouts.size());
-        layouts.insert(layouts.end(), extra_.layouts.begin(), extra_.layouts.end());
-        gbuffer_set_index_ = static_cast<uint32_t>(layouts.size());
-        layouts.push_back(gbuffer_desc_layout_.get());
+        extra_first_set_ = static_cast<uint32_t>(leading.size());
+        leading.insert(leading.end(), extra_.layouts.begin(), extra_.layouts.end());
 
-        desc.descriptor_layouts = layouts;
-        desc.push_constants     = pc_ranges;
+        FullscreenStageDesc sd;
+        sd.vert_spv = vert_spv;
+        sd.frag_spv = frag_spv;
+        sd.leading_layouts = leading;
+        // 4 G-Buffer samplers (albedo/ao, normal/metallic, position/roughness, emissive)
+        // + 1 SSAO sampler.
+        sd.owned_sets.emplace_back();
+        for (uint32_t i = 0; i < 5; ++i) {
+            sd.owned_sets[0].push_back({i, coopa::gfx::DescriptorType::CombinedImageSampler,
+                                        coopa::gfx::ShaderStage::Fragment, 1});
+        }
+        sd.push_constants = pc_ranges;
 
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, offscreen_pass, desc);
+        stage_ = std::make_unique<FullscreenStage>(device, offscreen_pass, sd);
 
         (void)linear_sampler;
     }
@@ -100,14 +75,14 @@ public:
                             coopa::gfx::TextureView g2_view,
                             coopa::gfx::TextureView g3_view,
                             const util::Sampler& linear_sampler) {
-        gbuffer_desc_set_->bind_image(0, g0_view, linear_sampler);
-        gbuffer_desc_set_->bind_image(1, g1_view, linear_sampler);
-        gbuffer_desc_set_->bind_image(2, g2_view, linear_sampler);
+        stage_->set().bind_image(0, g0_view, linear_sampler);
+        stage_->set().bind_image(1, g1_view, linear_sampler);
+        stage_->set().bind_image(2, g2_view, linear_sampler);
         // Binding 4, not 3 -- SSAO keeps binding 3 (see set_ssao_image() below), so adding
         // emissive is a pure append in every consumer's fragment shader rather than a
         // renumber, and this set stays aligned with SsrPass's composite G-buffer set,
         // which also treats binding 3 as SSAO.
-        gbuffer_desc_set_->bind_image(4, g3_view, linear_sampler);
+        stage_->set().bind_image(4, g3_view, linear_sampler);
     }
 
     /// Binding 3 must be rebound every frame -- callers pass the SSAO pass's blurred output when
@@ -119,7 +94,7 @@ public:
     /// neutral_view() accessors have no TextureView-returning sibling), so a sealed parameter here
     /// would have no caller who could actually satisfy it yet.
     void set_ssao_image(VkImageView ssao_view, VkSampler ssao_sampler) {
-        gbuffer_desc_set_->bind_image(3, ssao_view, ssao_sampler);
+        stage_->set().bind_image(3, ssao_view, ssao_sampler);
     }
 
     /// @brief Draws the fullscreen deferred-lighting pass, with no push-constant block
@@ -130,10 +105,7 @@ public:
               const coopa::gfx::pipeline::DescriptorSet& shadow_set,
               uint32_t viewport_w, uint32_t viewport_h) const
     {
-        cmd.bind_pipeline(*pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
-        cmd.set_scissor(0, 0, viewport_w, viewport_h);
-
+        stage_->bind(cmd, viewport_w, viewport_h);
         bind_sets_and_draw_(cmd, camera_set, light_set, shadow_set);
     }
 
@@ -150,22 +122,21 @@ public:
               const PushConstants& push_constants,
               uint32_t viewport_w, uint32_t viewport_h) const
     {
-        cmd.bind_pipeline(*pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
-        cmd.set_scissor(0, 0, viewport_w, viewport_h);
+        stage_->bind(cmd, viewport_w, viewport_h);
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, push_constants);
 
         bind_sets_and_draw_(cmd, camera_set, light_set, shadow_set);
     }
 
     VkPipelineLayout layout() const {
-        return pipeline_->layout();
+        return stage_->pipeline().layout();
     }
 
 private:
     /// @brief Shared tail of both draw() overloads -- binds the pass's own 3 sets, any
     /// caller-supplied ExtraSets, the G-buffer/SSAO set, and issues the fullscreen draw.
-    /// Relies on the caller having already called cmd.bind_pipeline(*pipeline_).
+    /// Relies on the caller having already called stage_->bind(), which binds the
+    /// pipeline, the viewport/scissor, and the G-buffer set at its own index.
     void bind_sets_and_draw_(coopa::gfx::command::CommandBuffer& cmd,
                              const coopa::gfx::pipeline::DescriptorSet& camera_set,
                              const coopa::gfx::pipeline::DescriptorSet& light_set,
@@ -177,21 +148,13 @@ private:
         if (extra_.bind) {
             extra_.bind(cmd, extra_first_set_);
         }
-        cmd.bind_descriptor_set(*gbuffer_desc_set_, gbuffer_set_index_);
-
-        cmd.draw(3); // Fullscreen triangle
+        stage_->draw(cmd);
     }
 
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> gbuffer_desc_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      gbuffer_desc_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       gbuffer_desc_set_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline>           pipeline_;
+    std::unique_ptr<FullscreenStage> stage_;
 
     ExtraSets extra_;
-    uint32_t  extra_first_set_   = 0;
-    uint32_t  gbuffer_set_index_ = 0;
+    uint32_t  extra_first_set_ = 0;
 };
 
 } // namespace passes
