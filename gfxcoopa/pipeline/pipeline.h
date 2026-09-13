@@ -206,62 +206,17 @@ public:
     Pipeline(core::Device& device, const RenderPass& render_pass, const PipelineDesc& desc)
         : device_(device)
     {
-        std::vector<VkDescriptorSetLayout> vk_layouts;
-        vk_layouts.reserve(desc.descriptor_layouts.size());
-        for (const DescriptorSetLayout* l : desc.descriptor_layouts) {
-            vk_layouts.push_back(l->handle());
-        }
+        TranslatedDesc t = translate(desc);
+        create_layout(t.layouts, t.push_constants);
 
-        std::vector<VkPushConstantRange> vk_push_constants;
-        vk_push_constants.reserve(desc.push_constants.size());
-        for (const PushConstantRange& pc : desc.push_constants) {
-            VkPushConstantRange r{};
-            r.stageFlags = detail::to_vk(pc.stages);
-            r.offset     = pc.offset;
-            r.size       = pc.size;
-            vk_push_constants.push_back(r);
-        }
+        // Sample count and attachment count come from the render pass, which cannot
+        // disagree with itself. An explicit blend.color_attachment_count still wins.
+        t.config.samples = detail::to_vk(render_pass.samples());
+        t.config.color_attachment_count = desc.blend.color_attachment_count != 0
+                                             ? desc.blend.color_attachment_count
+                                             : render_pass.color_attachment_count();
 
-        create_layout(vk_layouts, vk_push_constants);
-
-        std::vector<VkVertexInputBindingDescription> vk_bindings;
-        vk_bindings.reserve(desc.vertex.bindings.size());
-        for (const VertexBinding& b : desc.vertex.bindings) {
-            VkVertexInputBindingDescription vb{};
-            vb.binding   = b.binding;
-            vb.stride    = b.stride;
-            vb.inputRate = b.rate == VertexRate::Instance
-                              ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
-            vk_bindings.push_back(vb);
-        }
-
-        std::vector<VkVertexInputAttributeDescription> vk_attributes;
-        vk_attributes.reserve(desc.vertex.attributes.size());
-        for (const VertexAttribute& a : desc.vertex.attributes) {
-            VkVertexInputAttributeDescription va{};
-            va.location = a.location;
-            va.binding  = a.binding;
-            va.format   = detail::to_vk(a.format);
-            va.offset   = a.offset;
-            vk_attributes.push_back(va);
-        }
-
-        PipelineConfig config;
-        config.topology         = detail::to_vk(desc.raster.topology);
-        config.polygon_mode     = detail::to_vk(desc.raster.polygon);
-        config.cull_mode        = detail::to_vk(desc.raster.cull);
-        config.front_face       = detail::to_vk(desc.raster.front);
-        config.line_width       = desc.raster.line_width;
-        config.depth_test       = desc.depth.test;
-        config.depth_write      = desc.depth.write;
-        config.depth_compare_op = detail::to_vk(desc.depth.compare);
-        config.blend_mode       = desc.blend.mode;
-        config.samples          = detail::to_vk(render_pass.samples());
-        config.color_attachment_count = desc.blend.color_attachment_count != 0
-                                           ? desc.blend.color_attachment_count
-                                           : render_pass.color_attachment_count();
-
-        create_pipeline(render_pass.handle(), desc.shaders, vk_bindings, vk_attributes, config);
+        create_pipeline(render_pass.handle(), desc.shaders, t.bindings, t.attributes, t.config);
     }
 
     /**
@@ -284,59 +239,14 @@ public:
     Pipeline(core::Device& device, detail::RawRenderPass render_pass, const PipelineDesc& desc)
         : device_(device)
     {
-        std::vector<VkDescriptorSetLayout> vk_layouts;
-        vk_layouts.reserve(desc.descriptor_layouts.size());
-        for (const DescriptorSetLayout* l : desc.descriptor_layouts) {
-            vk_layouts.push_back(l->handle());
-        }
+        TranslatedDesc t = translate(desc);
+        create_layout(t.layouts, t.push_constants);
 
-        std::vector<VkPushConstantRange> vk_push_constants;
-        vk_push_constants.reserve(desc.push_constants.size());
-        for (const PushConstantRange& pc : desc.push_constants) {
-            VkPushConstantRange r{};
-            r.stageFlags = detail::to_vk(pc.stages);
-            r.offset     = pc.offset;
-            r.size       = pc.size;
-            vk_push_constants.push_back(r);
-        }
+        // No RenderPass to interrogate, so the caller must state the attachment count
+        // (0 falls back to PipelineConfig's default of 1) and MSAA stays at 1 sample.
+        t.config.color_attachment_count = desc.blend.color_attachment_count;
 
-        create_layout(vk_layouts, vk_push_constants);
-
-        std::vector<VkVertexInputBindingDescription> vk_bindings;
-        vk_bindings.reserve(desc.vertex.bindings.size());
-        for (const VertexBinding& b : desc.vertex.bindings) {
-            VkVertexInputBindingDescription vb{};
-            vb.binding   = b.binding;
-            vb.stride    = b.stride;
-            vb.inputRate = b.rate == VertexRate::Instance
-                              ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
-            vk_bindings.push_back(vb);
-        }
-
-        std::vector<VkVertexInputAttributeDescription> vk_attributes;
-        vk_attributes.reserve(desc.vertex.attributes.size());
-        for (const VertexAttribute& a : desc.vertex.attributes) {
-            VkVertexInputAttributeDescription va{};
-            va.location = a.location;
-            va.binding  = a.binding;
-            va.format   = detail::to_vk(a.format);
-            va.offset   = a.offset;
-            vk_attributes.push_back(va);
-        }
-
-        PipelineConfig config;
-        config.topology         = detail::to_vk(desc.raster.topology);
-        config.polygon_mode     = detail::to_vk(desc.raster.polygon);
-        config.cull_mode        = detail::to_vk(desc.raster.cull);
-        config.front_face       = detail::to_vk(desc.raster.front);
-        config.line_width       = desc.raster.line_width;
-        config.depth_test       = desc.depth.test;
-        config.depth_write      = desc.depth.write;
-        config.depth_compare_op = detail::to_vk(desc.depth.compare);
-        config.blend_mode       = desc.blend.mode;
-        config.color_attachment_count = desc.blend.color_attachment_count; // 0 -> PipelineConfig's own default (1)
-
-        create_pipeline(render_pass.handle, desc.shaders, vk_bindings, vk_attributes, config);
+        create_pipeline(render_pass.handle, desc.shaders, t.bindings, t.attributes, t.config);
     }
 
     /**
@@ -351,6 +261,17 @@ public:
     Pipeline(const Pipeline&) = delete;
     /// @brief Non-copyable.
     Pipeline& operator=(const Pipeline&) = delete;
+
+    /**
+     * @brief Move constructor: transfers ownership of the pipeline and its layout.
+     * @param other The Pipeline to move from (left holding null handles).
+     */
+    Pipeline(Pipeline&& other) noexcept
+        : device_(other.device_), pipeline_(other.pipeline_), layout_(other.layout_)
+    {
+        other.pipeline_ = VK_NULL_HANDLE;
+        other.layout_   = VK_NULL_HANDLE;
+    }
 
     /**
      * @brief Returns the underlying VkPipeline handle.
@@ -406,6 +327,79 @@ public:
     }
 
 private:
+    /**
+     * @brief A PipelineDesc converted to the Vulkan structs create_layout() and
+     * create_pipeline() take, owning the vectors those structs point into.
+     */
+    struct TranslatedDesc {
+        std::vector<VkDescriptorSetLayout>             layouts;
+        std::vector<VkPushConstantRange>               push_constants;
+        std::vector<VkVertexInputBindingDescription>   bindings;
+        std::vector<VkVertexInputAttributeDescription> attributes;
+        PipelineConfig                                 config;
+    };
+
+    /**
+     * @brief Converts the render-pass-independent half of a PipelineDesc.
+     *
+     * Everything that depends on the target render pass (sample count, color
+     * attachment count) is left at PipelineConfig's default for the calling
+     * constructor to fill in -- that is the only thing the two sealed
+     * constructors do differently.
+     *
+     * @param desc The pipeline description to convert.
+     * @return The converted descriptor set layouts, push constant ranges,
+     *   vertex bindings/attributes, and rasterization config.
+     */
+    static TranslatedDesc translate(const PipelineDesc& desc) {
+        TranslatedDesc t;
+
+        t.layouts.reserve(desc.descriptor_layouts.size());
+        for (const DescriptorSetLayout* l : desc.descriptor_layouts) {
+            t.layouts.push_back(l->handle());
+        }
+
+        t.push_constants.reserve(desc.push_constants.size());
+        for (const PushConstantRange& pc : desc.push_constants) {
+            VkPushConstantRange r{};
+            r.stageFlags = detail::to_vk(pc.stages);
+            r.offset     = pc.offset;
+            r.size       = pc.size;
+            t.push_constants.push_back(r);
+        }
+
+        t.bindings.reserve(desc.vertex.bindings.size());
+        for (const VertexBinding& b : desc.vertex.bindings) {
+            VkVertexInputBindingDescription vb{};
+            vb.binding   = b.binding;
+            vb.stride    = b.stride;
+            vb.inputRate = b.rate == VertexRate::Instance
+                              ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+            t.bindings.push_back(vb);
+        }
+
+        t.attributes.reserve(desc.vertex.attributes.size());
+        for (const VertexAttribute& a : desc.vertex.attributes) {
+            VkVertexInputAttributeDescription va{};
+            va.location = a.location;
+            va.binding  = a.binding;
+            va.format   = detail::to_vk(a.format);
+            va.offset   = a.offset;
+            t.attributes.push_back(va);
+        }
+
+        t.config.topology         = detail::to_vk(desc.raster.topology);
+        t.config.polygon_mode     = detail::to_vk(desc.raster.polygon);
+        t.config.cull_mode        = detail::to_vk(desc.raster.cull);
+        t.config.front_face       = detail::to_vk(desc.raster.front);
+        t.config.line_width       = desc.raster.line_width;
+        t.config.depth_test       = desc.depth.test;
+        t.config.depth_write      = desc.depth.write;
+        t.config.depth_compare_op = detail::to_vk(desc.depth.compare);
+        t.config.blend_mode       = desc.blend.mode;
+        return t;
+    }
+
     /**
      * @brief Creates the VkPipelineLayout from the given descriptor set layouts and push constants.
      * @param descriptor_layouts Layouts to include in the pipeline layout.

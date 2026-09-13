@@ -148,7 +148,8 @@ public:
     }
 
     /**
-     * @brief Binds a vertex buffer at binding slot 0 (analogous to glBindVertexArray + glBindBuffer).
+     * @brief Binds a vertex buffer to a vertex input binding slot
+     * (analogous to glBindVertexArray + glBindBuffer).
      * @param buffer     The vertex buffer to bind.
      * @param offset     Byte offset into the buffer.
      * @param binding    Vertex input binding slot index.

@@ -359,7 +359,7 @@ private:
      * Unlike image_available_semaphores_/in_flight_fences_ (scoped to a frame-in-flight
      * slot), render_finished_semaphores_ must be scoped to the swapchain image it's paired
      * with at present time — see the wait_semaphores/signal_semaphores comment in
-     * begin_frame() for why. Also resets images_in_flight_ to match the (possibly new)
+     * draw_frame() for why. Also resets images_in_flight_ to match the (possibly new)
      * image count, since old entries reference no-longer-valid in-flight state.
      */
     void create_render_finished_semaphores() {
@@ -382,8 +382,13 @@ private:
     /**
      * @brief Handles a swapchain out-of-date or suboptimal condition.
      *
-     * Queries the current framebuffer size, recreates the swapchain and
-     * framebuffers, then invokes the optional user callback.
+     * Defers entirely to the handler from set_resize_handler() when one is
+     * installed. Otherwise it rebuilds framebuffers against the swapchain's
+     * CURRENT extent and invokes `on_resize` -- it does NOT call
+     * Swapchain::recreate(), because Renderer does not own the window and so
+     * cannot query the new framebuffer size. A caller relying on this path
+     * must call Swapchain::recreate() itself; gfx::app::Context installs a
+     * handler that does the whole sequence instead.
      *
      * @param on_resize Optional user-supplied callback for post-resize work.
      */
@@ -392,11 +397,7 @@ private:
             resize_handler_();
             return;
         }
-        device_.wait_idle();
-        // Note: Caller is responsible for querying new size and calling
-        // swapchain_.recreate(w, h) since Renderer does not own the window.
-        // (See set_resize_handler()'s docs -- this is the latent bug it exists to fix.)
-        recreate_framebuffers();
+        recreate_framebuffers();  // waits for the device to go idle itself
         if (on_resize) on_resize();
     }
 
@@ -407,7 +408,7 @@ private:
 
     std::vector<VkFramebuffer>                          framebuffers_;                     /**< One framebuffer per swapchain image. */
     std::vector<std::unique_ptr<command::Semaphore>>    image_available_semaphores_;       /**< Signaled when a swapchain image is acquired. Indexed by current_frame_. */
-    std::vector<std::unique_ptr<command::Semaphore>>    render_finished_semaphores_;       /**< Signaled when rendering is complete. Indexed by image_index — see begin_frame(). */
+    std::vector<std::unique_ptr<command::Semaphore>>    render_finished_semaphores_;       /**< Signaled when rendering is complete. Indexed by image_index — see draw_frame(). */
     std::vector<std::unique_ptr<command::Fence>>        in_flight_fences_;                 /**< Fences to throttle CPU ahead of GPU. Indexed by current_frame_. */
     std::vector<VkFence>                                images_in_flight_;                 /**< Non-owning: aliases the in_flight_fences_ handle that last wrote each swapchain image. Indexed by image_index. */
     std::vector<VkCommandBuffer>                        raw_cmd_buffers_;                  /**< Command buffers (allocated from cmd_pool_). */

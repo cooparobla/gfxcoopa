@@ -283,26 +283,23 @@ public:
     DescriptorSet& operator=(const DescriptorSet&) = delete;
 
     /**
+     * @brief Move constructor: transfers VkDescriptorSet ownership.
+     * @param other The DescriptorSet to move from (left in a null state, so
+     *   its destructor frees nothing).
+     */
+    DescriptorSet(DescriptorSet&& other) noexcept
+        : device_(other.device_), pool_(other.pool_), set_(other.set_)
+    {
+        other.set_ = VK_NULL_HANDLE;
+    }
+
+    /**
      * @brief Binds a uniform buffer to the given binding point (like glBindBufferBase).
      * @param binding The binding index within the set.
      * @param buffer  The Buffer containing uniform data.
      */
     void bind_buffer(uint32_t binding, const memory::Buffer& buffer) {
-        VkDescriptorBufferInfo buffer_info{};
-        buffer_info.buffer = buffer.handle();
-        buffer_info.offset = 0;
-        buffer_info.range  = buffer.size();
-
-        VkWriteDescriptorSet write{};
-        write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet          = set_;
-        write.dstBinding      = binding;
-        write.dstArrayElement = 0;
-        write.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        write.descriptorCount = 1;
-        write.pBufferInfo     = &buffer_info;
-
-        vkUpdateDescriptorSets(device_.handle(), 1, &write, 0, nullptr);
+        write_buffer(binding, buffer, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     }
 
     /**
@@ -311,21 +308,7 @@ public:
      * @param buffer  The Buffer containing storage data.
      */
     void bind_storage_buffer(uint32_t binding, const memory::Buffer& buffer) {
-        VkDescriptorBufferInfo buffer_info{};
-        buffer_info.buffer = buffer.handle();
-        buffer_info.offset = 0;
-        buffer_info.range  = buffer.size();
-
-        VkWriteDescriptorSet write{};
-        write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet          = set_;
-        write.dstBinding      = binding;
-        write.dstArrayElement = 0;
-        write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write.descriptorCount = 1;
-        write.pBufferInfo     = &buffer_info;
-
-        vkUpdateDescriptorSets(device_.handle(), 1, &write, 0, nullptr);
+        write_buffer(binding, buffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     }
 
     /**
@@ -370,6 +353,30 @@ public:
     VkDescriptorSet handle() const { return set_; }
 
 private:
+    /**
+     * @brief Writes `buffer`'s whole range into `binding` as `type`.
+     * @param binding The binding index within the set.
+     * @param buffer  The buffer to bind.
+     * @param type    Uniform or storage buffer descriptor type.
+     */
+    void write_buffer(uint32_t binding, const memory::Buffer& buffer, VkDescriptorType type) {
+        VkDescriptorBufferInfo buffer_info{};
+        buffer_info.buffer = buffer.handle();
+        buffer_info.offset = 0;
+        buffer_info.range  = buffer.size();
+
+        VkWriteDescriptorSet write{};
+        write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet          = set_;
+        write.dstBinding      = binding;
+        write.dstArrayElement = 0;
+        write.descriptorType  = type;
+        write.descriptorCount = 1;
+        write.pBufferInfo     = &buffer_info;
+
+        vkUpdateDescriptorSets(device_.handle(), 1, &write, 0, nullptr);
+    }
+
     core::Device&    device_;               /**< Owning logical device (not owned). */
     VkDescriptorPool pool_  = VK_NULL_HANDLE;/**< Pool this set was allocated from (not owned). */
     VkDescriptorSet  set_   = VK_NULL_HANDLE;/**< The allocated descriptor set. */
@@ -457,8 +464,18 @@ public:
      * @param layout The layout that will be used to allocate `count` sets.
      * @param count  How many sets will be allocated from this layout.
      * @return *this, for chaining.
+     * @throws std::runtime_error if `layout` has no sealed bindings to size from.
      */
     DescriptorPoolBuilder& add_sets(const DescriptorSetLayout& layout, uint32_t count) {
+        // A raw-constructed layout has no bindings() to read, so it would silently
+        // contribute zero pool sizes and surface much later, at allocation time, as
+        // VK_ERROR_OUT_OF_POOL_MEMORY. Fail here instead, where the cause is visible.
+        if (layout.bindings().empty()) {
+            throw std::runtime_error(
+                "[gfxcoopa] DescriptorPoolBuilder::add_sets: layout has no sealed bindings to "
+                "size the pool from. Build it from std::vector<DescriptorBinding> (or via "
+                "DescriptorLayoutBuilder), or size this pool with add_type() instead.");
+        }
         max_sets_ += count;
         for (const DescriptorBinding& b : layout.bindings()) {
             type_counts_[b.type] += b.count * count;
