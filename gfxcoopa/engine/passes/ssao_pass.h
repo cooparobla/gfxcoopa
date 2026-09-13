@@ -226,9 +226,9 @@ public:
 
         // History is a plain persistent image (not one of the render-target triples above): it's
         // never rendered into via a render pass, only vkCmdCopyImage'd into at the end of
-        // execute(). A fresh image on every resize means stale history from the old resolution
-        // can never leak into the new one -- history_initialized_ = false forces the resolve
-        // pass to ignore it until update_ssao_history_() actually populates it again.
+        // execute(). Allocating a fresh image on resize means history from the previous
+        // resolution can never leak into the new one, and history_initialized_ = false keeps
+        // the resolve pass from reading it until update_ssao_history_() populates it.
         history_image_ = std::make_unique<coopa::gfx::memory::Image>(
             device_, allocator_, width_, height_, VK_FORMAT_R8_UNORM,
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,

@@ -28,20 +28,16 @@ namespace pipeline {
  * app-local override shadows the base copy of the same logical name exactly
  * the way `#include "x"` shadows `#include <gfx/x>` at compile time.
  *
- * Every existing `..., const std::string& shader_dir)` constructor parameter
- * in gfxcoopa (GiSystem, BRDFLUT, SmaaPass, ProbeCapturePass) can switch its
- * parameter type to `const ShaderLibrary&` without breaking a single call
- * site: the single-argument constructors below are implicit, so passing a
- * plain `std::string` (the old single-directory behaviour) still compiles
- * and behaves identically -- it's a one-directory search path.
+ * The single-argument constructors are implicit, so anywhere a
+ * `const ShaderLibrary&` is expected a plain `std::string` directory works
+ * too, and means a one-directory search path.
  */
 class ShaderLibrary {
 public:
     ShaderLibrary() = default;
 
-    /// Implicit on purpose: every existing `f(..., shader_dir)` call site
-    /// where `shader_dir` is a `std::string` keeps compiling once the
-    /// parameter type changes to `const ShaderLibrary&`.
+    /// Implicit on purpose: a bare directory string is a valid, and common,
+    /// one-entry search path, so `f(..., "assets/shaders")` reads naturally.
     ShaderLibrary(std::string dir) : dirs_{std::move(dir)} {}
     ShaderLibrary(const char* dir) : dirs_{dir} {}
 

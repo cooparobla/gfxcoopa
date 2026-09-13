@@ -36,11 +36,9 @@ struct VertexAttribute {
  * @struct VertexLayout
  * @brief A pipeline's full vertex input description, built fluently.
  *
- * Replaces the pattern every pre-seal vertex struct repeated by hand
- * (`static VkVertexInputBindingDescription binding_description()` +
- * `static std::vector<VkVertexInputAttributeDescription>
- * attribute_descriptions()`). A type's canonical layout is now a single
- * `static VertexLayout layout()` built like:
+ * A vertex type declares its canonical layout as a single
+ * `static VertexLayout layout()`, rather than the separate binding- and
+ * attribute-description functions Vulkan's structs would otherwise need:
  *
  * @code
  * static VertexLayout layout() {

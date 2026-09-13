@@ -19,13 +19,12 @@ namespace gfx {
  * @class TextureView
  * @brief An opaque, copyable identity token for a GPU texture view.
  *
- * Every gfxcoopa accessor that used to return `VkImageView` (Texture::view(),
- * every render target's `*_view()`, etc.) returns this instead. It exists to
- * satisfy three needs observed across every downstream consumer:
+ * Returned by every gfxcoopa accessor that names a texture view
+ * (Texture::view(), every render target's `*_view()`, etc.) in place of a
+ * raw `VkImageView`. It serves three needs consumers have:
  *
  *  - **Hashable**: usable as an `unordered_map`/`unordered_set` key for
- *    per-texture descriptor-set caches and packed sort keys, exactly as
- *    `VkImageView` was being (ab)used for before.
+ *    per-texture descriptor-set caches and packed sort keys.
  *  - **A well-defined null/invalid value**: TextureView::null() (default
  *    constructed) replaces `VK_NULL_HANDLE` as an "asset not resident yet"
  *    sentinel.

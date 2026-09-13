@@ -29,9 +29,9 @@ namespace passes {
  * @struct DirectionalShadowPushConstants
  * @brief Push constant block for directional shadow depth pass (68 bytes).
  *
- * model used to live here too (128B total) but is now streamed per-instance
- * instead (see data::InstanceData) — light_space_matrix is shared across the
- * whole pass call; alpha is per-BATCH (all instances in one draw share one
+ * model is streamed per-instance via data::InstanceData rather than pushed
+ * here. light_space_matrix is shared across the whole pass call; alpha is
+ * per-BATCH (all instances in one draw share one
  * mesh AND, for BLEND casters, one alpha -- see InstanceBatcher's shadow
  * batch key) and drives shadow_depth.frag's stochastic alpha-dither discard.
  * 1.0 (the default, and always what OPAQUE/MASK casters get) means "fully

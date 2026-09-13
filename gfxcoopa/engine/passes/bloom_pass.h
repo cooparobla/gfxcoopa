@@ -3,17 +3,13 @@
  * @brief Additive HDR bloom: bright-pass threshold -> progressive multi-tap
  *        downsample -> progressive tent-filter upsample+combine.
  *
- * Modelled on SmaaPass (a chain of owned OffscreenTargets, each stage reading the
- * previous one's output, with NO manual barriers -- see execute()'s doc) rather
- * than SceneColorMipPass (a single mip-mapped VkImage with hand-rolled per-mip
- * VkImageViews/VkFramebuffers and a manual per-mip VkImageMemoryBarrier). That
- * choice is deliberate: bloom's consumer (PixelStylizePass) reads exactly ONE
- * final image at one resolution -- there is no cross-level textureLod() the way
- * ssr.frag needs from SceneColorMipPass's chain, so a single mip-mapped image's
- * only real advantage (one allocation, one maxLod sampler) buys nothing here. A
- * dual-filter pyramid also needs a parallel "up" chain regardless of which
- * storage strategy is used (see up_targets_'s own doc), so the OffscreenTarget
- * array ends up being LESS hand-rolled Vulkan overall, not more.
+ * Storage is a chain of owned OffscreenTargets, each stage reading the previous
+ * one's output, with no manual barriers (see execute()'s doc) -- not a single
+ * mip-mapped image with per-mip views, framebuffers and barriers the way
+ * SceneColorMipPass does it. Bloom's consumer (PixelStylizePass) reads exactly
+ * ONE final image at one resolution, so the mip-mapped layout's advantage (one
+ * allocation, one maxLod sampler) buys nothing, and a dual-filter pyramid needs
+ * a parallel "up" chain either way (see up_targets_'s own doc).
  *
  * Every descriptor this pass owns is bound once, at construction (see
  * bind_static_descriptors_()) -- there is no per-frame update_descriptors() the

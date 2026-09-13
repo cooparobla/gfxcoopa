@@ -428,10 +428,8 @@ public:
     /**
      * @brief Copies image texels into a buffer (vkCmdCopyImageToBuffer).
      * The image must already be transition()ed to TextureUsage::TransferSrc.
-     * This is the operation every pre-seal hand-rolled screenshot/readback
-     * path needed and gfxcoopa had no wrapper for; see
-     * gfxcoopa/util/image_readback.h for the full readback-to-PNG helper
-     * built on top of this.
+     * See gfxcoopa/util/image_readback.h for the full readback-to-PNG
+     * helper built on top of this.
      * @param src    Source image.
      * @param dst    Destination buffer. Must be at least
      *   extent.width * extent.height * format_byte_size(src's format) bytes.

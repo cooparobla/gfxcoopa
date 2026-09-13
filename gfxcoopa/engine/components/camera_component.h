@@ -88,7 +88,7 @@ public:
     std::string focus_object    = "";      /**< ':'-separated scene path to keep in focus; empty inherits the render config (see class doc). */
     bool is_main                = false;   /**< Claims the main-camera singleton in start() (alias: main). */
 
-    // Legacy alias for orthographic scale (full height = orthographic_size * 2)
+    // Alias expressing orthographic size as a full height rather than a half-height.
     float get_ortho_scale() const { return orthographic_size * 2.0f; }
     void set_ortho_scale(float scale) { orthographic_size = scale * 0.5f; }
 

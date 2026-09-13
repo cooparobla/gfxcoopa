@@ -231,12 +231,10 @@ inline SampleCount from_vk(VkSampleCountFlagBits s) {
 
 // --- TextureUsage -> VkImageLayout / access & stage masks -----------------
 //
-// Centralizing this mapping is what let command::CommandBuffer::transition()
-// drop the "from" layout argument entirely (Image tracks its own current
-// TextureUsage) and automatically pick the right access/stage masks -- the
-// exact information every pre-seal hand-rolled VkImageMemoryBarrier had to
-// get right by hand, and the two known consumer bugs (transposed stage
-// masks) both involved getting wrong.
+// One mapping from TextureUsage to layout + access/stage masks, so
+// command::CommandBuffer::transition() needs no "from" argument (Image tracks
+// its own current TextureUsage) and no call site picks barrier masks by hand.
+// Transposed src/dst stage masks are the classic way to get that wrong.
 
 inline VkImageLayout to_vk_layout(TextureUsage u) {
     switch (u) {

@@ -38,16 +38,15 @@ public:
      * @param filter        Min/mag filter (VK_FILTER_NEAREST or VK_FILTER_LINEAR).
      * @param address_mode  UV wrap mode (default: clamp to edge).
      * @param max_lod       Maximum LOD clamp for explicit-LOD sampling (e.g. textureLod) as well
-     *                      as implicit mip selection. Defaults to 0.0f (single-mip images, the
-     *                      behavior every existing caller relies on). Pass the image's mip count
-     *                      to sample a real mip chain (e.g. a Hi-Z pyramid).
+     *                      as implicit mip selection. Defaults to 0.0f, correct for the
+     *                      single-mip images that are the common case; pass the image's mip
+     *                      count to sample a real mip chain (e.g. a Hi-Z pyramid).
      * @param mipmap_mode   Mip selection filter (VK_SAMPLER_MIPMAP_MODE_NEAREST or _LINEAR).
-     *                      Defaults to NEAREST, matching every existing caller's expectations.
-     *                      Pass LINEAR for smooth roughness-driven mip blending (e.g. a
-     *                      prefiltered reflection cubemap).
+     *                      Defaults to NEAREST. Pass LINEAR for smooth roughness-driven
+     *                      mip blending (e.g. a prefiltered reflection cubemap).
      * @param compare_op    Depth-compare op for shadow-map hardware PCF (sampler2DShadow /
      *                      samplerCubeShadow in GLSL). Defaults to VK_COMPARE_OP_NEVER, which
-     *                      leaves compareEnable off (every existing caller's behavior). Pass
+     *                      leaves compareEnable off. Pass
      *                      VK_COMPARE_OP_GREATER via Sampler::shadow() to enable it: GLSL's
      *                      `texture(sampler2DShadow, vec3(uv, ref))` evaluates `ref OP sampled`
      *                      and bilinearly filters the per-tap compare *result*, not the raw
@@ -89,9 +88,9 @@ public:
      * @param device Logical device.
      * @param desc   Sealed filter/address/mipmap/compare/anisotropy configuration.
      */
-    // desc.min (minification filter) is folded into the delegated ctor's single `filter`
-    // param via desc.mag below -- every existing caller of the raw ctor already uses the
-    // same VkFilter for both min and mag, and no SamplerDesc preset sets min != mag.
+    // The delegated ctor takes a single `filter` for both min and mag, so desc.min is
+    // not forwarded. No SamplerDesc preset sets min != mag; a sampler that needs them to
+    // differ has to use the raw constructor above.
     Sampler(core::Device& device, const SamplerDesc& desc)
         : Sampler(device,
                   detail::to_vk(desc.mag),

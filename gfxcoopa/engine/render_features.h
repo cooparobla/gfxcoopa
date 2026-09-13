@@ -40,8 +40,8 @@ struct IndirectParams {
 
     /// The three colours gfx/sky.glsl's sky_gradient() mixes between, straight
     /// up / at the horizon / straight down (engine is Z-up). Defaulted to that
-    /// file's own SKY_ZENITH/SKY_HORIZON/SKY_GROUND constants so a consumer
-    /// that never touches these renders identically to before they existed.
+    /// file's own SKY_ZENITH/SKY_HORIZON/SKY_GROUND constants, so a consumer
+    /// that never sets them matches what the shader would pick on its own.
     /// Kept in this struct, not passed separately, for the same reason as
     /// ambient_intensity/sky_intensity above: the lighting pass and the SSR
     /// composite must see the same colours or SSR's subtraction leaves a

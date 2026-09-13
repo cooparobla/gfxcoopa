@@ -92,7 +92,7 @@ public:
      * @brief Begins the offscreen render pass.
      *
      * Records begin_render_pass with the given clear color (dark gray by
-     * default, matching every existing caller) and a far-depth clear. Sets
+     * default) and a far-depth clear. Sets
      * dynamic viewport and scissor to the full render resolution.
      *
      * @param cmd   Command buffer to record into.

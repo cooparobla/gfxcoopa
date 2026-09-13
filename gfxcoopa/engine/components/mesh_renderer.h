@@ -47,8 +47,7 @@ struct PBRMaterial {
     float     alpha_cutoff = 0.5f;              /**< Only meaningful for AlphaMode::Mask. */
 
     /// Backface culling for this material, in the stock (no `shader:` override) G-buffer/Mask
-    /// pipeline only. true (default) matches every material's behavior before this field
-    /// existed. false renders both winding orders -- for a mesh that is not a closed solid, or
+    /// pipeline only. false renders both winding orders -- for a mesh that is not a closed solid, or
     /// where the CUTOUT/Mask alpha test intentionally exposes the interior (see
     /// assets/scenes/pixel_demo/scene.yaml's cutout_sphere.000). Ignored when `shader` is set
     /// (a named SurfaceShaderDesc's own `cull` always wins -- see GBufferPipeline::add_variant())

@@ -28,8 +28,8 @@ struct SamplerDesc {
     CompareOp   compare = CompareOp::Never;   ///< Never == comparison disabled.
     float       max_anisotropy = 0.0f;        ///< 0 == anisotropic filtering disabled.
 
-    /// @brief Bilinear filtering, tiling UVs. Matches every prior gfxcoopa
-    /// caller's default behavior before this preset existed.
+    /// @brief Bilinear filtering, tiling UVs -- the default SamplerDesc,
+    /// named for call sites that want the choice to read explicitly.
     static SamplerDesc linear_repeat() { return SamplerDesc{}; }
 
     /// @brief Point sampling, clamped UVs. For pixel-art sprite/tile atlases,

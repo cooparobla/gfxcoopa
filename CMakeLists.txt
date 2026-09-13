@@ -17,9 +17,9 @@ find_package(Vulkan REQUIRED)
 find_package(glfw3 REQUIRED)
 
 # --- Sibling library ---
-# engine/components/ already includes <coopa/scene/...> and (as of the
-# coopa::asset integration) <coopa/asset/...>, so gfxcoopa depends on
-# libcoopa's coopa::lib target for those headers plus glm/fkYAML/phmap.
+# engine/components/ includes <coopa/scene/...> and <coopa/asset/...>, so
+# gfxcoopa depends on libcoopa's coopa::lib target for those headers plus
+# glm/fkYAML/phmap.
 set(LIBCOOPA_DIR "${ROOT_DIR_PARENT}/libcoopa")
 if(NOT TARGET coopa::lib)
     add_subdirectory(${LIBCOOPA_DIR} ${CMAKE_CURRENT_BINARY_DIR}/libcoopa-build)
@@ -34,7 +34,7 @@ configure_file(configuration/root_directory.h.in configuration/root_directory.h)
 # gfxcoopa's own shader build AND a continuously-run compile test that every
 # base entry point still works standalone against the gfx/ headers it ships.
 # INCLUDE_DIR defaults to gfxcoopa's own shaders (see cmake/GfxShaders.cmake),
-# so downstream consumers no longer need to pass it explicitly either.
+# so a downstream consumer does not pass it explicitly.
 include(cmake/GfxShaders.cmake)
 gfx_add_shader_target(shaders
     SHADER_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders"
@@ -56,9 +56,9 @@ target_include_directories(gfxcoopa_impl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc
 # glfw symbols must resolve at the consumer's link step too. This leaks the
 # glfw *target name* into a consumer's link line but not the glfw *API* --
 # consumers still call zero find_package(glfw3) and name zero GLFW symbols.
-# Pimpl'ing Window to make this PRIVATE was considered and rejected: it costs
-# a .cpp, a heap allocation, and lost inlining, for no seal benefit beyond
-# what the header/type seal (and the leak-check script) already provide.
+# Making this PRIVATE would require pimpl'ing Window, at the cost of a .cpp,
+# a heap allocation and lost inlining, for no seal benefit beyond what the
+# header/type seal and the leak-check script already provide.
 target_link_libraries(gfxcoopa_impl PUBLIC glfw Vulkan::Headers)
 
 # --- coopa::gfx: the public, header-only consumable target. ---
@@ -88,18 +88,17 @@ target_link_libraries(gfxcoopa_lib INTERFACE gfxcoopa_impl coopa::lib ${CMAKE_DL
 # target linked against this fails to compile -- this is what makes the
 # "headless tests never touch Vulkan" invariant structural rather than
 # aspirational (see tools/check_no_vulkan.sh for the complementary grep gate
-# over source text). Keyboard/mouse input used to live here too
-# (gfxcoopa/input/) but has since moved to coopa/input/ in libcoopa, which
-# coopa::lib below already brings in -- see coopa/input/README.md.
+# over source text). Keyboard/mouse input is Vulkan-free for the same reason
+# but lives in coopa/input/ in libcoopa, which coopa::lib below brings in --
+# see coopa/input/README.md.
 add_library(gfxcoopa_pure INTERFACE)
 add_library(coopa::gfx_pure ALIAS gfxcoopa_pure)
 target_compile_features(gfxcoopa_pure INTERFACE cxx_std_20)
 target_include_directories(gfxcoopa_pure INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(gfxcoopa_pure INTERFACE coopa::lib)
 
-# --- gfxcoopa's own dogfood/test executable. Kept named `gfxcoopa` (matching
-# the project() name above) so `cplay`, which runs `./build/<project name>`,
-# keeps working unchanged. ---
+# --- gfxcoopa's own dogfood/test executable. Must be named `gfxcoopa`,
+# matching project() above, because `cplay` runs `./build/<project name>`. ---
 add_executable(gfxcoopa test.cpp)
 add_dependencies(gfxcoopa shaders)
 target_link_libraries(gfxcoopa PRIVATE coopa::gfx)

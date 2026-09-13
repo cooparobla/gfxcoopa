@@ -153,11 +153,9 @@ public:
      * GPU finishes -- the whole begin_single_use()/end_single_use() dance
      * in one call, using CommandBuffer rather than a raw VkCommandBuffer.
      *
-     * This is what every pre-seal hand-rolled one-shot submission (a
-     * texture upload, a readback copy, a GI bake step) was reimplementing
-     * by hand around the two methods above, occasionally worse -- e.g.
-     * allocating with vkAllocateCommandBuffers directly instead of going
-     * through this pool at all.
+     * Use this for any one-shot GPU work -- a texture upload, a readback
+     * copy, a GI bake step -- rather than pairing the two methods above by
+     * hand, which leaks the buffer if `record` throws.
      *
      * @param record A callable that records commands into the CommandBuffer.
      *   Do not call begin()/end() on it yourself -- submit_once() does both.

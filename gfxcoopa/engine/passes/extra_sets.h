@@ -24,13 +24,12 @@ namespace passes {
  * @brief Optional app-supplied descriptor sets, appended AFTER a pass's own
  *        sets in its pipeline layout.
  *
- * Replaces the previous pattern of a pass taking a specific
- * `VkDescriptorSetLayout gi_layout` parameter and binding a specific
- * `gi::GiSystem*` at a hardcoded set index: that baked one particular
- * subsystem into gfxcoopa's pass layouts, and -- worse -- declared the set
- * in the pipeline layout UNCONDITIONALLY, so passing a null system at
- * execute() time left the set undeclared-but-present, an unbound set rather
- * than a shader genuinely built without it.
+ * A pass declares only its own sets and appends whatever the app supplies,
+ * rather than naming a specific subsystem (a `gi_layout` parameter bound to
+ * a `gi::GiSystem*`) at a hardcoded set index. Empty extras mean the set is
+ * not declared in the pipeline layout at all, so a shader built without the
+ * subsystem is genuinely built without it rather than left with an unbound
+ * set.
  *
  * `layouts` and `bind` are kept in one struct deliberately: the entire class
  * of bug this type exists to prevent is a layout and its binder drifting

@@ -3,15 +3,10 @@
  * @brief GPU image readback (download to host memory / PNG), the mirror of
  * memory/image_upload.h's upload path.
  *
- * gfxcoopa had no readback path at all before this -- every consumer that
- * needed one (a debug screenshot, an exit-time render capture) hand-rolled
- * the staging-buffer + barrier + vkCmdCopyImageToBuffer + vkMapMemory
- * recipe independently, each slightly differently and each worse than the
- * others (toyengine's util/screenshot.h used CommandPool::begin_single_use;
- * blendy's version hand-rolled vkAllocateCommandBuffers/vkQueueSubmit/
- * vkQueueWaitIdle/vkFreeCommandBuffers instead of using the pool at all).
- * This header is that recipe, written once, using the sealed
- * CommandBuffer::transition()/copy_image_to_buffer() from command_buffer.h.
+ * One place for the staging-buffer + barrier + vkCmdCopyImageToBuffer +
+ * vkMapMemory recipe a debug screenshot or exit-time render capture needs,
+ * built on the sealed CommandBuffer::transition()/copy_image_to_buffer().
+ * A caller names no Vk* type and writes no barrier of its own.
  */
 
 #ifndef COOPA_GFX_UTIL_IMAGE_READBACK_H
@@ -50,9 +45,8 @@ namespace gfx {
 namespace util {
 
 /// @brief Creates `path`'s parent directory (recursively) if it doesn't
-/// already exist. stbi_write_png does not do this itself -- every pre-seal
-/// caller of the code this consolidates (toyengine's screenshot.h, blendy's
-/// inline exit-time capture) did it manually before writing.
+/// already exist. stbi_write_png does not do this itself and fails on a
+/// missing directory, so every write path here goes through this first.
 inline void ensure_parent_dir(const std::string& path) {
     std::filesystem::path p(path);
     if (p.has_parent_path()) {
@@ -109,22 +103,14 @@ inline ImageData read_image(core::Device& device, memory::Allocator& allocator,
                                 BufferUsage::TransferDst, MemoryResidency::GpuToCpu);
 
     TextureUsage original = src.current_usage();
-    // Stale-bookkeeping correction: TransferSrc is a value this very function can leave an image
-    // in (see this function's own doc -- deliberate when `original` was Undefined/Present), but
-    // none of this codebase's render targets ever intentionally sit in TransferSrc across
-    // frames. A render pass's automatic layout transition (e.g. to ShaderRead, so a later pass
-    // can sample the target) is NOT reflected back into Image::current_usage() -- only
-    // CommandBuffer::transition() updates it (see command_buffer.h) -- so if this function is
-    // called again on the SAME image after more frames have rendered into it, current_usage()
-    // still reads the stale TransferSrc this function itself set last time, even though the
-    // image's REAL layout has long since moved to ShaderRead via its owning render pass. Treating
-    // that stale TransferSrc as non-restorable (the pre-fix behavior) made the barrier below claim
-    // "already TransferSrc" -- a no-op that never actually transitions anything -- while the
-    // validation layer's OWN tracked state (which follows the real layout, independent of our
-    // bookkeeping) correctly still says ShaderRead, so the subsequent copy is flagged for
-    // expecting TRANSFER_SRC_OPTIMAL when the image is actually SHADER_READ_ONLY_OPTIMAL.
-    // Correcting the bookkeeping here (once, before it's read again below) makes repeated capture
-    // of the same render target self-healing.
+    // A reading of TransferSrc here is always stale bookkeeping, never the image's real
+    // layout. Only CommandBuffer::transition() writes Image::current_usage(); a render pass's
+    // automatic attachment transition does not. So a render target captured once, then
+    // rendered into again, still reports the TransferSrc this function left behind while its
+    // actual layout has moved on to ShaderRead via its owning render pass. Trusting the stale
+    // value would make the barrier below a no-op and leave the copy reading an image in the
+    // wrong layout. Re-point the bookkeeping at ShaderRead before it is used, so repeated
+    // capture of the same target is self-correcting.
     if (original == TextureUsage::TransferSrc) {
         src.mark_transitioned(TextureUsage::ShaderRead);
         original = TextureUsage::ShaderRead;
@@ -157,8 +143,9 @@ inline ImageData read_image(core::Device& device, memory::Allocator& allocator,
     vmaUnmapMemory(allocator.handle(), readback_buf.allocation());
 
     // BGRA -> RGBA swizzle: stb_image_write and every other consumer of
-    // ImageData expects RGBA channel order. This is the one piece of the
-    // pre-seal uicoopa is_bgra_format() helper this function subsumes.
+    // ImageData expects RGBA channel order, but a swapchain image is
+    // commonly B8G8R8A8. Swizzle in place so ImageData's contract holds
+    // regardless of the source format.
     if (is_bgra(format) && bytes_per_pixel == 4) {
         for (size_t i = 0; i + 3 < result.pixels.size(); i += 4) {
             std::swap(result.pixels[i], result.pixels[i + 2]);

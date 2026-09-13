@@ -42,13 +42,9 @@ struct alignas(16) LightUBO {
     // Directional Light
     glm::vec4 dir_direction          = glm::vec4(0.0f); /**< xyz = light direction (normalized), w = intensity */
     glm::vec4 dir_color              = glm::vec4(0.0f); /**< xyz = RGB color, w = unused */
-    /**< Formerly dir_ambient (DirectionalLight::ambient, RGB), then a dead
-     * `_reserved_was_dir_ambient` pad (that field had exactly one reader
-     * anywhere -- pbr.frag's legacy fallback branch, in PbrPipeline, which no
-     * consumer ever instantiates). Repurposed as directional/point soft-shadow
-     * tuning -- kept at this offset (not moved) so every later field's offset
-     * stays identical across the ~11 shader LightUBO blocks in
-     * gfxcoopa/toyengine/blendy that must byte-match this struct.
+    /**< Directional/point soft-shadow tuning. Its position in the struct is
+     * fixed: the ~11 shader LightUBO blocks across gfxcoopa/toyengine/blendy
+     * must byte-match this layout, so moving it shifts every later field.
      *   x = directional shadow intensity, 0..1 (DirectionalLightComponent::shadow_intensity)
      *   y = point-light PCF disk radius, as a tangent-space offset on a unit sample
      *       direction (toyengine converts this from PixelRenderConfig::point_shadow_softness
@@ -56,9 +52,9 @@ struct alignas(16) LightUBO {
      *       shadow_softness from world units); 0 = single hard compare
      *   z = directional PCF tap count (float; int()-cast in the shader)
      *   w = per-frame golden-angle rotation offset, for TAA decorrelation
-     * Consumers that never write this (e.g. blendy, which still uses its own
-     * push-constant transport) keep this default, which reproduces a fully
-     * dark, hard-compared shadow -- today's pre-existing look. */
+     * A consumer that never writes this (e.g. blendy, which transports the
+     * same values via its own push constants) gets the default, which is a
+     * fully dark, hard-compared shadow. */
     glm::vec4 dir_shadow_extra = glm::vec4(1.0f, 0.0f, 16.0f, 0.0f);
     glm::mat4 dir_light_space_matrix = glm::mat4(1.0f); /**< Light projection * view matrix for directional shadows */
     glm::vec4 dir_shadow_params      = glm::vec4(0.005f, 0.0f, 1.0f, 0.0f); /**< x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled (1 or 0), w=normal_bias */

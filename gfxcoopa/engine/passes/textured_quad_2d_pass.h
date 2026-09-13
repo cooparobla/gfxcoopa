@@ -2,7 +2,7 @@
  * @file textured_quad_2d_pass.h
  * @brief Shared 2D textured-quad pass: descriptor layout/pool, the TextureView -> descriptor
  * set cache, per-frame-in-flight streaming geometry buffers, and a named-pipeline-variant
- * map -- the ~90% uicoopa's UiPass and pixengine's SpritePass used to hand-roll identically.
+ * map -- the parts uicoopa's UiPass and pixengine's SpritePass have in common.
  *
  * What stays OUT of this class, because it genuinely differs per consumer:
  *  - Viewport/scissor policy (UiPass: full framebuffer, per-batch clip-derived scissor.
@@ -79,8 +79,8 @@ struct TexturedQuad2DDesc {
      * Optional app-supplied descriptor sets, appended after this pass's own texture set
      * (set 0) -- e.g. uicoopa's UiWorldPass taking a scene depth texture at set 1 so it
      * can discard world-space UI fragments behind opaque geometry. Default-constructed
-     * ExtraSets is empty(), which leaves the pipeline layout byte-identical to before
-     * this field existed.
+     * ExtraSets is empty(), in which case no extra set is declared in the pipeline
+     * layout at all.
      *
      * Appended to EVERY pipeline this pass builds -- the stock one and every
      * add_variant() -- deliberately, not per variant: draw() implementations here push

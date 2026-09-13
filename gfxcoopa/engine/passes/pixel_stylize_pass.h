@@ -126,14 +126,12 @@ public:
         desc_set_->bind_image(3, palette_lut, nearest_sampler);
         // bloom_result: the finished, pre-blurred output of a dedicated BloomPass pyramid
         // (bright-pass threshold -> multi-tap downsample -> tent-filter upsample+combine),
-        // sampled with a plain texture() through a LINEAR sampler -- unlike the mip-chain-
-        // reuse hack this replaced, there is no LOD to pick, just one already-composited
-        // image, half this pass's resolution, bilinearly upsampled for free. Optional
-        // (defaults to binding 0's own view/sampler again -- a harmless self-bind, since
-        // bloom_intensity <= 0 means the shader never reads it) so existing callers that
-        // don't want bloom need no source code change. The caller must only pass a real
-        // view once its BloomPass has actually executed at least once -- see
-        // PixelRenderPipeline's construction-time bloom_enabled guard for why.
+        // sampled with a plain texture() through a LINEAR sampler: one already-composited
+        // image at half this pass's resolution, bilinearly upsampled for free, with no LOD
+        // to select. Optional -- omitting it re-binds binding 0's own view/sampler, which is
+        // harmless because bloom_intensity <= 0 makes the shader skip the read. Only pass a
+        // real view once the BloomPass has executed at least once, or the descriptor points
+        // at a target that has never been rendered into.
         desc_set_->bind_image(4, bloom_sampler ? bloom_result : scene_color,
                               bloom_sampler ? *bloom_sampler : linear_sampler);
     }

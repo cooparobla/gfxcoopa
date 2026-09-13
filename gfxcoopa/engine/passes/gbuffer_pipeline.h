@@ -28,10 +28,9 @@ namespace passes {
 
 class GBufferPipeline {
 public:
-    // model/normal_matrix used to live here too (160 bytes total) but are
-    // now streamed per-instance instead (see data::InstanceData) — this
-    // block is shared once per instanced draw batch rather than pushed per
-    // object, so only genuinely per-batch material state remains.
+    // Per-batch material state only. model/normal_matrix are streamed
+    // per-instance via data::InstanceData instead, because this block is
+    // pushed once per instanced draw batch, not per object.
     //
     // 80 bytes total. The first 32 bytes (through alpha_cutoff) are byte-identical to
     // TransparentPass::PushConstants / TransparentCapturePass::PushConstants /
@@ -195,9 +194,8 @@ public:
      * @param cull_backfaces Selects between the stock pipelines when `name` doesn't resolve
      *                       to a variant -- see PBRMaterial::cull_backfaces's doc. Ignored
      *                       (a variant's own SurfaceShaderDesc::cull always wins) when `name`
-     *                       does resolve. Defaults to true so every pre-existing call site
-     *                       (this bind() signature predates the field) keeps compiling and
-     *                       keeps binding exactly the pipeline it always has.
+     *                       does resolve. Defaults to true, matching the stock
+     *                       back-face-culled pipeline.
      */
     void bind(coopa::gfx::command::CommandBuffer& cmd, const std::string& name,
              bool cull_backfaces = true) const {

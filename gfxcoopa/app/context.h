@@ -5,24 +5,20 @@
  * -> Renderer) plus timing and the frame loop, so a consumer application
  * never has to construct and order these nine objects by hand.
  *
- * Every pre-seal consumer either hand-rolled this exact 9-object sequence
- * inline (blendy's test.cpp, pixengine's demo.cpp, uicoopa's
- * test_window.cpp) or wrapped it in its own bespoke engine class
- * (toyengine's core::Engine). Context is that sequence, written once here,
- * with the two known bring-up bugs already fixed:
+ * Two things Context takes responsibility for that a hand-written bring-up
+ * sequence has to get right on its own:
  *
- *  - presentation::Renderer::handle_resize() never called
- *    core::Swapchain::recreate() on its own (a caller-must-remember-to
- *    latent bug) -- Context installs the full correct sequence via
- *    Renderer::set_resize_handler() instead.
- *  - ONESHOT/MAX_FRAMES headless-testing env vars, previously reimplemented
- *    per-consumer (toyengine's core::Engine has them; blendy's test.cpp
- *    reimplements them inline; pixengine's demo.cpp has neither), are
- *    handled once by ContextConfig::from_env().
+ *  - Resize. presentation::Renderer's own resize path rebuilds framebuffers
+ *    but never calls core::Swapchain::recreate(), so it depends on the
+ *    caller doing that. Context installs the full sequence (wait_idle ->
+ *    poll framebuffer size -> recreate -> rebuild framebuffers -> user
+ *    callback) via Renderer::set_resize_handler().
+ *  - Headless runs. ONESHOT/MAX_FRAMES are read in one place, by
+ *    ContextConfig::from_env().
  *
- * Consumers that need their own asset/scene/config layer (as toyengine's
- * Engine does) are expected to COMPOSE a Context as their first member
- * (constructed first, destroyed last) rather than reimplement bring-up.
+ * A consumer with its own asset/scene/config layer should COMPOSE a Context
+ * as its first member (constructed first, destroyed last) rather than
+ * reproduce the bring-up sequence.
  */
 
 #ifndef COOPA_GFX_APP_CONTEXT_H
@@ -75,9 +71,9 @@ struct ContextConfig {
      * convention every headless test target in this workspace already
      * uses) onto `base`.
      *
-     * ONESHOT (if set, any value) forces max_frames to 1 and sets
-     * headless_oneshot, taking priority over MAX_FRAMES if both are set --
-     * matching toyengine::core::Engine's pre-existing precedence exactly.
+     * ONESHOT (if set, to any value) forces max_frames to 1 and sets
+     * headless_oneshot. It is applied last, so it wins over MAX_FRAMES when
+     * both are set.
      *
      * @param base Config to start from (e.g. one with title/size already set).
      * @return `base` with the env overlay applied.
@@ -163,12 +159,11 @@ public:
         // bind as a second attachment. A RenderPass built with a real depth
         // format therefore does NOT match the framebuffers Renderer builds
         // against it (verified: triggers VUID-VkFramebufferCreateInfo-
-        // attachmentCount-00876). Every existing caller of Renderer already
-        // works around this by passing VK_FORMAT_UNDEFINED explicitly (see
-        // gfxcoopa's own test.cpp fixture setup) despite RenderPass's raw
-        // constructor defaulting depth_format to VK_FORMAT_D32_SFLOAT --
-        // that default is only correct for a render pass NOT paired with
-        // Renderer. config.depth_format is intentionally NOT used here; it
+        // attachmentCount-00876). A RenderPass paired with Renderer must
+        // therefore pass VK_FORMAT_UNDEFINED, even though RenderPass's raw
+        // constructor defaults depth_format to VK_FORMAT_D32_SFLOAT -- that
+        // default suits a render pass the caller builds framebuffers for
+        // itself. config.depth_format is intentionally NOT used here; it
         // is exposed via depth_format() for a consumer building its OWN
         // separate depth-supporting render pass/target (e.g. a G-buffer),
         // which is unrelated to the swapchain present pass Context owns.

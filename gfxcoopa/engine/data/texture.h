@@ -89,11 +89,9 @@ public:
      * RGBA8 format (via a `bool srgb` flag) and raw VkFilter/
      * VkSamplerAddressMode.
      *
-     * This is what unblocks single-channel textures (Format::R8_Unorm,
-     * e.g. a font atlas) through Texture, which the raw overload above
-     * cannot express at all -- previously the only way to get an R8
-     * texture onto the GPU was a hand-rolled duplicate of this whole class
-     * (see uicoopa's now-redundant render/texture.h).
+     * Required for single-channel textures (Format::R8_Unorm, e.g. a font
+     * atlas), which the raw overload above cannot express at all -- it is
+     * hardcoded to RGBA8.
      *
      * @param device       Logical device.
      * @param allocator    VMA allocator.

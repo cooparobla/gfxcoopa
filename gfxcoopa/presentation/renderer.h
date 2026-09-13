@@ -137,11 +137,6 @@ public:
      *                  handoff instead of leaving it to chance.
      * @return True if the frame was presented successfully, false if the window was minimized.
      */
-    // NOTE: named begin_frame() until this rename; kept as an inline alias
-    // immediately below for existing callers. The old name paired
-    // confusingly with no end_frame() (this method does the whole
-    // acquire-record-submit-present cycle in one call) -- draw_frame()
-    // doesn't imply a missing partner. Purely a rename; no behavior change.
     bool draw_frame(std::function<void(command::CommandBuffer&)> record_fn,
                     VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}},
                     std::function<void()> on_resize = nullptr,
@@ -247,8 +242,10 @@ public:
     }
 
     /**
-     * @brief Alias for draw_frame(), kept for existing callers.
-     * @deprecated Prefer draw_frame() in new code -- same behavior, clearer name.
+     * @brief Alias for draw_frame(), identical in behaviour.
+     * @deprecated Prefer draw_frame(). This name suggests a matching
+     * end_frame() that does not exist -- the call runs the whole
+     * acquire-record-submit-present cycle on its own.
      */
     bool begin_frame(std::function<void(command::CommandBuffer&)> record_fn,
                      VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}},

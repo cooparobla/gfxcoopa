@@ -344,11 +344,10 @@ private:
             device_, allocator_, face_resolution, mips
         );
 
-        // Dedicated cubemap sampler: the BRDF LUT's sampler (previously
-        // reused here) has max_lod = 0.0f, which silently clamped every
-        // textureLod() in the probe path back to mip 0. LINEAR mipmap mode
-        // is what makes roughness blend smoothly across mip boundaries
-        // instead of banding.
+        // This needs its own sampler rather than the BRDF LUT's: that one has
+        // max_lod = 0.0f, which would silently clamp every textureLod() in the
+        // probe path back to mip 0. LINEAR mipmap mode is what makes roughness
+        // blend smoothly across mip boundaries instead of banding.
         cubemap_samplers_[index] = std::make_unique<Sampler>(
             device_, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
             static_cast<float>(mips), VK_SAMPLER_MIPMAP_MODE_LINEAR

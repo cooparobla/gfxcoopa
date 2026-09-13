@@ -78,11 +78,10 @@ public:
             &light_layout,
             &shadow_layout
         };
-        // Never hardcode this index at the bind site -- it shifts if this pass ever gains
-        // another owned set ahead of the caller's extras. This is also the fix for the bug
-        // that used to live here: the gbuffer set index below was hardcoded to 4, which is
-        // wrong (should be 3) whenever `extra` is empty -- vkCmdBindDescriptorSets against a
-        // 4-set layout with firstSet=4 is a validation error and undefined behaviour.
+        // Both indices are derived, never hardcoded: they shift with the number of extra
+        // sets the caller supplies, and with any set this pass might later own ahead of them.
+        // A stale constant here means vkCmdBindDescriptorSets with a firstSet past the end of
+        // the layout -- a validation error and undefined behaviour.
         extra_first_set_ = static_cast<uint32_t>(layouts.size());
         layouts.insert(layouts.end(), extra_.layouts.begin(), extra_.layouts.end());
         gbuffer_set_index_ = static_cast<uint32_t>(layouts.size());

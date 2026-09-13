@@ -5,11 +5,9 @@
  * forward transparent, transparent capture, probe capture -- and lazily allocates one
  * DescriptorSet per distinct 4-texture combination a material references.
  *
- * Originally toyengine's, holding only the alpha-mask binding (see PBRMaterial's earlier doc,
- * now superseded: albedo/normal/metallic_roughness were parsed from scene YAML and read by
- * nothing). Moved into gfxcoopa and widened to all four texture slots so gfxcoopa's own
- * probe-capture path (gi/gi_baker.h) can share one cache with toyengine's G-buffer/shadow/
- * transparent passes rather than each maintaining its own.
+ * One cache serves all four texture slots across every consuming pass, so gfxcoopa's own
+ * probe-capture path (gi/gi_baker.h) and toyengine's G-buffer/shadow/transparent passes
+ * share descriptor sets instead of each maintaining its own.
  *
  * Every material -- textured or not -- binds a full 4-tuple set. Untextured slots bind a
  * neutral fallback (white for alpha_mask/albedo/metallic_roughness, flat-up for normal) instead
@@ -61,9 +59,9 @@ class MaterialTextureCache {
 public:
     /// Binding indices within the material set's layout, in the order every consuming shader
     /// (gbuffer_fs.glsl, transparent_fs.glsl, capture_fs.glsl, probe_capture.frag) declares
-    /// them. alpha_mask stays at binding 0 (its pre-existing slot) so gfx/surface/shadow_fs.glsl
-    /// and shadow_cube_fs.glsl -- which only ever sample the mask -- need no edit: a descriptor
-    /// set layout may declare bindings a given shader simply never samples.
+    /// them. alpha_mask is at binding 0 so gfx/surface/shadow_fs.glsl and shadow_cube_fs.glsl,
+    /// which sample only the mask, can share this layout: a descriptor set layout may declare
+    /// bindings a given shader never samples.
     static constexpr uint32_t kAlphaMaskBinding         = 0;
     static constexpr uint32_t kAlbedoBinding            = 1;
     static constexpr uint32_t kNormalBinding            = 2;

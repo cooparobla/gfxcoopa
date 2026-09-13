@@ -377,9 +377,9 @@ private:
         // 1: the G-Buffer's own depth image, read-only -- this pass tests against it but
         // never writes it.
         //
-        // storeOp MUST be STORE, even though nothing here modifies depth. This previously read
-        // DONT_CARE on the reasoning that "nothing wrote it, so there is nothing to preserve",
-        // which is not what DONT_CARE means: per the spec the attachment's contents become
+        // storeOp MUST be STORE, even though nothing here modifies depth. DONT_CARE does
+        // NOT mean "nothing was written, so there is nothing to preserve": per the spec the
+        // attachment's contents become
         // UNDEFINED after the render pass whether or not this pass wrote them, and the driver is
         // free to act on that. On a tiled/depth-compressed implementation it does -- the
         // G-Buffer depth came back as mostly zeroes (with scattered blocks of surviving real

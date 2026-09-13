@@ -62,8 +62,8 @@ public:
     bool cast_shadows = true;
 
     /**
-     * @brief How dark this light's shadows are: 1.0 = full occlusion (the pre-existing
-     *        behaviour), 0.0 = the light is unshadowed. Values in between let some direct
+     * @brief How dark this light's shadows are: 1.0 = full occlusion (the default),
+     *        0.0 = the light is unshadowed. Values in between let some direct
      *        light through, which reads far better under a banded/cel-shaded style than a
      *        hard black cutoff. Has no effect when `cast_shadows` is false.
      */

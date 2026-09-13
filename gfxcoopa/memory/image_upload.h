@@ -2,12 +2,10 @@
  * @file image_upload.h
  * @brief Free helper that uploads raw pixel data into a new 2D Image via a staging buffer.
  *
- * Consolidates the staging-buffer -> layout transition -> copy -> layout
- * transition recipe that used to be independently hand-rolled in three
- * places (engine::util::SmaaTextures::upload_texture_, engine::util::
- * SsaoNoiseTexture::upload_texture_, engine::passes::SsaoPass::
- * create_neutral_texture_) plus a fourth copy in uicoopa's Texture — all
- * byte-for-byte identical apart from the source data/dimensions/format.
+ * One place for the staging-buffer -> layout transition -> copy -> layout
+ * transition recipe. The returned Image is left in
+ * TextureUsage::ShaderRead and ready to bind; the staging buffer does not
+ * outlive the call.
  */
 
 #ifndef COOPA_GFX_MEMORY_IMAGE_UPLOAD_H

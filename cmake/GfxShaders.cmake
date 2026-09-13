@@ -4,8 +4,7 @@
 # `include(${GFXCOOPA_DIR}/cmake/GfxShaders.cmake)` (already implicitly
 # available after `add_subdirectory(gfxcoopa)`, since CMake function
 # definitions are global once the defining file has been processed) rather
-# than copying this file into their own cmake/, which is what four repos did
-# before this was consolidated.
+# than copying this file into their own cmake/.
 #
 # Mirrors `cbuild --vulkan` (the primary build tool for this workspace, see
 # /home/coopa/.sww/packages/cbuild/cbuild), which reads the same

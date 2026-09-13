@@ -8,7 +8,7 @@
  * (standard opaque-style test: front-most transparent surface wins per pixel, among
  * transparent objects only -- see transparent_capture_target.h's doc for why no cross-test
  * against the opaque G-Buffer is needed here) and has no blending on ANY of its three color
- * outputs. That -- no blending anywhere -- is what makes a hand-rolled pipeline like
+ * outputs. That -- no blending anywhere -- is what makes a directly-built pipeline like
  * GBufferPipeline's the right template rather than pipeline::Pipeline's PipelineConfig, which
  * replicates ONE blend state across every color attachment (a real blocker for bolting MRT
  * onto TransparentPass itself, irrelevant here since every attachment wants the same

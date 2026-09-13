@@ -167,11 +167,8 @@ public:
      * @param blur_vert_spv Vertex shader for the optional spatial SSR denoise stage (reuses
      *                      the same fullscreen-triangle vertex shader as resolve/composite --
      *                      pass the same path as resolve_vert_spv). Leave both this and
-     *                      blur_frag_spv empty (the default) to omit the blur stage entirely,
-     *                      exactly matching this pass's behaviour before the stage existed --
-     *                      composite then reads resolved_target_ directly, unchanged. A
-     *                      trailing, empty-string-default pair rather than a new required
-     *                      parameter so existing callers are unaffected unless they opt in.
+     *                      blur_frag_spv empty (the default) to omit the blur stage
+     *                      entirely; composite then reads resolved_target_ directly.
      * @param blur_frag_spv Fragment shader (ssr_blur.frag.spv) -- bilateral, edge-aware blur
      *                      of the temporally-resolved SSR buffer, same technique as
      *                      SsaoPass's own ssao_blur.frag (5x5 footprint weighted by
@@ -258,8 +255,8 @@ public:
         }
 
         // 3. Descriptor Set Layouts
-        // G-Buffer layout (3 images: G0, G1, G2) for the SSR raymarch set -- it no longer reads
-        // G_depth (Hi-Z supplies depth).
+        // G-Buffer layout (3 images: G0, G1, G2) for the SSR raymarch set. G_depth is not
+        // bound here -- the Hi-Z pyramid supplies depth for the march.
         gbuf3_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
                 .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)

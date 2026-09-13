@@ -274,8 +274,8 @@ public:
      * exists instead of a bare VkRenderPass parameter here. Since
      * `render_pass.samples()`/`color_attachment_count()` aren't available
      * without a real RenderPass, `desc.blend.color_attachment_count` must
-     * be set explicitly (0 defaults to 1, matching PipelineConfig's
-     * pre-seal default) and MSAA is not supported through this overload.
+     * be set explicitly (0 falls back to 1), and MSAA is not supported
+     * through this overload.
      *
      * @param device      The logical device.
      * @param render_pass Handle of a compatible render pass, wrapped.

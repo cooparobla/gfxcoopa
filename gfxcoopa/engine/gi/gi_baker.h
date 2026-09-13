@@ -123,7 +123,7 @@ public:
 
         // Every probe writes only its own probes[probe_idx] slot and reads nothing but the
         // shared-const boxes/dir_light/volume above, so probes are independent work items --
-        // flatten the iz/iy/ix nest (same probe_idx formula as before: iz*Ny*Nx + iy*Nx + ix)
+        // flatten the iz/iy/ix nest (probe_idx == iz*Ny*Nx + iy*Nx + ix)
         // into a single index range a parallel_for can fan out over.
         auto bake_probe = [&](int probe_idx) {
             int iz = probe_idx / (Ny * Nx);

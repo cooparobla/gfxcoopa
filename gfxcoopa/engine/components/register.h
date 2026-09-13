@@ -17,8 +17,7 @@
  * subsequent SceneLoader::load() call; call
  * coopa::scene::SceneLoader::clear_component_parsers() before destroying them.
  *
- * Mesh and texture loading are routed through a coopa::asset::AssetManager
- * rather than the ad-hoc mesh_cache map this used to build inline — see
+ * Mesh and texture loading are routed through a coopa::asset::AssetManager — see
  * gfxcoopa/engine/loaders/{mesh_loader.h,texture_loader.h} for the
  * loaders registered against it. The caller owns the AssetManager (typically
  * for the app's whole lifetime) and must register those two loaders on it
@@ -65,22 +64,6 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace components {
-
-/**
- * @brief Loads and parses a YAML file directly via fkYAML — the mesh-file
- *        equivalent of SceneLoader's own default document loading, since mesh
- *        files are not routed through SceneLoader::set_document_loader().
- *
- * Retained for callers that still need a raw YAML read; mesh loading itself
- * no longer uses this directly (see MeshLoader::decode_typed()).
- */
-inline fkyaml::node load_yaml_file_(const std::string& path) {
-    std::ifstream ifs(path);
-    if (!ifs) {
-        throw std::runtime_error("[gfxcoopa] Failed to open file: " + path);
-    }
-    return fkyaml::node::deserialize(ifs);
-}
 
 /**
  * @brief Decodes a scene YAML `alpha_mode` string into an AlphaMode.

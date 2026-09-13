@@ -9,10 +9,9 @@
  * must never include volk or GLFW: that invariant is what makes the
  * `coopa::gfx_pure` CMake target and the "headless tests never touch Vulkan"
  * guarantee structural rather than aspirational. Vulkan-side conversion lives
- * only in `gfxcoopa/detail/vk_convert.h`. (The keyboard/mouse vocabulary that
- * used to live alongside this at `gfxcoopa/input/` has since moved to
- * `coopa/input/` in libcoopa, for the same reason: it never depended on
- * Vulkan or GLFW either. See coopa/input/README.md.)
+ * only in `gfxcoopa/detail/vk_convert.h`. The keyboard/mouse vocabulary
+ * lives in `coopa/input/` in libcoopa for the same reason -- it depends on
+ * neither Vulkan nor GLFW. See coopa/input/README.md.
  */
 
 #ifndef COOPA_GFX_TYPES_ENUMS_H
@@ -168,9 +167,8 @@ enum class VertexRate {
  *
  * Replaces VkImageLayout in the public API entirely. memory::Image tracks
  * its own current TextureUsage, so command::CommandBuffer::transition()
- * takes no "from" argument — the parameter behind every hand-rolled-barrier
- * bug in the pre-seal consumers (mismatched "from" layouts) simply does not
- * exist here.
+ * takes only a destination — there is no "from" argument for a caller to
+ * get wrong.
  *
  * Distinct from ImageUsage below: TextureUsage is a single current STATE
  * (what an image IS right now); ImageUsage is a bitmask of every role an
@@ -299,9 +297,8 @@ constexpr bool any(BufferUsage set, BufferUsage m) {
  * @enum MemoryResidency
  * @brief Where a Buffer's or Image's memory lives and how the CPU may
  * access it. Replaces VMA's separate VmaMemoryUsage + VmaAllocationCreateFlags
- * pair in the public API: CpuToGpu/GpuToCpu are always persistently mapped,
- * which was previously a caller-supplied flag combination that could be (and
- * in the pre-seal codebase, was) gotten wrong.
+ * pair in the public API. CpuToGpu/GpuToCpu are always persistently mapped,
+ * so the mapping flags cannot be set inconsistently with the residency.
  */
 enum class MemoryResidency {
     GpuOnly,   ///< Device-local, not host-visible. Fastest for GPU-only access.

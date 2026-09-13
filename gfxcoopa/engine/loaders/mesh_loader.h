@@ -7,12 +7,10 @@
  * where the GPU vertex/index buffers actually get created and uploaded
  * (via data::Mesh::from_node).
  *
- * Replaces the ad-hoc `mesh_cache` unordered_map that used to live in a
- * lambda closure inside register_render_components() — that cache keyed on
- * the *logical* mesh name (e.g. "cube.000"), so two different scenes with
- * different meshes/cube.000.yaml files would silently collide and share one
- * upload. AssetManager keys on the *resolved* filesystem path instead (see
- * coopa/asset/asset_id.h), so this can't happen.
+ * Caching is AssetManager's, keyed on the *resolved* filesystem path (see
+ * coopa/asset/asset_id.h) rather than the logical mesh name. Two scenes that
+ * each contain a different meshes/cube.000.yaml therefore get their own
+ * upload instead of silently sharing one.
  */
 
 #ifndef GFXCOOPA_ENGINE_LOADERS_MESH_LOADER_H

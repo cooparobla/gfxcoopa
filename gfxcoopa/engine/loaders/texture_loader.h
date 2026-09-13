@@ -13,10 +13,9 @@
  * uicoopa, which had the only image decoder in the whole workspace despite
  * gfxcoopa being where texture-mapped materials actually need one.
  *
- * Color space: every upload now goes through declare_color_space() (see below) rather than
- * guessing. This closes the gap the class used to document here — an albedo map decoded and
- * uploaded as if it were linear data rendered visibly washed out, since sRGB gamma-encoded
- * bytes were being interpreted as linear intensities.
+ * Color space: every upload declares one via declare_color_space() (see below) rather than
+ * guessing. An albedo map uploaded as if it were linear renders visibly washed out, because
+ * sRGB gamma-encoded bytes get interpreted as linear intensities.
  */
 
 #ifndef GFXCOOPA_ENGINE_LOADERS_TEXTURE_LOADER_H
