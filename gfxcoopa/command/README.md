@@ -36,17 +36,17 @@ The `coopa::gfx::command` submodule provides RAII abstractions for Vulkan comman
 
 ## File Breakdown
 
-### [command_buffer.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/command/command_buffer.h)
+### [command_buffer.h](command_buffer.h)
 - **Role**: Lightweight RAII wrapper around `VkCommandBuffer` for recording graphics, compute, and transfer commands.
 - **Key Classes / Structs**: `CommandBuffer`.
 - **Details**: Exposes inline methods for render pass recording (`begin_render_pass`/`end_render_pass`), pipeline binding, descriptor set binding, vertex/index buffer binding, viewport/scissor dynamic states, push constants, pipeline barriers, and buffer/image copy commands.
 
-### [command_pool.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/command/command_pool.h)
+### [command_pool.h](command_pool.h)
 - **Role**: RAII manager for `VkCommandPool` allocation and execution of transient single-use command buffers.
 - **Key Classes / Structs**: `CommandPool`.
 - **Details**: Handles allocation of primary/secondary command buffers, pool resetting, and provides a synchronous lambda helper `single_use()` for one-time GPU transfer and copy operations.
 
-### [sync.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/command/sync.h)
+### [sync.h](sync.h)
 - **Role**: RAII wrappers for Vulkan synchronization primitives.
 - **Key Classes / Structs**: `Fence`, `Semaphore`.
 - **Details**: `Fence` manages CPU-GPU execution synchronization with `wait()` and `reset()` helpers; `Semaphore` handles GPU-GPU queue submission signaling for swapchain image acquire and presentation.

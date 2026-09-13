@@ -26,22 +26,22 @@ The `coopa::gfx::util` submodule provides debug validation messengers, format he
 
 ## File Breakdown
 
-### [debug_messenger.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/util/debug_messenger.h)
+### [debug_messenger.h](debug_messenger.h)
 - **Role**: Vulkan validation layer debug messenger (`VkDebugUtilsMessengerEXT`).
 - **Key Classes / Structs**: `DebugMessenger`.
 - **Details**: Captures Vulkan API warning/error logs and routes formatted debug reports to stdout/stderr.
 
-### [error.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/util/error.h)
+### [error.h](error.h)
 - **Role**: Error checking macros and string translation utilities.
 - **Key Classes / Structs**: `GFX_VK_CHECK()`, `vk_result_string()`.
 - **Details**: Throws `std::runtime_error` with source filename and line number when Vulkan API functions return non-success codes.
 
-### [format.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/util/format.h)
+### [format.h](format.h)
 - **Role**: Vulkan format selection helpers.
 - **Key Classes / Structs**: `find_supported_format()`, `find_depth_format()`.
 - **Details**: Queries physical device format properties to select depth/stencil attachment formats (`VK_FORMAT_D32_SFLOAT`, `VK_FORMAT_D24_UNORM_S8_UINT`, etc.).
 
-### [volk_init.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/util/volk_init.h)
+### [volk_init.h](volk_init.h)
 - **Role**: Dynamic Vulkan loader initialization wrapper.
 - **Key Classes / Structs**: `init_volk()`.
 - **Details**: Calls `volkInitialize()` to dynamically load Vulkan entry points without linking against static Vulkan loader libraries.

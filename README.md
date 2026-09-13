@@ -78,7 +78,7 @@ int main() {
 
     while (!window.should_close()) {
         window.poll_events();
-        renderer.begin_frame([&](coopa::gfx::command::CommandBuffer& cmd) {
+        renderer.draw_frame([&](coopa::gfx::command::CommandBuffer& cmd) {
             auto ext = swapchain.extent();
             cmd.bind_pipeline(pipeline);
             cmd.set_viewport(0, 0, ext.width, ext.height);
@@ -132,6 +132,7 @@ For detailed documentation, see the submodule README files under [`gfxcoopa/`](g
 | [volk_init.h](gfxcoopa/util/volk_init.h) | One-time `volkInitialize()` guard |
 | [debug_messenger.h](gfxcoopa/util/debug_messenger.h) | RAII `VkDebugUtilsMessengerEXT` with stderr logging |
 | [format.h](gfxcoopa/util/format.h) | `format_from_channels()`, `format_byte_size()`, `format_has_depth()`, `format_has_stencil()` |
+| [image_readback.h](gfxcoopa/util/image_readback.h) | `read_image()`, `save_png()` — GPU image download to host memory or PNG |
 
 ### [`gfxcoopa/core/`](gfxcoopa/core/README.md)
 
@@ -148,7 +149,8 @@ For detailed documentation, see the submodule README files under [`gfxcoopa/`](g
 |---|---|
 | [allocator.h](gfxcoopa/memory/allocator.h) | `class Allocator` — VMA lifecycle wrapper |
 | [buffer.h](gfxcoopa/memory/buffer.h) | `class Buffer` — vertex/index/uniform/staging/storage factories, `upload()` |
-| [image.h](gfxcoopa/memory/image.h) | `class Image` — 2D image + view wrapper, `transition_layout()` |
+| [image.h](gfxcoopa/memory/image.h) | `class Image` — 2D image + view wrapper, tracks its own `current_usage()` |
+| [image_upload.h](gfxcoopa/memory/image_upload.h) | `upload_image_2d()` — staged pixel upload, leaves the image in `ShaderRead` |
 
 ### [`gfxcoopa/pipeline/`](gfxcoopa/pipeline/README.md)
 
@@ -157,14 +159,16 @@ For detailed documentation, see the submodule README files under [`gfxcoopa/`](g
 | [shader.h](gfxcoopa/pipeline/shader.h) | `class Shader` — loads `.spv`, provides `stage_info()` |
 | [render_pass.h](gfxcoopa/pipeline/render_pass.h) | `class RenderPass` — color + optional depth subpass, attachment layouts |
 | [descriptor.h](gfxcoopa/pipeline/descriptor.h) | `DescriptorPool`, `DescriptorSetLayout`, `DescriptorSet` wrappers |
-| [pipeline.h](gfxcoopa/pipeline/pipeline.h) | `class Pipeline` — full graphics pipeline, `PipelineConfig`, `set_viewport()` |
+| [pipeline.h](gfxcoopa/pipeline/pipeline.h) | `class Pipeline` — full graphics pipeline, `PipelineDesc`/`BlendMode`, `set_viewport()` |
+| [shader_library.h](gfxcoopa/pipeline/shader_library.h) | `class ShaderLibrary` — ordered search path from a logical shader name to its `.spv` |
+| [surface_shader.h](gfxcoopa/pipeline/surface_shader.h) | `SurfaceShaderDesc`, `SurfaceShaderLibrary` — named per-material shader variants |
 
 ### [`gfxcoopa/command/`](gfxcoopa/command/README.md)
 
 | File | Description |
 |---|---|
-| [command_pool.h](gfxcoopa/command/command_pool.h) | `class CommandPool` — allocation, `begin_single_use()` / `end_single_use()` |
-| [command_buffer.h](gfxcoopa/command/command_buffer.h) | `class CommandBuffer` — `begin/end`, `bind_pipeline`, `draw`, `set_viewport`, `copy_buffer` |
+| [command_pool.h](gfxcoopa/command/command_pool.h) | `class CommandPool` — allocation, `submit_once()` for one-shot GPU work |
+| [command_buffer.h](gfxcoopa/command/command_buffer.h) | `class CommandBuffer` — `begin/end`, `bind_pipeline`, `draw`, `set_viewport`, `transition`, `copy_*`, `blit` |
 | [sync.h](gfxcoopa/command/sync.h) | `class Fence` (CPU↔GPU), `class Semaphore` (GPU↔GPU) |
 
 ### [`gfxcoopa/presentation/`](gfxcoopa/presentation/README.md)
@@ -174,22 +178,50 @@ For detailed documentation, see the submodule README files under [`gfxcoopa/`](g
 | [window.h](gfxcoopa/presentation/window.h) | `class Window` — GLFW init, `poll_events()`, `framebuffer_size()`, `was_resized()` |
 | [renderer.h](gfxcoopa/presentation/renderer.h) | `class Renderer` — acquire → record → submit → present frame loop |
 
-### [`gfxcoopa/engine/`](gfxcoopa/engine/README.md)
+### [`gfxcoopa/app/`](gfxcoopa/app/context.h)
 
 | File | Description |
 |---|---|
-| [brdf_lut.h](gfxcoopa/engine/brdf_lut.h) | `class BRDFLUT` — 512x512 R16G16_SFLOAT BRDF LUT generation for specular IBL |
-| [camera_ubo.h](gfxcoopa/engine/camera_ubo.h) | `struct CameraData`, `class CameraUBO` — host-visible camera matrices UBO with pixel snapping |
-| [cubemap_target.h](gfxcoopa/engine/cubemap_target.h) | `class CubemapTarget` — offscreen HDR cubemap render target for reflection probes & skybox |
-| [fullscreen_quad.h](gfxcoopa/engine/fullscreen_quad.h) | `class FullscreenQuad` — 3-vertex screen-space triangle draw helper (no VBO needed) |
-| [gi_data.h](gfxcoopa/engine/gi_data.h) | `SHProbe`, `GiUniforms`, `GiSystemData` — Spherical Harmonics light probe grid and reflection probe UBOs |
-| [light_data.h](gfxcoopa/engine/light_data.h) | `DirectionalLightGPU`, `PointLightGPU`, `LightUBO` — directional light & multi-point light UBOs |
-| [mesh.h](gfxcoopa/engine/mesh.h) | `struct Vertex`, `class Mesh` — GPU mesh data loaded from YAML/raw data with vertex & index buffers |
-| [model_ubo.h](gfxcoopa/engine/model_ubo.h) | `struct ModelPushConstants` — 128-byte push constant struct (`model` + `normal_matrix`) |
-| [offscreen_target.h](gfxcoopa/engine/offscreen_target.h) | `class OffscreenTarget` — low-res / offscreen target with auto-transition to `SHADER_READ_ONLY_OPTIMAL` |
-| [sampler.h](gfxcoopa/engine/sampler.h) | `class Sampler` — RAII `VkSampler` with factory methods (`nearest()`, `linear()`, shadow, cubemap) |
-| [shadow_map_target.h](gfxcoopa/engine/shadow_map_target.h) | `class ShadowMapTarget` — directional light and point light cubemap shadow depth targets |
-| [shadow_pipeline.h](gfxcoopa/engine/shadow_pipeline.h) | `class ShadowPipeline` — graphics pipelines specialized for shadow map depth pass rendering |
+| [context.h](gfxcoopa/app/context.h) | `ContextConfig`, `FrameCallbacks`, `class Context` — owns the whole Window → Instance → Surface → Device → Allocator → Swapchain → CommandPool → RenderPass → Renderer bring-up, frame timing, and the main loop |
+
+### [`gfxcoopa/types/`](gfxcoopa/types.h)
+
+Vulkan- and GLFW-free by construction; the `coopa::gfx_pure` CMake target enforces it.
+[types.h](gfxcoopa/types.h) is an umbrella that includes all of them.
+
+| File | Description |
+|---|---|
+| [enums.h](gfxcoopa/types/enums.h) | `Format`, `TextureUsage`, `ImageUsage`, `ShaderStage`, `CullMode`, `MemoryResidency`, … — the sealed vocabulary replacing `Vk*` enums in the public API |
+| [format.h](gfxcoopa/types/format.h) | `Format` helpers — `is_depth()`, `is_stencil()`, `format_byte_size()` |
+| [vertex_layout.h](gfxcoopa/types/vertex_layout.h) | `VertexBinding`, `VertexAttribute`, `VertexLayout` — a vertex type's full input description, built fluently |
+| [sampler_desc.h](gfxcoopa/types/sampler_desc.h) | `SamplerDesc` + presets (`linear_repeat()`, `nearest_clamp()`, …) |
+| [texture_view.h](gfxcoopa/types/texture_view.h) | `TextureView` — opaque, hashable, null-able identity token for a texture view |
+| [clear.h](gfxcoopa/types/clear.h) | `ClearColor`, `Extent2D`, `ImageRegion` |
+
+### [`gfxcoopa/detail/`](gfxcoopa/detail/vk_convert.h)
+
+Internal. Consumers must not include these or name `coopa::gfx::detail::*`.
+
+| File | Description |
+|---|---|
+| [vk_convert.h](gfxcoopa/detail/vk_convert.h) | `to_vk()` / `from_vk()` conversions, barrier masks, `RawRenderPass` |
+| [glfw_keys.h](gfxcoopa/detail/glfw_keys.h) | GLFW key/button code → `coopa::input` vocabulary |
+
+### [`gfxcoopa/engine/`](gfxcoopa/engine/README.md)
+
+The rendering engine built on the layers above. See the
+[engine README](gfxcoopa/engine/README.md) for the full file-by-file breakdown.
+
+| Directory | Contents |
+|---|---|
+| [`components/`](gfxcoopa/engine/components/register.h) | Scene components parsed from YAML — `MeshRenderer`/`PBRMaterial`, `CameraComponent`, `DirectionalLight`, `PointLight`, `EnvironmentLight`, `ReflectionProbe`, `GiProbeVolume`, `Volume`, `SdfShape`/`SdfRenderer`, plus `register_render_components()` |
+| [`data/`](gfxcoopa/engine/data/mesh.h) | GPU-side data and UBO layouts — `Vertex`/`Mesh`, `Texture`, `CameraUBO`, `LightUBO`, `ModelPushConstants`, `FogData`, `VolumetricsData`, `SdfData`, `PaletteLut` |
+| [`targets/`](gfxcoopa/engine/targets/offscreen_target.h) | Render targets — `OffscreenTarget`, `GBufferTarget`, `ShadowMapTarget`, `CubemapTarget`, `TransparentCaptureTarget` |
+| [`passes/`](gfxcoopa/engine/passes/fullscreen_stage.h) | The render passes. `FullscreenStage` is the shared scaffold most post-processing passes are built from; `GBufferPipeline`, `ShadowPipeline`, `TransparentPass` and the `sdf_*` passes draw real geometry instead |
+| [`gi/`](gfxcoopa/engine/gi/gi_system.h) | Global illumination — `GiSystem`, `GiBaker` (SH probe baking), `SHProbe`/`GiUniforms`, `BRDFLUT` |
+| [`loaders/`](gfxcoopa/engine/loaders/mesh_loader.h) | `coopa::asset::AssetManager` loaders for meshes and textures |
+| [`util/`](gfxcoopa/engine/util/sampler.h) | `Sampler`, `MaterialTextureCache`, `InstanceBatcher`, `SmaaTextures`, `SsaoKernel`, SH math |
+| [render_features.h](gfxcoopa/engine/render_features.h) | `IndirectParams` — indirect-lighting terms shared by the lighting and SSR passes, plus the runtime-vs-startup feature-flag convention |
 
 ---
 

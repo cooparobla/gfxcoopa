@@ -22,7 +22,7 @@ The `coopa::gfx::memory` submodule provides Vulkan Memory Allocator (VMA) RAII i
         ├───────────────────────┤                       ├───────────────────────┤
         │ - VkBuffer            │                       │ - VkImage             │
         │ - VmaAllocation       │                       │ - VkImageView         │
-        │ - map() / upload()    │                       │ - transition_layout() │
+        │ - map() / upload()    │                       │ - current_usage()     │
         └───────────────────────┘                       └───────────────────────┘
 ```
 
@@ -30,20 +30,20 @@ The `coopa::gfx::memory` submodule provides Vulkan Memory Allocator (VMA) RAII i
 
 ## File Breakdown
 
-### [allocator.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/memory/allocator.h)
+### [allocator.h](allocator.h)
 - **Role**: RAII wrapper around Vulkan Memory Allocator (`VmaAllocator`).
 - **Key Classes / Structs**: `Allocator`.
 - **Details**: Initializes VMA using device and instance handles, providing low-overhead sub-allocated memory management for GPU buffers and textures.
 
-### [buffer.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/memory/buffer.h)
+### [buffer.h](buffer.h)
 - **Role**: RAII abstraction for GPU memory buffers (`VkBuffer` + `VmaAllocation`).
 - **Key Classes / Structs**: `Buffer`.
 - **Details**: Manages staging buffers, vertex/index buffers, uniform buffers (UBOs), and storage buffers (SSBOs). Provides host-mapping methods (`map()`, `unmap()`, `upload()`) with explicit VMA memory usage flags.
 
-### [image.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/memory/image.h)
+### [image.h](image.h)
 - **Role**: RAII abstraction for GPU images (`VkImage`, `VkImageView`, `VmaAllocation`).
 - **Key Classes / Structs**: `Image`.
-- **Details**: Handles 2D color/depth images, cubemaps, mipmap generation, and pipeline image layout transitions via pipeline memory barriers (`transition_layout()`).
+- **Details**: Owns a 2D `VkImage` + `VmaAllocation` + `VkImageView` and tracks the `TextureUsage` it was last transitioned to (`current_usage()`), which is what lets `command::CommandBuffer::transition()` take only a destination. Staged pixel upload lives in `image_upload.h`.
 
 ---
 

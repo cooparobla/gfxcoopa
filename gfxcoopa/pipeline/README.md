@@ -30,22 +30,22 @@ The `coopa::gfx::pipeline` submodule provides RAII wrappers and builders for Vul
 
 ## File Breakdown
 
-### [descriptor.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/pipeline/descriptor.h)
+### [descriptor.h](descriptor.h)
 - **Role**: RAII abstractions for Vulkan descriptor sets, layouts, and pools.
 - **Key Classes / Structs**: `DescriptorSetLayout`, `DescriptorPool`, `DescriptorWriter`.
 - **Details**: `DescriptorSetLayout` configures layout bindings; `DescriptorPool` allocates sets; `DescriptorWriter` provides a builder pattern for updating buffer (`bind_buffer`) and image (`bind_image`) descriptors via `vkUpdateDescriptorSets`.
 
-### [pipeline.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/pipeline/pipeline.h)
+### [pipeline.h](pipeline.h)
 - **Role**: RAII encapsulation of graphics and compute pipelines (`VkPipeline`, `VkPipelineLayout`).
 - **Key Classes / Structs**: `Pipeline`, `PipelineConfig`.
 - **Details**: Provides a builder pattern (`PipelineConfig`) for vertex input bindings, input assembly, rasterization state, multisampling, depth-stencil testing, color blending, dynamic states, and push constant ranges.
 
-### [render_pass.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/pipeline/render_pass.h)
+### [render_pass.h](render_pass.h)
 - **Role**: RAII wrapper for `VkRenderPass`.
 - **Key Classes / Structs**: `RenderPass`, `RenderPassBuilder`.
 - **Details**: Simplifies creation of multi-attachment color/depth render passes, subpass descriptions, and subpass dependencies.
 
-### [shader.h](file:///home/coopa/git/gfxcoopa/gfxcoopa/pipeline/shader.h)
+### [shader.h](shader.h)
 - **Role**: Encapsulates SPIR-V shader module loading (`VkShaderModule`).
 - **Key Classes / Structs**: `ShaderModule`.
 - **Details**: Loads binary SPIR-V bytecode from file paths and creates shader stage info structures (`VkPipelineShaderStageCreateInfo`).
