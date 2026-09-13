@@ -13,11 +13,10 @@
 #include <glm/glm.hpp>
 
 #include <gfxcoopa/core/device.h>
-#include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/descriptor.h>
-#include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/engine/render_features.h>
 
@@ -43,41 +42,14 @@ public:
                const coopa::gfx::pipeline::DescriptorSetLayout& camera_layout,
                const std::string& vert_spv,
                const std::string& frag_spv)
-    {
-        vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
-        frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
+        : stage_(device, offscreen_pass, describe(camera_layout, vert_spv, frag_spv))
+    {}
 
-        // Descriptor set layout (Set 1): G-Buffer normal/metallic sampler
-        normal_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .build(device)
-        );
-
-        normal_desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder()
-                .add_sets(*normal_desc_layout_, 1)
-                .build(device)
-        );
-
-        normal_desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(
-            device, *normal_desc_pool_, *normal_desc_layout_
-        );
-
-        coopa::gfx::pipeline::PipelineDesc desc;
-        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
-        desc.vertex  = coopa::gfx::VertexLayout::none();
-        desc.raster.cull = coopa::gfx::CullMode::None;
-        desc.depth.test  = false;
-        desc.depth.write = false;
-        desc.descriptor_layouts = {&camera_layout, normal_desc_layout_.get()};
-        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(SkyboxPushConstants)}};
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, offscreen_pass, desc);
-    }
+    SkyboxPass(const SkyboxPass&) = delete;
+    SkyboxPass& operator=(const SkyboxPass&) = delete;
 
     void set_gbuffer_normal_image(coopa::gfx::TextureView g1_view, const util::Sampler& linear_sampler) {
-        normal_desc_set_->bind_image(0, g1_view, linear_sampler);
+        stage_.set().bind_image(0, g1_view, linear_sampler);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd,
@@ -87,9 +59,9 @@ public:
               uint32_t viewport_w, uint32_t viewport_h,
               const IndirectParams& indirect = IndirectParams{}) const
     {
-        cmd.bind_pipeline(*pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
-        cmd.set_scissor(0, 0, viewport_w, viewport_h);
+        // Binds the pipeline, viewport/scissor, and this pass's own set at set 1;
+        // the caller's camera set goes at set 0 below.
+        stage_.bind(cmd, viewport_w, viewport_h);
 
         SkyboxPushConstants pc{};
         pc.inv_view_proj = glm::inverse(proj * view);
@@ -99,18 +71,25 @@ public:
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
 
         cmd.bind_descriptor_set(camera_set, 0);
-        cmd.bind_descriptor_set(*normal_desc_set_, 1);
-
-        cmd.draw(3); // Fullscreen triangle
+        stage_.draw(cmd);
     }
 
 private:
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> normal_desc_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      normal_desc_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       normal_desc_set_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline>            pipeline_;
+    /// @brief Set 0 is the caller's camera layout; set 1 is this pass's own
+    /// G-buffer normal/metallic sampler.
+    static FullscreenStageDesc describe(const coopa::gfx::pipeline::DescriptorSetLayout& camera_layout,
+                                        const std::string& vert_spv, const std::string& frag_spv) {
+        FullscreenStageDesc d;
+        d.vert_spv = vert_spv;
+        d.frag_spv = frag_spv;
+        d.leading_layouts = {&camera_layout};
+        d.owned_sets = {{{0, coopa::gfx::DescriptorType::CombinedImageSampler,
+                          coopa::gfx::ShaderStage::Fragment, 1}}};
+        d.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(SkyboxPushConstants)}};
+        return d;
+    }
+
+    FullscreenStage stage_;
 };
 
 } // namespace passes

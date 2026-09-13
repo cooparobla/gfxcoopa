@@ -31,11 +31,9 @@
 #include <vector>
 
 #include <gfxcoopa/core/device.h>
-#include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/pipeline/render_pass.h>
-#include <gfxcoopa/pipeline/descriptor.h>
-#include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/engine/util/sampler.h>
 
 namespace coopa {
@@ -82,30 +80,8 @@ public:
                      coopa::gfx::pipeline::RenderPass& target_pass,
                      const std::string& vert_spv,
                      const std::string& frag_spv)
-    {
-        vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
-        frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-
-        coopa::gfx::pipeline::DescriptorLayoutBuilder layout_builder;
-        for (uint32_t i = 0; i < 5; ++i) {
-            layout_builder.combined_sampler(i, coopa::gfx::ShaderStage::Fragment);
-        }
-        desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(layout_builder.build(device));
-        desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*desc_layout_, 1).build(device));
-        desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *desc_layout_);
-
-        coopa::gfx::pipeline::PipelineDesc desc;
-        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
-        desc.vertex  = coopa::gfx::VertexLayout::none();
-        desc.raster.cull = coopa::gfx::CullMode::None;
-        desc.depth.test  = false;
-        desc.depth.write = false;
-        desc.descriptor_layouts = {desc_layout_.get()};
-        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, target_pass, desc);
-    }
+        : stage_(device, target_pass, describe(vert_spv, frag_spv))
+    {}
 
     PixelStylizePass(const PixelStylizePass&) = delete;
     PixelStylizePass& operator=(const PixelStylizePass&) = delete;
@@ -120,10 +96,10 @@ public:
         // detector's taps need exact texel values (linear filtering would blend across the
         // very discontinuities it's looking for), and linear filtering of a D32_SFLOAT depth
         // image is an optional Vulkan format feature that isn't queried anywhere in this engine.
-        desc_set_->bind_image(0, scene_color, linear_sampler);
-        desc_set_->bind_image(1, scene_depth, nearest_sampler);
-        desc_set_->bind_image(2, scene_normal, nearest_sampler);
-        desc_set_->bind_image(3, palette_lut, nearest_sampler);
+        stage_.set().bind_image(0, scene_color, linear_sampler);
+        stage_.set().bind_image(1, scene_depth, nearest_sampler);
+        stage_.set().bind_image(2, scene_normal, nearest_sampler);
+        stage_.set().bind_image(3, palette_lut, nearest_sampler);
         // bloom_result: the finished, pre-blurred output of a dedicated BloomPass pyramid
         // (bright-pass threshold -> multi-tap downsample -> tent-filter upsample+combine),
         // sampled with a plain texture() through a LINEAR sampler: one already-composited
@@ -132,27 +108,32 @@ public:
         // harmless because bloom_intensity <= 0 makes the shader skip the read. Only pass a
         // real view once the BloomPass has executed at least once, or the descriptor points
         // at a target that has never been rendered into.
-        desc_set_->bind_image(4, bloom_sampler ? bloom_result : scene_color,
+        stage_.set().bind_image(4, bloom_sampler ? bloom_result : scene_color,
                               bloom_sampler ? *bloom_sampler : linear_sampler);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& params,
               uint32_t viewport_w, uint32_t viewport_h) const {
-        cmd.bind_pipeline(*pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
-        cmd.set_scissor(0, 0, viewport_w, viewport_h);
-        cmd.bind_descriptor_set(*desc_set_, 0);
-        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, params);
-        cmd.draw(3);
+        stage_.draw(cmd, viewport_w, viewport_h, coopa::gfx::ShaderStage::Fragment, params);
     }
 
 private:
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> desc_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      desc_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       desc_set_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline>            pipeline_;
+    /// @brief Five sampled images at bindings 0..4 (scene colour, depth, normal,
+    /// palette LUT, bloom), plus the fragment push constants.
+    static FullscreenStageDesc describe(const std::string& vert_spv, const std::string& frag_spv) {
+        FullscreenStageDesc d;
+        d.vert_spv = vert_spv;
+        d.frag_spv = frag_spv;
+        d.owned_sets.emplace_back();
+        for (uint32_t i = 0; i < 5; ++i) {
+            d.owned_sets[0].push_back({i, coopa::gfx::DescriptorType::CombinedImageSampler,
+                                       coopa::gfx::ShaderStage::Fragment, 1});
+        }
+        d.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
+        return d;
+    }
+
+    FullscreenStage stage_;
 };
 
 } // namespace passes

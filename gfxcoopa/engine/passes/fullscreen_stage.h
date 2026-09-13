@@ -50,14 +50,20 @@ struct FullscreenStageDesc {
     std::string vert_spv;  ///< Fullscreen-triangle vertex shader.
     std::string frag_spv;  ///< The stage's fragment shader.
 
-    /// @brief The descriptor sets the stage OWNS, declared from set 0 upward.
+    /// @brief Layouts owned elsewhere that are declared BEFORE the stage's own
+    /// sets -- a camera UBO the app binds at set 0, say. The stage's own sets
+    /// then start at index leading_layouts.size(). The pass binds these.
+    std::vector<const pipeline::DescriptorSetLayout*> leading_layouts;
+
+    /// @brief The descriptor sets the stage OWNS, declared after
+    /// `leading_layouts`.
     /// Most stages own exactly one (the images they sample); a stage that also
     /// owns, say, a UBO set declares it as a second entry. Empty means the
     /// stage owns no set at all and reads only through `extra_layouts`.
     std::vector<std::vector<pipeline::DescriptorBinding>> owned_sets;
 
-    /// @brief Layouts owned elsewhere (a camera UBO, a G-buffer set, a GI
-    /// system), declared after the stage's own sets. The pass binds these.
+    /// @brief Layouts owned elsewhere, declared AFTER the stage's own sets
+    /// (a G-buffer set, a GI system). The pass binds these.
     std::vector<const pipeline::DescriptorSetLayout*> extra_layouts;
 
     std::vector<pipeline::PushConstantRange> push_constants;
@@ -167,9 +173,13 @@ public:
         cmd.set_viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
         cmd.set_scissor(0, 0, width, height);
         for (uint32_t i = 0; i < set_widths_; ++i) {
-            cmd.bind_descriptor_set(*sets_.at(instance * set_widths_ + i), i);
+            cmd.bind_descriptor_set(*sets_.at(instance * set_widths_ + i), first_owned_set_ + i);
         }
     }
+
+    /// @brief Index of the stage's first owned set in the pipeline layout --
+    /// leading_layouts.size(). The pass binds its leading layouts below this.
+    uint32_t first_owned_set() const { return first_owned_set_; }
 
     /// @brief Records the fullscreen triangle draw. The vertex shader builds
     /// its three clip-space positions from gl_VertexIndex; no vertex buffer
@@ -202,6 +212,7 @@ private:
                                                    VK_SHADER_STAGE_VERTEX_BIT);
         frag_ = std::make_unique<pipeline::Shader>(device, desc.frag_spv,
                                                    VK_SHADER_STAGE_FRAGMENT_BIT);
+        first_owned_set_ = static_cast<uint32_t>(desc.leading_layouts.size());
         if (desc.owned_sets.empty()) return;
 
         set_widths_ = static_cast<uint32_t>(desc.owned_sets.size());
@@ -233,6 +244,7 @@ private:
         pd.depth.write   = false;
         pd.blend.mode    = desc.blend;
         pd.push_constants = desc.push_constants;
+        pd.descriptor_layouts = desc.leading_layouts;
         for (const auto& layout : layouts_) pd.descriptor_layouts.push_back(layout.get());
         pd.descriptor_layouts.insert(pd.descriptor_layouts.end(),
                                      desc.extra_layouts.begin(), desc.extra_layouts.end());
@@ -245,7 +257,8 @@ private:
     std::vector<std::unique_ptr<pipeline::DescriptorSetLayout>> layouts_;  /**< One per owned set; empty if none. */
     std::unique_ptr<pipeline::DescriptorPool>      pool_;
     std::vector<std::unique_ptr<pipeline::DescriptorSet>> sets_;  /**< instance-major, set_widths_ per instance. */
-    uint32_t set_widths_ = 0;  /**< Owned sets per instance. */
+    uint32_t set_widths_ = 0;      /**< Owned sets per instance. */
+    uint32_t first_owned_set_ = 0;  /**< See first_owned_set(). */
     std::unique_ptr<pipeline::Pipeline>            pipeline_;
 };
 

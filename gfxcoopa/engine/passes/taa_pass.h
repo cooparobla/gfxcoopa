@@ -15,8 +15,8 @@
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/pipeline/render_pass.h>
-#include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/command/command_buffer.h>
+#include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/pipeline/shader.h>
@@ -65,30 +65,8 @@ public:
         // Clear history immediately? Not strictly necessary as it will be initialized soon,
         // but it's good practice. (We assume it's just zeroed or we ignore the first frame).
 
-        layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-
-        desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*layout_, 1).build(device));
-
-        set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *layout_);
-
-        vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_path, VK_SHADER_STAGE_VERTEX_BIT);
-        frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_path, VK_SHADER_STAGE_FRAGMENT_BIT);
-
-        coopa::gfx::pipeline::PipelineDesc desc;
-        desc.shaders = {vert_shader_.get(), frag_shader_.get()};
-        desc.vertex  = coopa::gfx::VertexLayout::none();
-        desc.raster.cull = coopa::gfx::CullMode::None;
-        desc.depth.test  = false;
-        desc.depth.write = false;
-        desc.descriptor_layouts = {layout_.get()};
-        desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
-
-        pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, render_pass, desc);
+        stage_ = std::make_unique<FullscreenStage>(device, render_pass,
+                                                   describe(vert_path, frag_path));
     }
 
     void recreate(uint32_t width, uint32_t height) {
@@ -111,8 +89,8 @@ public:
 
     void set_source_image(coopa::gfx::TextureView scene_view) {
         last_scene_view_ = scene_view;
-        set_->bind_image(0, scene_view, sampler_);
-        set_->bind_image(1, history_image_->view_typed(), sampler_);
+        stage_->set().bind_image(0, scene_view, sampler_);
+        stage_->set().bind_image(1, history_image_->view_typed(), sampler_);
     }
 
     void set_taa_config(float blend_factor, float weight_scale) {
@@ -149,14 +127,7 @@ public:
         pc.blend_factor = blend_factor_;
         pc.weight_scale = weight_scale_;
 
-        cmd.bind_pipeline(*pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
-        cmd.set_scissor(0, 0, width, height);
-        
-        cmd.bind_descriptor_set(*set_, 0);
-        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
-
-        cmd.draw(3);
+        stage_->draw(cmd, width, height, coopa::gfx::ShaderStage::Fragment, pc);
     }
     
     // Copy the rendered result back into the history buffer
@@ -226,6 +197,20 @@ public:
     }
 
 private:
+    /// @brief Two sampled images at bindings 0 and 1 (current frame, history),
+    /// plus the fragment push constants.
+    static FullscreenStageDesc describe(const std::string& vert_spv, const std::string& frag_spv) {
+        FullscreenStageDesc d;
+        d.vert_spv = vert_spv;
+        d.frag_spv = frag_spv;
+        d.owned_sets = {{{0, coopa::gfx::DescriptorType::CombinedImageSampler,
+                          coopa::gfx::ShaderStage::Fragment, 1},
+                         {1, coopa::gfx::DescriptorType::CombinedImageSampler,
+                          coopa::gfx::ShaderStage::Fragment, 1}}};
+        d.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
+        return d;
+    }
+
     coopa::gfx::core::Device& device_;
     coopa::gfx::memory::Allocator& allocator_;
     util::Sampler& sampler_;
@@ -249,12 +234,7 @@ private:
 
     std::unique_ptr<coopa::gfx::memory::Image>                 history_image_;
 
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      desc_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       set_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;
-    std::unique_ptr<coopa::gfx::pipeline::Pipeline>            pipeline_;
+    std::unique_ptr<FullscreenStage> stage_;
 };
 
 } // namespace passes
