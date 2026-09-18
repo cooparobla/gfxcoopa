@@ -207,6 +207,33 @@ public:
     void register_view(coopa::gfx::TextureView view) { register_view_(view); }
 
     /**
+     * @brief Forgets `view`'s cached descriptor set, so a later view that lands on the same
+     *        handle value gets a freshly bound one.
+     *
+     * Not an optimisation -- omitting it is a correctness bug. The cache is keyed by
+     * TextureView, which is the raw VkImageView handle value (see detail/vk_convert.h's
+     * wrap()), and register_view_() early-returns on a key hit. Vulkan drivers routinely
+     * hand a freed handle straight back to the next vkCreateImageView, so a consumer that
+     * destroys one texture and creates another gets a new view that compares EQUAL to the
+     * dead one, skips registration, and is then drawn through a descriptor set still
+     * describing the destroyed image.
+     *
+     * It fails quietly, which is the worst part: descriptor_set_for() only falls back to
+     * the fallback texture when a key is ABSENT, so a stale key produces a plausible-looking
+     * wrong image rather than an obvious white quad or a crash.
+     *
+     * Eviction also bounds the cache. Without it every texture a consumer ever creates
+     * permanently consumes one of desc_.max_textures descriptor sets, and a long-running
+     * app that swaps textures eventually fails to allocate one at all.
+     *
+     * Call before destroying the texture that owns `view`, and only once no in-flight frame
+     * still references it -- wait on the device, or on that frame's fence.
+     *
+     * @param view The view to forget. An unknown view is a no-op.
+     */
+    void unregister_view(coopa::gfx::TextureView view) { descriptor_cache_.erase(view); }
+
+    /**
      * @brief Looks up the descriptor set for `view`, falling back to the fallback texture's
      *        set if it was never registered (a caller bug shows up as the fallback pixel,
      *        never a crash).

@@ -10,6 +10,7 @@
 #define GFXCOOPA_ENGINE_DATA_LIGHT_DATA_H
 
 #include <glm/glm.hpp>
+#include <cstddef>
 #include <memory>
 
 #include <gfxcoopa/core/device.h>
@@ -23,6 +24,7 @@ namespace engine {
 namespace data {
 
 static constexpr uint32_t MAX_POINT_LIGHTS = 16;
+static constexpr uint32_t MAX_SPOT_LIGHTS  = 8;
 
 /**
  * @struct PointLightGPU
@@ -32,6 +34,17 @@ struct alignas(16) PointLightGPU {
     glm::vec4 position_range  = glm::vec4(0.0f);            /**< xyz = position, w = range */
     glm::vec4 color_intensity = glm::vec4(0.0f);            /**< xyz = RGB color, w = intensity */
     glm::vec4 attenuation     = glm::vec4(1.0f, 0.09f, 0.032f, 0.0f); /**< x=const, y=linear, z=quad, w=cast_shadows (1 or 0) */
+};
+
+/**
+ * @struct SpotLightGPU
+ * @brief std140-aligned Spot Light data uploaded to GPU UBO.
+ */
+struct alignas(16) SpotLightGPU {
+    glm::vec4 position_range  = glm::vec4(0.0f); /**< xyz = world position, w = range */
+    glm::vec4 direction_cone  = glm::vec4(0.0f, 0.0f, -1.0f, 0.7071f); /**< xyz = normalized aim (direction rays travel), w = cos(outer half-angle) */
+    glm::vec4 color_intensity = glm::vec4(0.0f); /**< xyz = RGB color, w = intensity */
+    glm::vec4 params          = glm::vec4(1.0f, 0.9f, 0.0f, 0.0f); /**< x=falloff sharpness, y=cos(inner half-angle), z=cast_shadows (1 or 0), w=reserved */
 };
 
 /**
@@ -54,13 +67,19 @@ struct alignas(16) LightUBO {
      *   w = per-frame golden-angle rotation offset, for TAA decorrelation
      * A consumer that never writes this (e.g. blendy, which transports the
      * same values via its own push constants) gets the default, which is a
-     * fully dark, hard-compared shadow. */
+     * fully dark, hard-compared shadow.
+     * Spot shadows reuse z/w (PCF taps, rotation offset) rather than adding their
+     * own copies -- see spot_shadow_params below for the spot-specific fields. */
     glm::vec4 dir_shadow_extra = glm::vec4(1.0f, 0.0f, 16.0f, 0.0f);
     glm::mat4 dir_light_space_matrix = glm::mat4(1.0f); /**< Light projection * view matrix for directional shadows */
     glm::vec4 dir_shadow_params      = glm::vec4(0.005f, 0.0f, 1.0f, 0.0f); /**< x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled (1 or 0), w=normal_bias */
 
-    // Light counts and Point Lights
-    glm::uvec4 light_counts = glm::uvec4(0); /**< x = num_directional (0 or 1), y = num_point_lights */
+    // Light counts, Point Lights and Spot Lights
+    glm::uvec4 light_counts = glm::uvec4(0); /**< x = num_directional (0 or 1), y = num_point_lights,
+                                                   z = num_spot_lights, w = index into spot_lights[] of
+                                                   the one spot that owns the shadow map, or 0xFFFFFFFF
+                                                   if none does (see find_first_shadow_casting_spot_light_
+                                                   in pixel_render_pipeline.h) */
     PointLightGPU point_lights[MAX_POINT_LIGHTS];
 
     // Configurable sky/ambient colour (see IndirectParams in render_features.h).
@@ -71,7 +90,26 @@ struct alignas(16) LightUBO {
     glm::vec4 sky_zenith  = glm::vec4(0.05f, 0.18f, 0.55f, 0.0f);  /**< xyz = zenith colour, straight up. */
     glm::vec4 sky_horizon = glm::vec4(0.25f, 0.35f, 0.45f, 0.0f);  /**< xyz = horizon colour. */
     glm::vec4 sky_ground  = glm::vec4(0.05f, 0.045f, 0.04f, 0.0f); /**< xyz = ground colour, straight down. */
+
+    // Spot Lights -- appended after sky_ground for the same reason point_lights'
+    // doc gives: nothing above this line moves, so a shader with no spot support
+    // (gfxcoopa's pbr.frag/deferred_lighting.frag/transparent.frag/probe_capture.frag,
+    // any out-of-repo consumer) keeps compiling against the shorter prefix unchanged.
+    glm::mat4     spot_light_space_matrix = glm::mat4(1.0f); /**< Light projection * view matrix for the one shadow-casting spot (see light_counts.w). */
+    glm::vec4     spot_shadow_params      = glm::vec4(0.005f, 0.0f, 0.0f, 0.05f); /**< x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled (1 or 0), w=normal_bias */
+    SpotLightGPU  spot_lights[MAX_SPOT_LIGHTS];
 };
+
+// Pins the offset of sky_zenith -- the field every pre-spot-light shader's LightUBO
+// prefix ends on -- immediately after point_lights, so a future edit that inserts
+// something ahead of it (rather than appending after spot_lights, like this change
+// did) fails to compile instead of silently desyncing every hand-written GLSL block
+// from the C++ layout.
+static_assert(offsetof(LightUBO, sky_zenith) == offsetof(LightUBO, point_lights) + sizeof(PointLightGPU) * MAX_POINT_LIGHTS,
+    "LightUBO::sky_zenith moved -- every shader LightUBO block (gfxcoopa/toyengine/blendy) "
+    "byte-matches this prefix; see the point_lights/sky_zenith comment above.");
+static_assert(offsetof(LightUBO, spot_lights) == offsetof(LightUBO, spot_light_space_matrix) + sizeof(glm::mat4) + sizeof(glm::vec4),
+    "LightUBO::spot_lights must immediately follow spot_light_space_matrix/spot_shadow_params.");
 
 /**
  * @class LightData

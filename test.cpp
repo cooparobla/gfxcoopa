@@ -41,6 +41,8 @@
 #include <gfxcoopa/presentation/renderer.h>
 #include <gfxcoopa/util/image_readback.h>
 #include <gfxcoopa/app/context.h>
+#include <gfxcoopa/engine/passes/textured_quad_2d_pass.h>
+#include <gfxcoopa/engine/data/texture.h>
 #include <gfxcoopa/engine/components/camera_component.h>
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/components/register.h>
@@ -467,6 +469,56 @@ void test_render_pass() {
     ASSERT_TRUE(g_render_pass->handle() != VK_NULL_HANDLE);
 }
 
+// --- engine/passes/textured_quad_2d_pass.h ---
+
+void test_textured_quad_pass_unregister_view_evicts() {
+    // descriptor_cache_ is keyed by TextureView, which IS the raw VkImageView handle value,
+    // and register_view() early-returns on a key hit. Drivers hand a freed handle straight
+    // back to the next vkCreateImageView -- so without eviction, a consumer that destroys one
+    // texture and uploads another gets a new view comparing EQUAL to the dead one, skips
+    // registration, and is drawn through a descriptor set still describing the destroyed
+    // image. It renders the old texture, silently. unregister_view() is what breaks that, and
+    // this test pins it.
+    using namespace coopa::gfx;
+
+    engine::passes::TexturedQuad2DDesc desc;
+    // The test shaders hard-code their triangle and take no vertex input, so an empty layout
+    // is correct -- but the pass rejects a zero stride, and a zero push-constant size, out of
+    // hand. A pipeline layout may legally declare bindings its shaders never read.
+    desc.vertex_stride      = sizeof(float) * 4;
+    desc.push_constant_size = sizeof(float) * 4;
+
+    engine::passes::TexturedQuad2DPass pass(*g_device, *g_allocator, *g_cmd_pool, *g_render_pass,
+                                            VERT_SPV, FRAG_SPV, desc);
+
+    const std::array<uint8_t, 4> px = {10, 20, 30, 255};
+    auto tex = engine::data::Texture::upload(*g_device, *g_allocator, *g_cmd_pool,
+                                             px.data(), 1, 1, Format::RGBA8_Unorm);
+    const TextureView view = tex.view_typed();
+    const TextureView fallback = pass.fallback_view();
+    ASSERT_TRUE(view != fallback);
+
+    pass.register_view(view);
+    const pipeline::DescriptorSet* first = &pass.descriptor_set_for(view);
+    ASSERT_TRUE(first != &pass.descriptor_set_for(fallback));
+
+    // After eviction the key is gone, so the lookup falls back rather than handing back a
+    // set that describes a texture the caller is about to destroy.
+    pass.unregister_view(view);
+    ASSERT_EQ(&pass.descriptor_set_for(view), &pass.descriptor_set_for(fallback));
+
+    // And re-registering the SAME handle value must allocate a fresh set rather than being
+    // swallowed by the early-out -- this is the assertion that actually fails if eviction
+    // regresses.
+    pass.register_view(view);
+    const pipeline::DescriptorSet* second = &pass.descriptor_set_for(view);
+    ASSERT_TRUE(second != &pass.descriptor_set_for(fallback));
+    ASSERT_TRUE(second != first);
+
+    // Unregistering something never registered is a no-op, not a crash.
+    pass.unregister_view(TextureView{0xDEADBEEFu});
+}
+
 // --- pipeline/pipeline.h ---
 
 void test_pipeline_creation() {
@@ -868,6 +920,7 @@ int main() {
     RUN_TEST(test_shader_loading);
     RUN_TEST(test_surface_shader_registry);
     RUN_TEST(test_render_pass);
+    RUN_TEST(test_textured_quad_pass_unregister_view_evicts);
     RUN_TEST(test_pipeline_creation);
     RUN_TEST(test_command_pool);
     RUN_TEST(test_sync_primitives);

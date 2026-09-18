@@ -6,6 +6,8 @@
 #ifndef GFXCOOPA_ENGINE_GI_GI_SYSTEM_H
 #define GFXCOOPA_ENGINE_GI_GI_SYSTEM_H
 
+#include <cmath>
+
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/command/command_pool.h>
@@ -27,6 +29,7 @@
 #include <gfxcoopa/engine/components/renderable_ref.h>
 #include <gfxcoopa/engine/components/directional_light.h>
 #include <gfxcoopa/engine/components/point_light.h>
+#include <gfxcoopa/engine/components/spot_light.h>
 #include <gfxcoopa/engine/components/gi_probe_volume.h>
 #include <gfxcoopa/engine/components/reflection_probe.h>
 #include <gfxcoopa/pipeline/shader_library.h>
@@ -51,6 +54,7 @@ using components::MeshRenderer;
 using components::gather_renderables;
 using components::DirectionalLightComponent;
 using components::PointLightComponent;
+using components::SpotLightComponent;
 using components::GiProbeVolumeComponent;
 using components::ReflectionProbeComponent;
 
@@ -457,6 +461,23 @@ private:
             ++n;
         }
         lu.light_counts.y = n;
+
+        uint32_t ns = 0;
+        for (auto* sl : scene.get_components<SpotLightComponent>()) {
+            if (!sl || ns >= data::MAX_SPOT_LIGHTS) break;
+            auto& g = lu.spot_lights[ns];
+            g.position_range  = glm::vec4(sl->get_world_position(), sl->range);
+            g.direction_cone  = glm::vec4(sl->get_world_direction(),
+                                          std::cos(glm::radians(sl->clamped_outer_angle())));
+            g.color_intensity = glm::vec4(sl->color, sl->intensity);
+            g.params          = glm::vec4(sl->attenuation_constant,
+                                          std::cos(glm::radians(sl->clamped_inner_angle())),
+                                          0.0f, 0.0f); // z = cast_shadows = 0, see (1)'s doc above
+            ++ns;
+        }
+        lu.light_counts.z = ns;
+        lu.light_counts.w = 0xFFFFFFFFu; // no shadow-casting spot at bake time either
+
         capture_lights_->upload();
 
         // --- (2) Flatten the scene once. gather_renderables() returns active

@@ -46,6 +46,7 @@
 #include <gfxcoopa/engine/components/camera_component.h>
 #include <gfxcoopa/engine/components/directional_light.h>
 #include <gfxcoopa/engine/components/point_light.h>
+#include <gfxcoopa/engine/components/spot_light.h>
 #include <gfxcoopa/engine/components/environment_light.h>
 #include <gfxcoopa/engine/components/gi_probe_volume.h>
 #include <gfxcoopa/engine/components/reflection_probe.h>
@@ -374,6 +375,32 @@ inline void register_render_components(core::Device& device,
                 pl->attenuation_linear = node.at("attenuation_linear").get_value<float>();
             if (node.contains("attenuation_quadratic"))
                 pl->attenuation_quadratic = node.at("attenuation_quadratic").get_value<float>();
+        });
+
+    SceneLoader::register_component_parser("SpotLight",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* sl = obj.add_component<SpotLightComponent>();
+
+            if (node.contains("color")) {
+                const auto& c = node.at("color");
+                sl->color.r = c.contains("r") ? c.at("r").get_value<float>() : sl->color.r;
+                sl->color.g = c.contains("g") ? c.at("g").get_value<float>() : sl->color.g;
+                sl->color.b = c.contains("b") ? c.at("b").get_value<float>() : sl->color.b;
+            }
+            if (node.contains("direction")) {
+                sl->direction = parse_vec3_(node.at("direction"), sl->direction);
+            }
+            if (node.contains("intensity"))   sl->intensity   = node.at("intensity").get_value<float>();
+            if (node.contains("range"))       sl->range       = node.at("range").get_value<float>();
+            if (node.contains("inner_angle")) sl->inner_angle = node.at("inner_angle").get_value<float>();
+            if (node.contains("outer_angle")) sl->outer_angle = node.at("outer_angle").get_value<float>();
+            if (node.contains("cast_shadows")) sl->cast_shadows = node.at("cast_shadows").get_value<bool>();
+            if (node.contains("attenuation_constant"))
+                sl->attenuation_constant = node.at("attenuation_constant").get_value<float>();
+            if (node.contains("attenuation_linear"))
+                sl->attenuation_linear = node.at("attenuation_linear").get_value<float>();
+            if (node.contains("attenuation_quadratic"))
+                sl->attenuation_quadratic = node.at("attenuation_quadratic").get_value<float>();
         });
 
     SceneLoader::register_component_parser("GiProbeVolume",

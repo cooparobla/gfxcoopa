@@ -3,6 +3,7 @@
 #include <gfx/ibl.glsl>
 #include <gfx/brdf.glsl>
 #include <gfx/shadow_sampling.glsl>
+#include <gfx/spot_light.glsl>
 
 layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_world_normal;
@@ -30,8 +31,24 @@ layout(set = 1, binding = 0) uniform LightUBO {
     mat4 dir_light_space_matrix;
     vec4 dir_shadow_params; // x=bias, y=pcf_samples, z=shadow_enabled
 
-    uvec4 light_counts; // x=num_dir, y=num_point
+    uvec4 light_counts; // x=num_dir, y=num_point, z=num_spot, w=spot_shadow_index
     PointLight point_lights[16];
+
+    // Padding to reach spot_light_space_matrix's std140 offset -- LightUBO (light_data.h)
+    // appends spot fields after sky_zenith/horizon/ground, which this shader has never
+    // declared (it has no sky-gradient ambient term), so it must still burn the bytes to
+    // reach the same offset every OTHER LightUBO consumer's spot fields sit at.
+    vec4 _pad_sky_zenith;
+    vec4 _pad_sky_horizon;
+    vec4 _pad_sky_ground;
+
+    // Spot Lights -- unshadowed here (see the spot loop below): this shader's set 2 has no
+    // spot sampler slot, unlike toyengine's LightUBO consumers, so adding one would change
+    // a descriptor layout out-of-repo consumers (e.g. blendy) compile against. See
+    // pixel_shadow_body.glsl's calc_spot_shadow() for the shadowed path.
+    mat4 spot_light_space_matrix;
+    vec4 spot_shadow_params;
+    SpotLight spot_lights[8];
 } lights;
 
 // Set 2: Shadow maps -- *Shadow sampler types: hardware compareEnable
@@ -284,6 +301,50 @@ void main() {
         kD *= 1.0 - metallic;
 
         Lo += (kD * albedo / BRDF_PI + specular) * radiance * NdotL * (1.0 - shadow);
+    }
+
+    // Direct Spot Lights contribution -- unshadowed (see the LightUBO block's doc on why
+    // this shader has no spot shadow sampler); otherwise the same dist^2 falloff curve as
+    // the point loop above, times the cone term.
+    uint num_spots = min(lights.light_counts.z, 8u);
+    for (uint i = 0u; i < num_spots; ++i) {
+        SpotLight sl = lights.spot_lights[i];
+        vec3 light_pos = sl.position_range.xyz;
+        float range = sl.position_range.w;
+
+        vec3 frag_to_light = frag_world_pos - light_pos;
+        float dist = length(frag_to_light);
+        if (dist > range) continue;
+
+        vec3 L = normalize(-frag_to_light);
+        float cone = gfx_spot_cone(L, sl.direction_cone.xyz, sl.direction_cone.w, sl.params.y);
+        if (cone <= 0.0) continue;
+
+        vec3 H = normalize(V + L);
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL <= 0.0) continue;
+
+        float dist2 = dist * dist;
+        float sharpness = max(sl.params.x, 0.1);
+        float factor = clamp(dist / range, 0.0, 1.0);
+        float smooth_falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
+        smooth_falloff = smooth_falloff * smooth_falloff;
+        float attenuation = (1.0 / (4.0 * BRDF_PI * (dist2 + 1.0))) * smooth_falloff;
+        vec3 radiance = sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * attenuation * cone;
+
+        float NDF = distribution_ggx(N, H, roughness);
+        float G   = geometry_smith(N, V, L, roughness);
+        vec3 F    = fresnel_schlick(max(dot(H, V), 0.0), F0);
+
+        vec3 numerator    = NDF * G * F;
+        float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+        vec3 specular     = numerator / denominator;
+
+        vec3 kS = F;
+        vec3 kD = vec3(1.0) - kS;
+        kD *= 1.0 - metallic;
+
+        Lo += (kD * albedo / BRDF_PI + specular) * radiance * NdotL;
     }
 
     // --- Indirect Lighting (GI) ---

@@ -19,6 +19,7 @@
 #include <gfx/sky.glsl>
 #include <gfx/ibl.glsl>   // fresnel_schlick_roughness only
 #include <gfx/brdf.glsl>
+#include <gfx/spot_light.glsl>
 
 layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_world_normal;
@@ -48,8 +49,20 @@ layout(set = 1, binding = 0) uniform LightUBO {
     mat4 dir_light_space_matrix; // unused (no shadows)
     vec4 dir_shadow_params;      // z forced 0 by GiSystem
 
-    uvec4 light_counts;
+    uvec4 light_counts; // z=num_spot, populated by GiSystem the same way y=num_point is
     PointLight point_lights[16];
+
+    // Padding to reach spot_light_space_matrix's std140 offset -- see pbr.frag's identical
+    // block for why this shader (no sky-gradient ambient term declared here) still needs it.
+    vec4 _pad_sky_zenith;
+    vec4 _pad_sky_horizon;
+    vec4 _pad_sky_ground;
+
+    // Spot Lights -- unshadowed here too, same v1 limitation as the rest of this file (no
+    // shadow samplers declared at all).
+    mat4 spot_light_space_matrix; // unused (no shadows)
+    vec4 spot_shadow_params;      // unused (no shadows)
+    SpotLight spot_lights[8];
 } lights;
 
 // Set 2: BRDF LUT (reused from GiSystem's already-built BRDFLUT)
@@ -148,6 +161,46 @@ void main() {
         smooth_falloff = smooth_falloff * smooth_falloff;
         float attenuation = (1.0 / (4.0 * BRDF_PI * (dist2 + 1.0))) * smooth_falloff;
         vec3 radiance = pl.color_intensity.rgb * (pl.color_intensity.w * 0.08) * attenuation;
+
+        float NDF = distribution_ggx(N, H, roughness);
+        float G   = geometry_smith(N, V, L, roughness);
+        vec3 F    = fresnel_schlick(max(dot(H, V), 0.0), F0);
+
+        vec3 numerator    = NDF * G * F;
+        float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+        vec3 specular     = numerator / denominator;
+
+        vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+
+        Lo += (kD * albedo / BRDF_PI + specular) * radiance * NdotL;
+    }
+
+    // Direct spot lights -- unshadowed, same dist^2 falloff curve as the point loop above.
+    uint num_spots = min(lights.light_counts.z, 8u);
+    for (uint i = 0u; i < num_spots; ++i) {
+        SpotLight sl = lights.spot_lights[i];
+        vec3 light_pos = sl.position_range.xyz;
+        float range = sl.position_range.w;
+
+        vec3 frag_to_light = frag_world_pos - light_pos;
+        float dist = length(frag_to_light);
+        if (dist > range) continue;
+
+        vec3 L = normalize(-frag_to_light);
+        float cone = gfx_spot_cone(L, sl.direction_cone.xyz, sl.direction_cone.w, sl.params.y);
+        if (cone <= 0.0) continue;
+
+        vec3 H = normalize(V + L);
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL <= 0.0) continue;
+
+        float dist2 = dist * dist;
+        float sharpness = max(sl.params.x, 0.1);
+        float factor = clamp(dist / range, 0.0, 1.0);
+        float smooth_falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
+        smooth_falloff = smooth_falloff * smooth_falloff;
+        float attenuation = (1.0 / (4.0 * BRDF_PI * (dist2 + 1.0))) * smooth_falloff;
+        vec3 radiance = sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * attenuation * cone;
 
         float NDF = distribution_ggx(N, H, roughness);
         float G   = geometry_smith(N, V, L, roughness);

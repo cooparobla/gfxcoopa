@@ -1,12 +1,14 @@
 /**
  * @file shadow_map_target.h
- * @brief Depth render targets for Directional Light and Point Light Cubemap shadow maps.
+ * @brief Depth render targets for Directional Light, Point Light Cubemap, and
+ *        Spot Light shadow maps.
  */
 
 #ifndef GFXCOOPA_ENGINE_TARGETS_SHADOW_MAP_TARGET_H
 #define GFXCOOPA_ENGINE_TARGETS_SHADOW_MAP_TARGET_H
 
 #include <volk/volk.h>
+#include <algorithm>
 #include <vector>
 #include <memory>
 #include <stdexcept>
@@ -27,14 +29,15 @@ namespace targets {
 
 /**
  * @class ShadowMapTarget
- * @brief Manages directional shadow depth map and point light cubemap depth targets.
+ * @brief Manages directional shadow depth map, point light cubemap depth target,
+ *        and spot light depth map.
  */
 class ShadowMapTarget {
 public:
     ShadowMapTarget(core::Device& device, memory::Allocator& allocator,
-                    uint32_t dir_res = 2048, uint32_t cube_res = 512)
+                    uint32_t dir_res = 2048, uint32_t cube_res = 512, uint32_t spot_res = 1024)
         : device_(device), allocator_(allocator),
-          dir_res_(dir_res), cube_res_(cube_res)
+          dir_res_(dir_res), cube_res_(cube_res), spot_res_(spot_res)
     {
         create_resources_();
     }
@@ -67,6 +70,37 @@ public:
     }
 
     void end_directional_pass(command::CommandBuffer& cmd) const {
+        cmd.end_render_pass();
+    }
+
+    // --- Spot Light Pass ---
+    //
+    // Deliberately reuses dir_render_pass_ (not a new VkRenderPass) -- its attachment
+    // description (D32_SFLOAT, UNDEFINED -> SHADER_READ_ONLY_OPTIMAL) is identical to
+    // what a spot map needs, and render-pass *compatibility* (matching attachment
+    // descriptions, not matching framebuffer size) is what lets the existing
+    // directional shadow pipeline record into spot_framebuffer_ with no new pipeline
+    // variant. Only the framebuffer and resolution differ.
+
+    void begin_spot_pass(command::CommandBuffer& cmd) const {
+        VkClearValue clear_value{};
+        clear_value.depthStencil = {1.0f, 0};
+
+        VkRenderPassBeginInfo rp_info{};
+        rp_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rp_info.renderPass        = dir_render_pass_->handle();
+        rp_info.framebuffer       = spot_framebuffer_;
+        rp_info.renderArea.offset = {0, 0};
+        rp_info.renderArea.extent = {spot_res_, spot_res_};
+        rp_info.clearValueCount   = 1;
+        rp_info.pClearValues      = &clear_value;
+
+        vkCmdBeginRenderPass(cmd.handle(), &rp_info, VK_SUBPASS_CONTENTS_INLINE);
+        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(spot_res_), static_cast<float>(spot_res_));
+        cmd.set_scissor(0, 0, spot_res_, spot_res_);
+    }
+
+    void end_spot_pass(command::CommandBuffer& cmd) const {
         cmd.end_render_pass();
     }
 
@@ -115,6 +149,33 @@ public:
         vkCmdPipelineBarrier(
             cmd.handle(),
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            0, nullptr,
+            0, nullptr,
+            1, &barrier
+        );
+    }
+
+    void transition_spot_to_shader_read(command::CommandBuffer& cmd) const {
+        VkImageMemoryBarrier barrier{};
+        barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.newLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image                           = spot_depth_image_->handle();
+        barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
+        barrier.subresourceRange.baseMipLevel   = 0;
+        barrier.subresourceRange.levelCount     = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount     = 1;
+        barrier.srcAccessMask                   = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        barrier.dstAccessMask                   = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            cmd.handle(),
+            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             0,
             0, nullptr,
@@ -177,10 +238,41 @@ public:
         return proj * view;
     }
 
+    /**
+     * @brief Builds a spot light's light-space (projection * view) matrix.
+     *
+     * A single perspective frustum aimed along `dir`, sized to exactly cover the
+     * cone at `outer_degrees` -- unlike the cube map's fixed 90-degree faces, a
+     * spot's FOV is the cone itself, so no shadow-map texels are wasted outside it.
+     * Uses the same RH_ZO convention (no Y-flip) as compute_dir_shadow_fit()'s
+     * orthoRH_ZO, so both maps share the shader's `proj_coords.xy * 0.5 + 0.5`
+     * mapping in calc_dir_shadow()/calc_spot_shadow().
+     *
+     * @param pos            World-space light position.
+     * @param dir            Normalized world-space aim direction.
+     * @param outer_degrees  Cone outer half-angle, in degrees (clamped to [1, 89]
+     *                       by the caller -- SpotLightComponent::clamped_outer_angle()).
+     * @param range          Light range; used as the far clip plane.
+     * @return Combined projection * view matrix.
+     */
+    static glm::mat4 get_spot_matrix(const glm::vec3& pos, const glm::vec3& dir,
+                                     float outer_degrees, float range) {
+        // Same degenerate-up guard as compute_dir_shadow_fit() (pixel_math.h) --
+        // this engine is Z-up, so a near-vertical aim needs a different up axis to
+        // keep lookAt() from degenerating.
+        const glm::vec3 up = (std::abs(dir.z) < 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f)
+                                                        : glm::vec3(0.0f, 1.0f, 0.0f);
+        glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(2.0f * outer_degrees), 1.0f,
+                                               0.1f, std::max(range, 0.2f));
+        glm::mat4 view = glm::lookAt(pos, pos + dir, up);
+        return proj * view;
+    }
+
     // --- Accessors ---
 
     VkImageView dir_shadow_view() const { return dir_depth_image_->view(); }
     VkImageView cube_shadow_view() const { return cube_array_view_; }
+    VkImageView spot_shadow_view() const { return spot_depth_image_->view(); }
 
     pipeline::RenderPass& dir_render_pass() const { return *dir_render_pass_; }
     pipeline::RenderPass& cube_render_pass() const { return *cube_render_pass_; }
@@ -214,7 +306,27 @@ private:
         fb_info.layers          = 1;
         GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb_info, nullptr, &dir_framebuffer_));
 
-        // 2. Point Light Cubemap Depth Image (Cubemap, 6 layers)
+        // 2. Spot Light Depth Image (2D) -- reuses dir_render_pass_ (see begin_spot_pass()'s
+        //    doc for why that's compatible), its own image/view/framebuffer at spot_res_.
+        spot_depth_image_ = std::make_unique<memory::Image>(
+            device_, allocator_, spot_res_, spot_res_,
+            VK_FORMAT_D32_SFLOAT,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT
+        );
+
+        VkImageView spot_view = spot_depth_image_->view();
+        VkFramebufferCreateInfo spot_fb_info{};
+        spot_fb_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        spot_fb_info.renderPass      = dir_render_pass_->handle();
+        spot_fb_info.attachmentCount = 1;
+        spot_fb_info.pAttachments    = &spot_view;
+        spot_fb_info.width           = spot_res_;
+        spot_fb_info.height          = spot_res_;
+        spot_fb_info.layers          = 1;
+        GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &spot_fb_info, nullptr, &spot_framebuffer_));
+
+        // 3. Point Light Cubemap Depth Image (Cubemap, 6 layers)
         VkImageCreateInfo image_info{};
         image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         image_info.imageType     = VK_IMAGE_TYPE_2D;
@@ -291,6 +403,10 @@ private:
             vkDestroyFramebuffer(device_.handle(), dir_framebuffer_, nullptr);
             dir_framebuffer_ = VK_NULL_HANDLE;
         }
+        if (spot_framebuffer_ != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device_.handle(), spot_framebuffer_, nullptr);
+            spot_framebuffer_ = VK_NULL_HANDLE;
+        }
         for (auto fb : cube_face_framebuffers_) {
             if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device_.handle(), fb, nullptr);
         }
@@ -314,10 +430,14 @@ private:
     memory::Allocator& allocator_;
     uint32_t           dir_res_;
     uint32_t           cube_res_;
+    uint32_t           spot_res_;
 
     std::unique_ptr<memory::Image>        dir_depth_image_;
     std::unique_ptr<pipeline::RenderPass> dir_render_pass_;
     VkFramebuffer                         dir_framebuffer_ = VK_NULL_HANDLE;
+
+    std::unique_ptr<memory::Image>        spot_depth_image_;
+    VkFramebuffer                         spot_framebuffer_ = VK_NULL_HANDLE; // uses dir_render_pass_
 
     VkImage                               cube_image_      = VK_NULL_HANDLE;
     VmaAllocation                         cube_allocation_ = VK_NULL_HANDLE;

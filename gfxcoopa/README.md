@@ -273,7 +273,7 @@ The `engine` rendering system organizes Vulkan descriptor set layouts into four 
 
 ##### [light_data.h](engine/data/light_data.h)
 - **Role**: Uniform data structures for directional and point light sources.
-- **Key Classes / Structs**: `DirectionalLightGPU`, `PointLightGPU`, `LightDataGPU`, `LightUBO`.
+- **Key Classes / Structs**: `DirectionalLightGPU`, `PointLightGPU`, `SpotLightGPU`, `LightDataGPU`, `LightUBO`.
 - **Details**: Manages host-visible UBO allocations storing directional light matrix/color/direction and up to 4 omnidirectional point lights with attenuation parameters.
 
 ##### [mesh.h](engine/data/mesh.h)

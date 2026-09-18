@@ -58,7 +58,7 @@ The `coopa::gfx::engine` module provides high-level rendering engine abstraction
 
 #### [light_data.h](data/light_data.h)
 - **Role**: Data structures and host-visible UBO management for directional and point light sources.
-- **Key Classes / Structs**: `DirectionalLightGPU`, `PointLightGPU`, `LightDataGPU`, `LightUBO`.
+- **Key Classes / Structs**: `DirectionalLightGPU`, `PointLightGPU`, `SpotLightGPU`, `LightDataGPU`, `LightUBO`.
 - **Details**: Uploads light matrix, color, intensity, attenuation factors, and light counts to GPU shader stages.
 
 #### [mesh.h](data/mesh.h)

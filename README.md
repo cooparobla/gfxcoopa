@@ -214,7 +214,7 @@ The rendering engine built on the layers above. See the
 
 | Directory | Contents |
 |---|---|
-| [`components/`](gfxcoopa/engine/components/register.h) | Scene components parsed from YAML — `MeshRenderer`/`PBRMaterial`, `CameraComponent`, `DirectionalLight`, `PointLight`, `EnvironmentLight`, `ReflectionProbe`, `GiProbeVolume`, `Volume`, `SdfShape`/`SdfRenderer`, plus `register_render_components()` |
+| [`components/`](gfxcoopa/engine/components/register.h) | Scene components parsed from YAML — `MeshRenderer`/`PBRMaterial`, `CameraComponent`, `DirectionalLight`, `PointLight`, `SpotLight`, `EnvironmentLight`, `ReflectionProbe`, `GiProbeVolume`, `Volume`, `SdfShape`/`SdfRenderer`, plus `register_render_components()` |
 | [`data/`](gfxcoopa/engine/data/mesh.h) | GPU-side data and UBO layouts — `Vertex`/`Mesh`, `Texture`, `CameraUBO`, `LightUBO`, `ModelPushConstants`, `FogData`, `VolumetricsData`, `SdfData`, `PaletteLut` |
 | [`targets/`](gfxcoopa/engine/targets/offscreen_target.h) | Render targets — `OffscreenTarget`, `GBufferTarget`, `ShadowMapTarget`, `CubemapTarget`, `TransparentCaptureTarget` |
 | [`passes/`](gfxcoopa/engine/passes/fullscreen_stage.h) | The render passes. `FullscreenStage` is the shared scaffold most post-processing passes are built from; `GBufferPipeline`, `ShadowPipeline`, `TransparentPass` and the `sdf_*` passes draw real geometry instead |
