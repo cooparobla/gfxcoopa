@@ -1,7 +1,7 @@
 /**
  * @file ssao_pass.h
- * @brief Screen-Space Ambient Occlusion: world-space hemisphere sampling, temporal resolve, and
- * a depth/normal-aware bilateral blur.
+ * @brief Screen-Space Ambient Occlusion: horizon-based estimation (GTAO) over the SSR
+ * chain's Hi-Z depth pyramid, temporal resolve, and a depth/normal-aware bilateral blur.
  */
 
 #ifndef GFXCOOPA_ENGINE_PASSES_SSAO_PASS_H
@@ -25,7 +25,6 @@
 #include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/engine/util/sampler.h>
-#include <gfxcoopa/engine/util/ssao_kernel.h>
 #include <gfxcoopa/util/error.h>
 
 namespace coopa {
@@ -33,8 +32,8 @@ namespace gfx {
 namespace engine {
 namespace passes {
 
-/// Bundles three sub-stages behind one object -- raw hemisphere sample, temporal resolve, and a
-/// bilateral blur -- the same multi-stage-bundling shape SsrPass uses for its raymarch/resolve/
+/// Bundles three sub-stages behind one object -- raw horizon-based estimate (GTAO), temporal
+/// resolve, and a bilateral blur -- the same multi-stage-bundling shape SsrPass uses for its raymarch/resolve/
 /// composite trio. Callers only ever touch update_descriptors()/execute()/output_view().
 ///
 /// Pipeline order is raw -> resolve -> blur (temporal first, spatial second), matching SsrPass's
@@ -43,18 +42,31 @@ namespace passes {
 /// fight the same per-frame noise the temporal stage exists to remove.
 class SsaoPass {
 public:
-    /// Raw-pass GPU push constants.
+    /// Raw-pass GPU push constants. mat4 first (16-byte aligned) then plain scalars,
+    /// matching ResolvePushConstants' layout rule below.
     struct PushConstants {
-        float radius        = 0.5f;
-        float bias          = 0.025f;
-        float power         = 1.5f;
-        int   kernel_size   = 24;
-        float noise_scale_x = 1.0f;
-        float noise_scale_y = 1.0f;
+        glm::mat4 inv_proj  = glm::mat4(1.0f);  // offset 0 -- view reconstruction of Hi-Z samples
+        float radius        = 0.5f;             // offset 64
+        float bias          = 0.025f;           // offset 68
+        float power         = 1.5f;             // offset 72
+        int   slices        = 2;                // offset 76
+        int   steps         = 8;                // offset 80
+        float resolution_x  = 1.0f;             // offset 84
+        float resolution_y  = 1.0f;             // offset 88
         // 0 when temporal resolve is off -- see ssao.frag. Must match Params::temporal_enabled;
         // execute() derives this, callers don't set it directly.
-        int   noise_rotation = 0;
+        int   noise_rotation = 0;               // offset 92
+        int   max_mip        = 5;               // offset 96
+        float max_radius_px  = 80.0f;           // offset 100 -- upper clamp on the march extent
     };
+    static_assert(sizeof(PushConstants) == 104,
+                  "ssao.frag's SsaoPushConstants block must match this layout byte-for-byte");
+
+    /// Format of the temporal resolve's target and of the history image copied from it. The
+    /// resolve carries an eye distance (world units, see ssao_resolve.frag's disocclusion
+    /// test) and a per-pixel accumulation count alongside the occlusion value, so the target
+    /// needs float range beyond two channels.
+    static constexpr VkFormat kResolveFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
     /// Resolve-pass GPU push constants. mat4 first (16-byte aligned), then plain scalars --
     /// vec2 is deliberately flattened to two floats, matching PushConstants' house rule, so nothing
@@ -63,14 +75,34 @@ public:
         glm::mat4 prev_view_proj = glm::mat4(1.0f); // offset 0
         float     resolution_x   = 1.0f;            // offset 64
         float     resolution_y   = 1.0f;            // offset 68
-        float     blend_factor   = 0.0f;             // offset 72
+        // Accumulation-count cap: each pixel blends the new frame at 1/(count+1) until its
+        // count reaches this, then keeps averaging at that fixed rate. 0 degenerates the
+        // resolve into a passthrough of the current frame (how temporal_enabled=false works).
+        float     max_accum      = 32.0f;            // offset 72
         int       history_valid  = 0;                // offset 76
+        // Flattened vec3s, same house rule as the vec2 above: the eye that produced this
+        // frame's G-buffer, and the eye the history image was resolved from. The resolve
+        // shader needs both to turn its stored distance channel into a surface-identity test.
+        float     camera_pos_x      = 0.0f;          // offset 80
+        float     camera_pos_y      = 0.0f;          // offset 84
+        float     camera_pos_z      = 0.0f;          // offset 88
+        float     prev_camera_pos_x = 0.0f;          // offset 92
+        float     prev_camera_pos_y = 0.0f;          // offset 96
+        float     prev_camera_pos_z = 0.0f;          // offset 100
+        // Nonzero once the camera has been still long enough for the accumulated average
+        // to top up -- the resolve then holds accepted-history pixels verbatim, which is
+        // what keeps a still image byte-static (see ssao_resolve.frag).
+        int       frozen            = 0;             // offset 104
     };
-    static_assert(sizeof(ResolvePushConstants) == 80, "ssao_resolve.frag's PushConstants block must match this layout byte-for-byte");
+    static_assert(sizeof(ResolvePushConstants) == 108, "ssao_resolve.frag's PushConstants block must match this layout byte-for-byte");
 
     /// Blur-pass GPU push constants.
     struct BlurPushConstants {
-        float radius = 0.5f; // ssao_radius -- sigma for the plane-distance weight scales with it
+        float plane_sigma = 0.375f; // world-space plane-distance tolerance of the bilateral
+                                    // weight, per spacing unit (see ssao_blur.frag's doc on
+                                    // why it is not derived from the gather radius)
+        float max_accum   = 32.0f;  // resolve accumulation cap; drives the count-adaptive dilation
+        float motion_px   = 0.0f;   // camera sweep speed in pixels/frame; widens the kernel in motion
     };
 
     /// execute() parameters. Mirrors SsrPass::Params' shape: raw-pass tunables plus temporal
@@ -79,19 +111,40 @@ public:
         float radius        = 0.5f;
         float bias          = 0.025f;
         float power         = 1.5f;
-        int   kernel_size   = 24;
-        float noise_scale_x = 1.0f;
-        float noise_scale_y = 1.0f;
+        int   slices        = 2;   // horizon slices per pixel
+        int   steps         = 8;   // march steps per slice direction
+        // Upper clamp on the horizon march's screen-space extent, in render-target pixels
+        // (Unity HDRP's "Maximum Radius in Pixels").
+        float max_radius_px = 80.0f;
+        // Blur pass: world-space plane-distance tolerance of the bilateral weight, per
+        // spacing unit -- tracks the geometry's step scale, independent of `radius`.
+        float blur_plane_sigma = 0.375f;
+        // Inverse of the projection that rendered the depth buffer the Hi-Z pyramid was
+        // downsampled from (the TAA-jittered one, when jitter is active).
+        glm::mat4 inv_proj  = glm::mat4(1.0f);
+        int   max_mip       = 5;   // top usable Hi-Z mip (HiZPass::mip_levels() - 1, capped)
         // Caller-driven frame counter (e.g. ssao_frame_index_ & 0x7 in pbr_render_pipeline.h).
         // Only takes effect when temporal_enabled is true -- see execute()'s raw_pc.noise_rotation.
         int   noise_rotation = 0;
 
         bool  temporal_enabled = true;
-        float temporal_blend   = 0.85f;
+        // Accumulation depth: how many frames a pixel averages before the running mean turns
+        // into a fixed-rate EMA. Mapped straight into ResolvePushConstants::max_accum.
+        int   temporal_frames  = 32;
         // Reprojection: previous frame's JITTERED proj * view, and whether it (and the history
         // image) are actually valid yet -- see execute()'s history_valid derivation.
         glm::mat4 prev_view_proj       = glm::mat4(1.0f);
         bool      prev_view_proj_valid = false;
+        // This frame's eye position. The pass remembers the previous frame's itself, so callers
+        // only ever supply the current one.
+        glm::vec3 camera_pos           = glm::vec3(0.0f);
+        // True once the camera has been still long enough to freeze the accumulated image
+        // (the caller counts still frames -- see PixelRenderPipeline's ssao_frames_still_).
+        bool      frozen               = false;
+        // Camera rotation between consecutive frames, in screen-centre pixels -- drives the
+        // blur's velocity widening (0 at rest keeps the kernel bit-identical to the resting
+        // one, which the byte-static contracts depend on).
+        float     motion_px            = 0.0f;
     };
 
     SsaoPass(coopa::gfx::core::Device& device,
@@ -104,8 +157,6 @@ public:
              const std::string& blur_frag_spv)
         : device_(device), allocator_(allocator)
     {
-        kernel_ = std::make_unique<util::SsaoKernel>(device, allocator);
-        noise_  = std::make_unique<util::SsaoNoiseTexture>(device, allocator, cmd_pool);
         create_neutral_texture_(cmd_pool);
 
         // All three targets hold an occlusion mask, not colour to be filtered -- NEAREST
@@ -119,13 +170,17 @@ public:
         blur_sampler_ = std::make_unique<util::Sampler>(device, nearest_clamp);
 
 
-        // Single R8_UNORM attachment, no depth -- same shape as HiZPass/SceneColorMipPass, just
-        // one mip instead of a chain. All three sub-stages share this shape.
+        // Single colour attachment, no depth -- same shape as HiZPass/SceneColorMipPass, just
+        // one mip instead of a chain. All three sub-stages share that shape; they differ only in
+        // format (see kResolveFormat).
         raw_render_pass_ = std::make_unique<coopa::gfx::pipeline::RenderPass>(
             device, VK_FORMAT_R8_UNORM, VK_FORMAT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         );
+        // RG16F, not R8: the resolve carries a per-pixel eye distance in .g alongside the
+        // occlusion in .r (see ssao_resolve.frag), and that distance needs real range and
+        // precision rather than a normalized byte. The raw and blur targets below stay R8.
         resolve_render_pass_ = std::make_unique<coopa::gfx::pipeline::RenderPass>(
-            device, VK_FORMAT_R8_UNORM, VK_FORMAT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            device, kResolveFormat, VK_FORMAT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         );
         blur_render_pass_ = std::make_unique<coopa::gfx::pipeline::RenderPass>(
             device, VK_FORMAT_R8_UNORM, VK_FORMAT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
@@ -144,21 +199,16 @@ public:
         };
 
         // Raw pass. Set 0 is the caller's camera layout; this stage's own set 1 holds
-        // G1 normal, G2 position, the noise texture and the kernel UBO.
+        // G1 normal, G2 position and the caller's Hi-Z pyramid -- all three bound via
+        // update_descriptors(), the same reason DeferredLightingPass::set_gbuffer_images() is
+        // called after every recreate() in pbr_render_pipeline.h.
         FullscreenStageDesc raw_sd;
         raw_sd.vert_spv = vert_spv;
         raw_sd.frag_spv = raw_frag_spv;
         raw_sd.leading_layouts = {&camera_layout};
         raw_sd.owned_sets = {sampled(3)};
-        raw_sd.owned_sets[0].push_back({3, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1});
         raw_sd.push_constants = {{ShaderStage::Fragment, 0, sizeof(PushConstants)}};
         raw_ = std::make_unique<FullscreenStage>(device, *raw_render_pass_, raw_sd);
-
-        raw_->set().bind_buffer(3, kernel_->buffer());
-        raw_->set().bind_image(2, noise_->view_typed(), noise_->sampler());
-        // Bindings 0/1 (G1/G2) are rebound every resize via update_descriptors(), the same
-        // reason DeferredLightingPass::set_gbuffer_images() is called after every recreate() in
-        // pbr_render_pipeline.h.
 
         // Resolve pass. No camera set -- reprojection uses the prev_view_proj push constant,
         // matching SsrPass's resolve set: current raw AO, history AO, G2 position, G1 normal.
@@ -191,21 +241,25 @@ public:
         width_  = width;
         height_ = height;
 
-        create_target_(raw_image_, raw_allocation_, raw_view_, raw_framebuffer_, *raw_render_pass_, 0);
+        create_target_(raw_image_, raw_allocation_, raw_view_, raw_framebuffer_, *raw_render_pass_,
+                       VK_FORMAT_R8_UNORM, 0);
         // resolved_image_ is the source of the vkCmdCopyImage in update_ssao_history_() --
         // needs TRANSFER_SRC on top of the usual COLOR_ATTACHMENT | SAMPLED, or that copy is a
         // VUID-vkCmdCopyImage-srcImage-00126 validation error.
         create_target_(resolved_image_, resolved_allocation_, resolved_view_, resolved_framebuffer_,
-                       *resolve_render_pass_, VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-        create_target_(blur_image_, blur_allocation_, blur_view_, blur_framebuffer_, *blur_render_pass_, 0);
+                       *resolve_render_pass_, kResolveFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        create_target_(blur_image_, blur_allocation_, blur_view_, blur_framebuffer_, *blur_render_pass_,
+                       VK_FORMAT_R8_UNORM, 0);
 
         // History is a plain persistent image (not one of the render-target triples above): it's
         // never rendered into via a render pass, only vkCmdCopyImage'd into at the end of
         // execute(). Allocating a fresh image on resize means history from the previous
         // resolution can never leak into the new one, and history_initialized_ = false keeps
         // the resolve pass from reading it until update_ssao_history_() populates it.
+        // kResolveFormat, matching resolved_image_: update_ssao_history_() connects the two with
+        // a vkCmdCopyImage, which requires compatible formats on both sides.
         history_image_ = std::make_unique<coopa::gfx::memory::Image>(
-            device_, allocator_, width_, height_, VK_FORMAT_R8_UNORM,
+            device_, allocator_, width_, height_, kResolveFormat,
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT, VMA_MEMORY_USAGE_AUTO
         );
@@ -219,12 +273,16 @@ public:
     }
 
     /// g1_view/g2_view: the live G-Buffer normal/position views (rebound every resize).
+    /// hiz_view/hiz_sampler: the SSR chain's Hi-Z min-depth pyramid and its every-mip-reachable
+    /// sampler (HiZPass::full_hiz_view_typed()/sampler()) -- the raw pass marches it.
     /// linear_sampler: used only for the resolve pass's history read, which samples at a
     /// reprojected (non-texel-aligned) UV -- everything else here stays NEAREST.
     void update_descriptors(coopa::gfx::TextureView g1_view, coopa::gfx::TextureView g2_view,
+                            coopa::gfx::TextureView hiz_view, const util::Sampler& hiz_sampler,
                             const util::Sampler& linear_sampler) {
         raw_->set().bind_image(0, g1_view, linear_sampler);
         raw_->set().bind_image(1, g2_view, linear_sampler);
+        raw_->set().bind_image(2, hiz_view, hiz_sampler);
 
         resolve_->set().bind_image(1, history_image_->view_typed(), linear_sampler);
         resolve_->set().bind_image(2, g2_view, *raw_sampler_);
@@ -282,13 +340,17 @@ public:
         cmd.bind_descriptor_set(camera_set, 0);
 
         PushConstants raw_pc{};
+        raw_pc.inv_proj       = params.inv_proj;
         raw_pc.radius         = params.radius;
         raw_pc.bias           = params.bias;
         raw_pc.power          = params.power;
-        raw_pc.kernel_size    = params.kernel_size;
-        raw_pc.noise_scale_x  = params.noise_scale_x;
-        raw_pc.noise_scale_y  = params.noise_scale_y;
+        raw_pc.slices         = params.slices;
+        raw_pc.steps          = params.steps;
+        raw_pc.resolution_x   = static_cast<float>(width_);
+        raw_pc.resolution_y   = static_cast<float>(height_);
         raw_pc.noise_rotation = params.temporal_enabled ? params.noise_rotation : 0;
+        raw_pc.max_mip        = params.max_mip;
+        raw_pc.max_radius_px  = params.max_radius_px;
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, raw_pc);
         raw_->draw(cmd);
 
@@ -304,7 +366,7 @@ public:
 
         // --- 2. Temporal resolve pass: blend raw_view_ (this frame) with history_image_ (last
         // frame's resolved output) into resolved_view_, which the blur pass below reads instead
-        // of raw_view_ directly. When temporal_enabled is false, blend_factor = 0 degenerates
+        // of raw_view_ directly. When temporal_enabled is false, max_accum = 0 degenerates
         // this into a pure passthrough of the current frame -- one code path, no branching
         // pipeline structure, matching SsrPass's resolve.
         VkClearValue resolve_clear{};
@@ -327,11 +389,22 @@ public:
         resolve_pc.prev_view_proj = params.prev_view_proj;
         resolve_pc.resolution_x   = static_cast<float>(width_);
         resolve_pc.resolution_y   = static_cast<float>(height_);
-        resolve_pc.blend_factor   = params.temporal_enabled ? params.temporal_blend : 0.0f;
+        resolve_pc.max_accum      = params.temporal_enabled
+            ? static_cast<float>(params.temporal_frames) : 0.0f;
         // Both a history IMAGE (history_initialized_) and a previous view-projection MATRIX
         // (prev_view_proj_valid) must exist -- the matrix lags the image by a frame on a
         // fresh-start/resize, so ANDing avoids reprojecting with a stale/identity matrix.
         resolve_pc.history_valid = (history_initialized_ && params.prev_view_proj_valid) ? 1 : 0;
+        resolve_pc.camera_pos_x      = params.camera_pos.x;
+        resolve_pc.camera_pos_y      = params.camera_pos.y;
+        resolve_pc.camera_pos_z      = params.camera_pos.z;
+        // prev_camera_pos_ is only read by the shader when history_valid is 1, which already
+        // requires a history image AND a previous view-projection -- the same frame of lag this
+        // eye position has, so it needs no validity flag of its own.
+        resolve_pc.prev_camera_pos_x = prev_camera_pos_.x;
+        resolve_pc.prev_camera_pos_y = prev_camera_pos_.y;
+        resolve_pc.prev_camera_pos_z = prev_camera_pos_.z;
+        resolve_pc.frozen            = params.frozen ? 1 : 0;
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, resolve_pc);
         resolve_->draw(cmd);
 
@@ -359,7 +432,10 @@ public:
         blur_->bind(cmd, width_, height_);
 
         BlurPushConstants blur_pc{};
-        blur_pc.radius = params.radius;
+        blur_pc.plane_sigma = params.blur_plane_sigma;
+        blur_pc.max_accum = params.temporal_enabled
+            ? static_cast<float>(params.temporal_frames) : 0.0f;
+        blur_pc.motion_px = params.motion_px;
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, blur_pc);
         blur_->draw(cmd);
 
@@ -367,6 +443,7 @@ public:
 
         // --- 4. Copy resolved_view_ into history_image_ for next frame's resolve pass.
         update_ssao_history_(cmd);
+        prev_camera_pos_ = params.camera_pos;
     }
 
     VkImageView output_view() const { return blur_view_; }
@@ -486,12 +563,12 @@ private:
 
     void create_target_(VkImage& image, VmaAllocation& allocation, VkImageView& view,
                         VkFramebuffer& framebuffer, coopa::gfx::pipeline::RenderPass& render_pass,
-                        VkImageUsageFlags extra_usage)
+                        VkFormat format, VkImageUsageFlags extra_usage)
     {
         VkImageCreateInfo img_info{};
         img_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         img_info.imageType     = VK_IMAGE_TYPE_2D;
-        img_info.format        = VK_FORMAT_R8_UNORM;
+        img_info.format        = format;
         img_info.extent        = {width_, height_, 1};
         img_info.mipLevels     = 1;
         img_info.arrayLayers   = 1;
@@ -509,7 +586,7 @@ private:
         view_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         view_info.image                           = image;
         view_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-        view_info.format                          = VK_FORMAT_R8_UNORM;
+        view_info.format                          = format;
         view_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
         view_info.subresourceRange.baseMipLevel   = 0;
         view_info.subresourceRange.levelCount     = 1;
@@ -578,18 +655,20 @@ private:
     // triples above, since it's never a render pass attachment, only a vkCmdCopyImage destination.
     std::unique_ptr<coopa::gfx::memory::Image> history_image_;
     bool history_initialized_ = false;
+    // The eye position history_image_ was resolved from, i.e. the origin its stored distance
+    // channel is measured against. Written at the end of execute(); read only on the next call,
+    // and only when history_valid says that history exists.
+    glm::vec3 prev_camera_pos_{0.0f};
 
     std::unique_ptr<coopa::gfx::memory::Image> neutral_image_;
 
-    std::unique_ptr<util::SsaoKernel>       kernel_;
-    std::unique_ptr<util::SsaoNoiseTexture> noise_;
     std::unique_ptr<util::Sampler>          raw_sampler_;
     std::unique_ptr<util::Sampler>          blur_sampler_;
 
     std::unique_ptr<coopa::gfx::pipeline::RenderPass> raw_render_pass_;
     std::unique_ptr<coopa::gfx::pipeline::RenderPass> resolve_render_pass_;
     std::unique_ptr<coopa::gfx::pipeline::RenderPass> blur_render_pass_;
-    std::unique_ptr<FullscreenStage> raw_;      ///< Stage 1: hemisphere-kernel AO.
+    std::unique_ptr<FullscreenStage> raw_;      ///< Stage 1: Hi-Z horizon-march AO (GTAO).
     std::unique_ptr<FullscreenStage> resolve_;  ///< Stage 2: temporal reprojection.
     std::unique_ptr<FullscreenStage> blur_;     ///< Stage 3: bilateral blur.
 };

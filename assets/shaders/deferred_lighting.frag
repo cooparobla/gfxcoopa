@@ -5,6 +5,7 @@
 #include <gfx/brdf.glsl>
 #include <gfx/shadow_sampling.glsl>
 #include <gfx/indirect_specular.glsl>
+#include <gfx/ao_composite.glsl>
 #include <gfx/spot_light.glsl>
 
 layout(location = 0) in vec2 in_uv;
@@ -372,9 +373,15 @@ void main() {
     GfxIndirectSpecular ind = gfx_indirect_specular(frag_world_pos, N, V, F0, roughness, 1.0);
 
     vec3 kD_indirect = (vec3(1.0) - ind.F) * (1.0 - metallic);
-    vec3 ambient = (kD_indirect * albedo * indirect_diffuse + ind.value) * ao * ssao;
+    // HDRP-style occlusion composite (gfx/ao_composite.glsl): min-combined material and
+    // screen-space AO, multi-bounce diffuse occlusion, F0-tinted specular occlusion cone.
+    // The ind.value factor must match ssr_composite_body.glsl's subtraction exactly.
+    float occlusion = min(ao, ssao);
+    float spec_occ  = gfx_specular_occlusion(max(dot(N, V), 0.0), occlusion, roughness);
+    vec3 ambient = kD_indirect * albedo * indirect_diffuse * gfx_gtao_multi_bounce(occlusion, albedo)
+                 + ind.value * gfx_gtao_multi_bounce(spec_occ, F0);
 
-    // emissive is added last, after ambient's * ao * ssao -- an emissive surface glows
+    // emissive is added last, after the occluded terms -- an emissive surface glows
     // even in a fully occluded/dark crevice, unlike the lit terms above it.
     vec3 color = ambient + Lo + emissive;
     out_color = vec4(color, 1.0);

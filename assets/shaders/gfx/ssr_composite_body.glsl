@@ -15,6 +15,8 @@
 // Also requires <gfx/sky.glsl>, <gfx/ssr_common.glsl> and
 // <gfx/indirect_specular.glsl> to have been included first.
 
+#include <gfx/ao_composite.glsl>
+
 /// Depth/normal-aware upsample of the (possibly half-resolution) resolved
 /// SSR buffer. Degenerates to a single texel fetch when pc.half_res == 0,
 /// which is every consumer that doesn't implement half-res tracing.
@@ -84,7 +86,7 @@ void main() {
     // SSAO output. With SSAO disabled the binding points at a 1x1 neutral fallback texture,
     // and texelFetch at an out-of-bounds coordinate into a 1x1 image is undefined behaviour
     // (texelFetch does not apply CLAMP_TO_EDGE the way normalized texture() sampling does) --
-    // it reads back ~0 in practice, collapsing the whole ao * ssao term below to zero.
+    // it reads back ~0 in practice, collapsing the occlusion factors below to zero.
     float ssao = texture(g_ssao, in_uv).r;
 
     vec4 pos_rough = texelFetch(g_position_roughness, gcoord, 0);
@@ -110,10 +112,18 @@ void main() {
     // (u_ssr_map.rgb) is premultiplied by confidence (ssr.frag); ind.value (env/sky specular)
     // is not, so the confidence weight applies only to the delta, not to scene_color itself.
     vec3 ssr_specular = ssr_color * (ind.F * ind.brdf.x + ind.brdf.y);
+    // Occlusion factors mirror pixel_lighting.frag's composite exactly (gfx/ao_composite.glsl):
+    // min-combined material/screen AO, a specular occlusion cone tinted by F0 for the ind.value
+    // subtraction, and multi-bounce diffuse occlusion for the SSGI bounce below. The
+    // subtraction cancels the ind.value term lighting added, so any drift between the two
+    // factors shows up as a halo or double-darkening at reflective pixels.
+    float occlusion = min(ao, ssao);
+    float spec_occ  = gfx_specular_occlusion(max(dot(N, V), 0.0), occlusion, roughness);
+    vec3  ao_spec   = gfx_gtao_multi_bounce(spec_occ, F0);
     // Clamp: a false-positive SSR hit against nearby dark geometry can leave ssr_specular
     // near zero, making the unclamped delta go negative -- a visible black speckle rather
     // than "no reflection here".
-    vec3 color = max(scene_color + (ssr_specular - confidence * ind.value) * ao * ssao, 0.0);
+    vec3 color = max(scene_color + (ssr_specular - confidence * ind.value) * ao_spec, 0.0);
 
     // Screen-space diffuse bounce ("SSGI"): sample the blurriest scene-colour mip at a point
     // offset along the surface normal, added as a Lambertian bounce weighted by the same SSR
@@ -131,7 +141,7 @@ void main() {
                                      float(pc.max_color_mip)).rgb;
             vec3 kD = (vec3(1.0) - ind.F) * (1.0 - metallic);
             color += kD * albedo * bounce * (edge.x * edge.y) * confidence
-                   * pc.ssgi_intensity * ao * ssao;
+                   * pc.ssgi_intensity * gfx_gtao_multi_bounce(occlusion, albedo);
         }
     }
 

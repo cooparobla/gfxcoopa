@@ -11,6 +11,7 @@
 #include <gfx/ibl.glsl>
 #include <gfx/brdf.glsl>
 #include <gfx/shadow_sampling.glsl>
+#include <gfx/ao_composite.glsl>
 #include <gfx/spot_light.glsl>
 
 layout(location = 0) in vec3 frag_world_pos;
@@ -374,7 +375,12 @@ void main() {
         reflection.probes, int(gi.gi_params.w), sky_specular);
 
     vec3 kD_indirect = (vec3(1.0) - F_indirect) * (1.0 - metallic);
-    vec3 ambient = (kD_indirect * albedo * indirect_diffuse + indirect_specular) * ao * ssao;
+    // HDRP-style occlusion composite (gfx/ao_composite.glsl), matching deferred_lighting.frag.
+    // Material AO only on this forward path (ssao is the neutral 1.0 here).
+    float occlusion = min(ao, ssao);
+    float spec_occ  = gfx_specular_occlusion(NdotV_indirect, occlusion, roughness);
+    vec3 ambient = kD_indirect * albedo * indirect_diffuse * gfx_gtao_multi_bounce(occlusion, albedo)
+                 + indirect_specular * gfx_gtao_multi_bounce(spec_occ, F0);
 
     vec3 color = ambient + Lo;
     out_color = vec4(color, alpha);
