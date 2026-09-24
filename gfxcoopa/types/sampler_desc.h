@@ -44,6 +44,23 @@ struct SamplerDesc {
         return d;
     }
 
+    /// @brief Bilinear filtering, clamped UVs -- the sampler half of texel-AA
+    /// ("anti-aliased point sampling") for pixel-art textures rendered by a free
+    /// 3D camera. Pair it with gfx_texel_aa_uv() (gfx/texel_aa.glsl), which
+    /// sharpens UVs so the bilinear blend spans exactly one screen pixel at each
+    /// texel boundary: a resting frame stays visually identical to pixel_art()'s
+    /// point sampling, while camera motion glides texel edges sub-pixel instead
+    /// of snapping them -- the snap is what reads as full-surface shimmer on
+    /// magnified texels.
+    static SamplerDesc pixel_art_smooth() {
+        SamplerDesc d;
+        d.min = Filter::Linear;
+        d.mag = Filter::Linear;
+        d.mipmap = MipmapMode::Nearest;
+        d.address = AddressMode::ClampToEdge;
+        return d;
+    }
+
     /// @brief Linear filtering with depth-compare enabled, for shadow map
     /// sampling (hardware PCF via sampler2DShadow).
     static SamplerDesc shadow() {

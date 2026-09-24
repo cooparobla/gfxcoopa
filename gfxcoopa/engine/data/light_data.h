@@ -96,7 +96,7 @@ struct alignas(16) LightUBO {
     // (gfxcoopa's pbr.frag/deferred_lighting.frag/transparent.frag/probe_capture.frag,
     // any out-of-repo consumer) keeps compiling against the shorter prefix unchanged.
     glm::mat4     spot_light_space_matrix = glm::mat4(1.0f); /**< Light projection * view matrix for the one shadow-casting spot (see light_counts.w). */
-    glm::vec4     spot_shadow_params      = glm::vec4(0.005f, 0.0f, 0.0f, 0.05f); /**< x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled (1 or 0), w=normal_bias */
+    glm::vec4     spot_shadow_params      = glm::vec4(0.005f, 0.0f, 0.0f, 0.05f); /**< x=bias, y=PCF penumbra scale K in texels*distance -- the shader divides by the fragment's light-space depth for a constant world-width penumbra; 0=hard (see calc_spot_shadow in pixel_shadow_body.glsl), z=shadow_enabled (1 or 0), w=normal_bias */
     SpotLightGPU  spot_lights[MAX_SPOT_LIGHTS];
 };
 

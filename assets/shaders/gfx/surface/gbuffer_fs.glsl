@@ -77,20 +77,30 @@ void gfx_surface_fragment(inout GfxSurface s);
 void gfx_surface_fragment(inout GfxSurface s) {}
 #endif
 
+// Material-texture sample hook: an including shader may define
+// GFX_SURFACE_SAMPLE(tex, uv) BEFORE including this backbone to wrap every
+// material-map fetch -- e.g. toyengine's gbuffer.frag routes it through
+// gfx_texel_aa_uv() (gfx/texel_aa.glsl) so its pixel-art atlas keeps hard
+// texels at rest but stops snapping them under camera motion. Default is a
+// plain fetch, so no other consumer changes.
+#ifndef GFX_SURFACE_SAMPLE
+#define GFX_SURFACE_SAMPLE(tex, uv) texture(tex, uv)
+#endif
+
 void main() {
-    vec4 albedo_tex = texture(u_albedo_map, frag_uv);
+    vec4 albedo_tex = GFX_SURFACE_SAMPLE(u_albedo_map, frag_uv);
 
     // CUTOUT/MASK materials: alpha_cutoff > 0 arms the test. albedo.a (the constant per-material
     // alpha) multiplied by the sampled mask's alpha and the albedo map's own alpha (glTF
     // convention: a base color texture's alpha channel participates in the alpha test same as
     // a dedicated mask) gives a real per-texel silhouette test when either is authored, and
     // collapses to the old constant-only test when neither is (both fallbacks are opaque white).
-    float alpha = material.albedo.a * texture(u_alpha_mask, frag_uv).a * albedo_tex.a;
+    float alpha = material.albedo.a * GFX_SURFACE_SAMPLE(u_alpha_mask, frag_uv).a * albedo_tex.a;
     if (material.alpha_cutoff > 0.0 && alpha < material.alpha_cutoff) discard;
 
     // glTF packing: metallic in B, roughness in G (R and A unused/reserved). Fallback is opaque
     // white, so mr == vec2(1.0, 1.0) when no metallic_roughness map is authored.
-    vec2 mr = texture(u_metallic_roughness_map, frag_uv).bg;
+    vec2 mr = GFX_SURFACE_SAMPLE(u_metallic_roughness_map, frag_uv).bg;
 
     GfxSurface s;
     s.albedo      = material.albedo.rgb * albedo_tex.rgb;
