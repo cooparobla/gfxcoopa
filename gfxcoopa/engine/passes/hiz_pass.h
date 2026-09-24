@@ -32,12 +32,15 @@ namespace passes {
 
 /**
  * @class HiZPass
- * @brief Builds a hierarchical depth (Hi-Z) pyramid from the G-buffer depth,
- *        each level the minimum of the four texels above it.
+ * @brief Builds a hierarchical depth (Hi-Z) pyramid from the G-buffer depth.
+ *
+ * The reduction each coarse level applies is whatever `frag_spv` computes:
+ * hiz_downsample.frag's min() for the conservative pyramid SsrPass marches,
+ * ao_depth_downsample.frag's depth-aware weighted average for the prefiltered
+ * pyramid SsaoPass marches.
  *
  * Owns the pyramid image, one view and framebuffer per mip, and one descriptor
- * set per mip. execute() records one fullscreen draw per level. SsrPass marches
- * against the result.
+ * set per mip. execute() records one fullscreen draw per level.
  */
 class HiZPass {
 public:
@@ -46,11 +49,19 @@ public:
         int is_first_pass;
     };
 
+    /**
+     * @param frag_spv       Downsample fragment shader defining the per-level reduction.
+     * @param max_mip_levels Cap on the chain length; 0 builds the full chain down to 1x1.
+     *                       A consumer whose march never reaches deep mips (SsaoPass caps
+     *                       its march at a fixed pixel radius) passes a small cap and skips
+     *                       both the memory and the per-frame draws of the unused tail.
+     */
     HiZPass(coopa::gfx::core::Device& device,
             coopa::gfx::memory::Allocator& allocator,
             const std::string& vert_spv,
-            const std::string& frag_spv)
-        : device_(device), allocator_(allocator)
+            const std::string& frag_spv,
+            uint32_t max_mip_levels = 0)
+        : device_(device), allocator_(allocator), max_mip_levels_(max_mip_levels)
     {
         // 2. Sampler (Nearest filtering for exact depth reads). max_lod is set in recreate()
         // once mip_levels_ is known, so every mip of the Hi-Z pyramid is actually reachable by
@@ -92,6 +103,7 @@ public:
         width_  = width;
         height_ = height;
         mip_levels_ = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
+        if (max_mip_levels_ > 0) mip_levels_ = std::min(mip_levels_, max_mip_levels_);
 
         // Rebuild the sampler with maxLod = mip_levels_ so textureLod() in ssr.frag can
         // actually reach every coarse mip of the pyramid (see constructor comment above).
@@ -182,32 +194,39 @@ public:
         }
     }
 
+    /// @param transition_depth Whether to transition the depth image from
+    /// DEPTH_STENCIL_ATTACHMENT_OPTIMAL to SHADER_READ_ONLY_OPTIMAL before reading it.
+    /// Pass false when another pyramid pass over the same depth image already ran this
+    /// frame and performed the transition (a second one would present a stale oldLayout).
     void execute(coopa::gfx::command::CommandBuffer& cmd,
                  VkImage gbuffer_depth_image,
-                 coopa::gfx::TextureView gbuffer_depth_view)
+                 coopa::gfx::TextureView gbuffer_depth_view,
+                 bool transition_depth = true)
     {
         update_descriptors(gbuffer_depth_view);
 
         // 1. Transition G-Buffer depth buffer for shader read
-        VkImageMemoryBarrier depth_barrier{};
-        depth_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        depth_barrier.oldLayout                       = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depth_barrier.newLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        depth_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-        depth_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-        depth_barrier.image                           = gbuffer_depth_image;
-        depth_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
-        depth_barrier.subresourceRange.baseMipLevel   = 0;
-        depth_barrier.subresourceRange.levelCount     = 1;
-        depth_barrier.subresourceRange.baseArrayLayer = 0;
-        depth_barrier.subresourceRange.layerCount     = 1;
-        depth_barrier.srcAccessMask                   = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        depth_barrier.dstAccessMask                   = VK_ACCESS_SHADER_READ_BIT;
+        if (transition_depth) {
+            VkImageMemoryBarrier depth_barrier{};
+            depth_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            depth_barrier.oldLayout                       = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            depth_barrier.newLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            depth_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+            depth_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+            depth_barrier.image                           = gbuffer_depth_image;
+            depth_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
+            depth_barrier.subresourceRange.baseMipLevel   = 0;
+            depth_barrier.subresourceRange.levelCount     = 1;
+            depth_barrier.subresourceRange.baseArrayLayer = 0;
+            depth_barrier.subresourceRange.layerCount     = 1;
+            depth_barrier.srcAccessMask                   = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            depth_barrier.dstAccessMask                   = VK_ACCESS_SHADER_READ_BIT;
 
-        vkCmdPipelineBarrier(cmd.handle(),
-                             VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &depth_barrier);
+            vkCmdPipelineBarrier(cmd.handle(),
+                                 VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &depth_barrier);
+        }
 
         cmd.bind_pipeline(stage_->pipeline());
 
@@ -305,9 +324,10 @@ private:
     coopa::gfx::core::Device&      device_;
     coopa::gfx::memory::Allocator& allocator_;
 
-    uint32_t width_      = 0;
-    uint32_t height_     = 0;
-    uint32_t mip_levels_ = 0;
+    uint32_t width_          = 0;
+    uint32_t height_         = 0;
+    uint32_t mip_levels_     = 0;
+    uint32_t max_mip_levels_ = 0; ///< Constructor cap on the chain length; 0 = full chain.
 
     VkImage       hiz_image_  = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;

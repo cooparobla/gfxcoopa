@@ -1,7 +1,7 @@
 /**
  * @file ssao_pass.h
- * @brief Screen-Space Ambient Occlusion: horizon-based estimation (GTAO) over the SSR
- * chain's Hi-Z depth pyramid, temporal resolve, and a depth/normal-aware bilateral blur.
+ * @brief Screen-Space Ambient Occlusion: horizon-based estimation (GTAO) over a
+ * prefiltered depth pyramid, temporal resolve, and a depth/normal-aware bilateral blur.
  */
 
 #ifndef GFXCOOPA_ENGINE_PASSES_SSAO_PASS_H
@@ -42,30 +42,29 @@ namespace passes {
 /// fight the same per-frame noise the temporal stage exists to remove.
 class SsaoPass {
 public:
-    /// Raw-pass GPU push constants. mat4 first (16-byte aligned) then plain scalars,
-    /// matching ResolvePushConstants' layout rule below.
+    /// Raw-pass GPU push constants, plain scalars only (view reconstruction of Hi-Z samples
+    /// derives from the camera UBO's projection in-shader).
     struct PushConstants {
-        glm::mat4 inv_proj  = glm::mat4(1.0f);  // offset 0 -- view reconstruction of Hi-Z samples
-        float radius        = 0.5f;             // offset 64
-        float bias          = 0.025f;           // offset 68
-        float power         = 1.5f;             // offset 72
-        int   slices        = 2;                // offset 76
-        int   steps         = 8;                // offset 80
-        float resolution_x  = 1.0f;             // offset 84
-        float resolution_y  = 1.0f;             // offset 88
+        float radius        = 0.5f;             // offset 0
+        float bias          = 0.025f;           // offset 4
+        float power         = 1.5f;             // offset 8
+        int   slices        = 2;                // offset 12
+        int   steps         = 8;                // offset 16
+        float resolution_x  = 1.0f;             // offset 20
+        float resolution_y  = 1.0f;             // offset 24
         // 0 when temporal resolve is off -- see ssao.frag. Must match Params::temporal_enabled;
         // execute() derives this, callers don't set it directly.
-        int   noise_rotation = 0;               // offset 92
-        int   max_mip        = 5;               // offset 96
-        float max_radius_px  = 80.0f;           // offset 100 -- upper clamp on the march extent
+        int   noise_rotation = 0;               // offset 28
+        int   max_mip        = 5;               // offset 32
+        float max_radius_px  = 80.0f;           // offset 36 -- upper clamp on the march extent
     };
-    static_assert(sizeof(PushConstants) == 104,
+    static_assert(sizeof(PushConstants) == 40,
                   "ssao.frag's SsaoPushConstants block must match this layout byte-for-byte");
 
-    /// Format of the temporal resolve's target and of the history image copied from it. The
-    /// resolve carries an eye distance (world units, see ssao_resolve.frag's disocclusion
-    /// test) and a per-pixel accumulation count alongside the occlusion value, so the target
-    /// needs float range beyond two channels.
+    /// Format of the temporal resolve's two ping-pong targets (each frame renders into one and
+    /// reads the other as history). The resolve carries an eye distance (world units, see
+    /// ssao_resolve.frag's disocclusion test) and a per-pixel accumulation count alongside the
+    /// occlusion value, so the target needs float range beyond two channels.
     static constexpr VkFormat kResolveFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
     /// Resolve-pass GPU push constants. mat4 first (16-byte aligned), then plain scalars --
@@ -119,9 +118,6 @@ public:
         // Blur pass: world-space plane-distance tolerance of the bilateral weight, per
         // spacing unit -- tracks the geometry's step scale, independent of `radius`.
         float blur_plane_sigma = 0.375f;
-        // Inverse of the projection that rendered the depth buffer the Hi-Z pyramid was
-        // downsampled from (the TAA-jittered one, when jitter is active).
-        glm::mat4 inv_proj  = glm::mat4(1.0f);
         int   max_mip       = 5;   // top usable Hi-Z mip (HiZPass::mip_levels() - 1, capped)
         // Caller-driven frame counter (e.g. ssao_frame_index_ & 0x7 in pbr_render_pipeline.h).
         // Only takes effect when temporal_enabled is true -- see execute()'s raw_pc.noise_rotation.
@@ -212,19 +208,24 @@ public:
 
         // Resolve pass. No camera set -- reprojection uses the prev_view_proj push constant,
         // matching SsrPass's resolve set: current raw AO, history AO, G2 position, G1 normal.
+        // Two set instances, one per ping-pong parity: instance i reads target 1-i as history
+        // while the pass renders into target i, so no descriptor is ever updated per frame.
         FullscreenStageDesc resolve_sd;
         resolve_sd.vert_spv = vert_spv;
         resolve_sd.frag_spv = resolve_frag_spv;
         resolve_sd.owned_sets = {sampled(4)};
         resolve_sd.push_constants = {{ShaderStage::Fragment, 0, sizeof(ResolvePushConstants)}};
+        resolve_sd.instances = 2;
         resolve_ = std::make_unique<FullscreenStage>(device, *resolve_render_pass_, resolve_sd);
 
-        // Blur pass: resolved AO, G1 normal, G2 position (bilateral weights).
+        // Blur pass: resolved AO, G1 normal, G2 position (bilateral weights). Also two set
+        // instances -- its source is whichever resolve target this frame's parity rendered.
         FullscreenStageDesc blur_sd;
         blur_sd.vert_spv = vert_spv;
         blur_sd.frag_spv = blur_frag_spv;
         blur_sd.owned_sets = {sampled(3)};
         blur_sd.push_constants = {{ShaderStage::Fragment, 0, sizeof(BlurPushConstants)}};
+        blur_sd.instances = 2;
         blur_ = std::make_unique<FullscreenStage>(device, *blur_render_pass_, blur_sd);
     }
 
@@ -243,38 +244,35 @@ public:
 
         create_target_(raw_image_, raw_allocation_, raw_view_, raw_framebuffer_, *raw_render_pass_,
                        VK_FORMAT_R8_UNORM, 0);
-        // resolved_image_ is the source of the vkCmdCopyImage in update_ssao_history_() --
-        // needs TRANSFER_SRC on top of the usual COLOR_ATTACHMENT | SAMPLED, or that copy is a
-        // VUID-vkCmdCopyImage-srcImage-00126 validation error.
-        create_target_(resolved_image_, resolved_allocation_, resolved_view_, resolved_framebuffer_,
-                       *resolve_render_pass_, kResolveFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        // Two resolve targets, ping-ponged per frame: each frame renders into one and samples
+        // the other as history, so no copy ever moves the resolved image anywhere. Fresh images
+        // on resize mean history from the previous resolution can never leak into the new one,
+        // and history_initialized_ = false keeps the resolve shader from reading either until
+        // one has actually been rendered.
+        for (uint32_t i = 0; i < 2; ++i) {
+            create_target_(resolved_images_[i], resolved_allocations_[i], resolved_views_[i],
+                           resolved_framebuffers_[i], *resolve_render_pass_, kResolveFormat, 0);
+        }
         create_target_(blur_image_, blur_allocation_, blur_view_, blur_framebuffer_, *blur_render_pass_,
                        VK_FORMAT_R8_UNORM, 0);
-
-        // History is a plain persistent image (not one of the render-target triples above): it's
-        // never rendered into via a render pass, only vkCmdCopyImage'd into at the end of
-        // execute(). Allocating a fresh image on resize means history from the previous
-        // resolution can never leak into the new one, and history_initialized_ = false keeps
-        // the resolve pass from reading it until update_ssao_history_() populates it.
-        // kResolveFormat, matching resolved_image_: update_ssao_history_() connects the two with
-        // a vkCmdCopyImage, which requires compatible formats on both sides.
-        history_image_ = std::make_unique<coopa::gfx::memory::Image>(
-            device_, allocator_, width_, height_, kResolveFormat,
-            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT, VMA_MEMORY_USAGE_AUTO
-        );
         history_initialized_ = false;
+        resolve_parity_      = 0;
 
-        // raw_view_/resolved_view_ stay raw VkImageView (part of the render-target-triple
+        // raw_view_/resolved_views_ stay raw VkImageView (part of the render-target-triple
         // machinery with no sealed equivalent -- see create_target_()'s doc), wrapped per-use
-        // via detail::wrap() since this is gfxcoopa's own internal code.
-        resolve_->set().bind_image(0, coopa::gfx::detail::wrap(raw_view_), *raw_sampler_);
-        blur_->set().bind_image(0, coopa::gfx::detail::wrap(resolved_view_), *raw_sampler_);
+        // via detail::wrap() since this is gfxcoopa's own internal code. The history bindings
+        // (resolve set 1 of each parity) live in update_descriptors(), which every caller runs
+        // after recreate() and which owns the linear sampler that read needs.
+        for (uint32_t i = 0; i < 2; ++i) {
+            resolve_->set(0, i).bind_image(0, coopa::gfx::detail::wrap(raw_view_), *raw_sampler_);
+            blur_->set(0, i).bind_image(0, coopa::gfx::detail::wrap(resolved_views_[i]), *raw_sampler_);
+        }
     }
 
     /// g1_view/g2_view: the live G-Buffer normal/position views (rebound every resize).
-    /// hiz_view/hiz_sampler: the SSR chain's Hi-Z min-depth pyramid and its every-mip-reachable
-    /// sampler (HiZPass::full_hiz_view_typed()/sampler()) -- the raw pass marches it.
+    /// hiz_view/hiz_sampler: the AO depth pyramid (a HiZPass running ao_depth_downsample.frag's
+    /// weighted-average reduction) and its every-mip-reachable sampler
+    /// (HiZPass::full_hiz_view_typed()/sampler()) -- the raw pass marches it.
     /// linear_sampler: used only for the resolve pass's history read, which samples at a
     /// reprojected (non-texel-aligned) UV -- everything else here stays NEAREST.
     void update_descriptors(coopa::gfx::TextureView g1_view, coopa::gfx::TextureView g2_view,
@@ -284,23 +282,31 @@ public:
         raw_->set().bind_image(1, g2_view, linear_sampler);
         raw_->set().bind_image(2, hiz_view, hiz_sampler);
 
-        resolve_->set().bind_image(1, history_image_->view_typed(), linear_sampler);
-        resolve_->set().bind_image(2, g2_view, *raw_sampler_);
-        resolve_->set().bind_image(3, g1_view, *raw_sampler_);
+        // Parity i renders into resolve target i and reads target 1-i as its history.
+        for (uint32_t i = 0; i < 2; ++i) {
+            resolve_->set(0, i).bind_image(1, coopa::gfx::detail::wrap(resolved_views_[1 - i]),
+                                           linear_sampler);
+            resolve_->set(0, i).bind_image(2, g2_view, *raw_sampler_);
+            resolve_->set(0, i).bind_image(3, g1_view, *raw_sampler_);
 
-        blur_->set().bind_image(1, g1_view, *raw_sampler_);
-        blur_->set().bind_image(2, g2_view, *raw_sampler_);
+            blur_->set(0, i).bind_image(1, g1_view, *raw_sampler_);
+            blur_->set(0, i).bind_image(2, g2_view, *raw_sampler_);
+        }
     }
 
     void execute(coopa::gfx::command::CommandBuffer& cmd,
                  const coopa::gfx::pipeline::DescriptorSet& camera_set,
                  const Params& params)
     {
-        // On the very first frame (or right after a resize), history_image_ is UNDEFINED --
-        // transition it once before it's bound as a sampled image in the resolve pass below. The
-        // resolve shader doesn't read it in that case (history_valid = 0 in the push constant),
-        // but the descriptor binding still needs a valid layout at draw time regardless of the
-        // runtime branch. Identical reasoning/shape to SsrPass::execute()'s equivalent check.
+        // On the very first frame (or right after a resize), this parity's history target --
+        // the OTHER resolve target -- has never been rendered and sits in UNDEFINED; transition
+        // it before it's bound as a sampled image in the resolve pass below. The resolve shader
+        // doesn't read it in that case (history_valid = 0 in the push constant), but the
+        // descriptor binding still needs a valid layout at draw time regardless of the runtime
+        // branch. Identical reasoning/shape to SsrPass::execute()'s equivalent check. oldLayout
+        // UNDEFINED is also correct when execute() resumes after invalidate_history(): the
+        // target then holds a stale layout whose contents this transition may discard, which is
+        // fine -- history_valid is 0 on that frame too.
         if (!history_initialized_) {
             VkImageMemoryBarrier barrier{};
             barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -308,7 +314,7 @@ public:
             barrier.newLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
             barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image                           = history_image_->handle();
+            barrier.image                           = resolved_images_[1 - resolve_parity_];
             barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
             barrier.subresourceRange.baseMipLevel   = 0;
             barrier.subresourceRange.levelCount     = 1;
@@ -340,7 +346,6 @@ public:
         cmd.bind_descriptor_set(camera_set, 0);
 
         PushConstants raw_pc{};
-        raw_pc.inv_proj       = params.inv_proj;
         raw_pc.radius         = params.radius;
         raw_pc.bias           = params.bias;
         raw_pc.power          = params.power;
@@ -364,18 +369,22 @@ public:
                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
-        // --- 2. Temporal resolve pass: blend raw_view_ (this frame) with history_image_ (last
-        // frame's resolved output) into resolved_view_, which the blur pass below reads instead
-        // of raw_view_ directly. When temporal_enabled is false, max_accum = 0 degenerates
-        // this into a pure passthrough of the current frame -- one code path, no branching
-        // pipeline structure, matching SsrPass's resolve.
+        // --- 2. Temporal resolve pass: blend raw_view_ (this frame) with the OTHER resolve
+        // target (last frame's resolved output, read as history through this parity's
+        // descriptor set) into this parity's target, which the blur pass below reads instead
+        // of raw_view_ directly. Cross-frame write-after-read on the history target is ordered
+        // by the render pass's entry dependency: its COLOR_ATTACHMENT_OUTPUT wait covers the
+        // previous frame's resolve draw, whose fragment-stage history reads logically precede
+        // that draw's own color output. When temporal_enabled is false, max_accum = 0
+        // degenerates this into a pure passthrough of the current frame -- one code path, no
+        // branching pipeline structure, matching SsrPass's resolve.
         VkClearValue resolve_clear{};
         resolve_clear.color = {{1.0f, 0.0f, 0.0f, 0.0f}};
 
         VkRenderPassBeginInfo resolve_rp_info{};
         resolve_rp_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         resolve_rp_info.renderPass        = resolve_render_pass_->handle();
-        resolve_rp_info.framebuffer       = resolved_framebuffer_;
+        resolve_rp_info.framebuffer       = resolved_framebuffers_[resolve_parity_];
         resolve_rp_info.renderArea.offset = {0, 0};
         resolve_rp_info.renderArea.extent = {width_, height_};
         resolve_rp_info.clearValueCount   = 1;
@@ -383,7 +392,7 @@ public:
 
         vkCmdBeginRenderPass(cmd.handle(), &resolve_rp_info, VK_SUBPASS_CONTENTS_INLINE);
 
-        resolve_->bind(cmd, width_, height_);
+        resolve_->bind(cmd, width_, height_, resolve_parity_);
 
         ResolvePushConstants resolve_pc{};
         resolve_pc.prev_view_proj = params.prev_view_proj;
@@ -410,7 +419,7 @@ public:
 
         cmd.end_render_pass();
 
-        image_barrier_(cmd, resolved_image_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        image_barrier_(cmd, resolved_images_[resolve_parity_], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
@@ -429,7 +438,7 @@ public:
 
         vkCmdBeginRenderPass(cmd.handle(), &blur_rp_info, VK_SUBPASS_CONTENTS_INLINE);
 
-        blur_->bind(cmd, width_, height_);
+        blur_->bind(cmd, width_, height_, resolve_parity_);
 
         BlurPushConstants blur_pc{};
         blur_pc.plane_sigma = params.blur_plane_sigma;
@@ -441,8 +450,10 @@ public:
 
         cmd.end_render_pass();
 
-        // --- 4. Copy resolved_view_ into history_image_ for next frame's resolve pass.
-        update_ssao_history_(cmd);
+        // --- 4. This parity's resolve target IS next frame's history: flip the parity so the
+        // next execute() reads it through the other descriptor-set instance. No copy runs.
+        history_initialized_ = true;
+        resolve_parity_ ^= 1u;
         prev_camera_pos_ = params.camera_pos;
     }
 
@@ -485,74 +496,6 @@ private:
         barrier.dstAccessMask                   = dst_access;
 
         vkCmdPipelineBarrier(cmd.handle(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-    }
-
-    // Copies resolved_image_ into history_image_ (same barrier/copy/barrier pattern as
-    // SsrPass::update_ssr_history_), so the next frame's resolve pass has something to
-    // blend against.
-    void update_ssao_history_(coopa::gfx::command::CommandBuffer& cmd) {
-        VkImage src_image = resolved_image_;
-        VkImage dst_image = history_image_->handle();
-
-        VkImageMemoryBarrier barriers[2]{};
-
-        barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barriers[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barriers[0].image = src_image;
-        barriers[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barriers[0].subresourceRange.baseMipLevel = 0;
-        barriers[0].subresourceRange.levelCount = 1;
-        barriers[0].subresourceRange.baseArrayLayer = 0;
-        barriers[0].subresourceRange.layerCount = 1;
-        barriers[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-
-        barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        // Already in SHADER_READ_ONLY_OPTIMAL: either from the one-time UNDEFINED transition at
-        // the top of execute() (frame 0) or from the end of this same function last frame.
-        barriers[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barriers[1].image = dst_image;
-        barriers[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barriers[1].subresourceRange.baseMipLevel = 0;
-        barriers[1].subresourceRange.levelCount = 1;
-        barriers[1].subresourceRange.baseArrayLayer = 0;
-        barriers[1].subresourceRange.layerCount = 1;
-        barriers[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-        vkCmdPipelineBarrier(cmd.handle(), VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             0, 0, nullptr, 0, nullptr, 2, barriers);
-
-        VkImageCopy copy_region{};
-        copy_region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy_region.srcSubresource.layerCount = 1;
-        copy_region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy_region.dstSubresource.layerCount = 1;
-        copy_region.extent = { width_, height_, 1 };
-
-        vkCmdCopyImage(cmd.handle(), src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
-
-        barriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barriers[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        barriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-        barriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barriers[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-        vkCmdPipelineBarrier(cmd.handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             0, 0, nullptr, 0, nullptr, 2, barriers);
-
-        history_initialized_ = true;
     }
 
     void create_neutral_texture_(coopa::gfx::command::CommandPool& cmd_pool) {
@@ -609,9 +552,11 @@ private:
 
     void destroy_resources_() {
         destroy_target_(raw_view_, raw_framebuffer_, raw_image_, raw_allocation_);
-        destroy_target_(resolved_view_, resolved_framebuffer_, resolved_image_, resolved_allocation_);
+        for (uint32_t i = 0; i < 2; ++i) {
+            destroy_target_(resolved_views_[i], resolved_framebuffers_[i],
+                            resolved_images_[i], resolved_allocations_[i]);
+        }
         destroy_target_(blur_view_, blur_framebuffer_, blur_image_, blur_allocation_);
-        history_image_.reset();
     }
 
     void destroy_target_(VkImageView& view, VkFramebuffer& framebuffer, VkImage& image, VmaAllocation& allocation) {
@@ -641,21 +586,21 @@ private:
     VkImageView   raw_view_        = VK_NULL_HANDLE;
     VkFramebuffer raw_framebuffer_ = VK_NULL_HANDLE;
 
-    VkImage       resolved_image_       = VK_NULL_HANDLE;
-    VmaAllocation resolved_allocation_  = VK_NULL_HANDLE;
-    VkImageView   resolved_view_        = VK_NULL_HANDLE;
-    VkFramebuffer resolved_framebuffer_ = VK_NULL_HANDLE;
+    // Ping-pong resolve targets: each frame renders into resolved_images_[resolve_parity_] and
+    // samples the other as history through the matching descriptor-set instance.
+    VkImage       resolved_images_[2]       = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VmaAllocation resolved_allocations_[2]  = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkImageView   resolved_views_[2]        = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkFramebuffer resolved_framebuffers_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    uint32_t      resolve_parity_           = 0;
 
     VkImage       blur_image_       = VK_NULL_HANDLE;
     VmaAllocation blur_allocation_  = VK_NULL_HANDLE;
     VkImageView   blur_view_        = VK_NULL_HANDLE;
     VkFramebuffer blur_framebuffer_ = VK_NULL_HANDLE;
 
-    // Persistent across resizes only via recreate() rebuilding it -- not one of the render-target
-    // triples above, since it's never a render pass attachment, only a vkCmdCopyImage destination.
-    std::unique_ptr<coopa::gfx::memory::Image> history_image_;
     bool history_initialized_ = false;
-    // The eye position history_image_ was resolved from, i.e. the origin its stored distance
+    // The eye position the history target was resolved from, i.e. the origin its stored distance
     // channel is measured against. Written at the end of execute(); read only on the next call,
     // and only when history_valid says that history exists.
     glm::vec3 prev_camera_pos_{0.0f};
