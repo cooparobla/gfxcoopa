@@ -242,8 +242,8 @@ public:
             );
         }
 
-        // History image: a copy of last frame's resolved_target_, TRANSFER_DST so update_history_()
-        // can vkCmdCopyImage into it (same pattern as TaaPass::history_image_).
+        // History image: a copy of last frame's resolved_target_, TRANSFER_DST so
+        // update_ssr_history_() can vkCmdCopyImage into it.
         history_image_ = std::make_unique<coopa::gfx::memory::Image>(
             device, allocator, trace_width_, trace_height_, VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
@@ -746,9 +746,8 @@ private:
         return d;
     }
 
-    // Copies resolved_target_'s color image into history_image_ (same barrier/copy/barrier
-    // pattern as TaaPass::update_history), so the next frame's resolve pass has something to
-    // blend against.
+    // Copies resolved_target_'s color image into history_image_, so the next frame's
+    // resolve pass has something to blend against.
     void update_ssr_history_(coopa::gfx::command::CommandBuffer& cmd) {
         VkImage src_image = resolved_target_->color_image_object()->handle();
         VkImage dst_image = history_image_->handle();

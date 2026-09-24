@@ -8,7 +8,6 @@
 
 #include <volk/volk.h>
 #include <string>
-#include <vector>
 #include <memory>
 #include <glm/glm.hpp>
 
@@ -18,8 +17,6 @@
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/engine/util/sampler.h>
-#include <gfxcoopa/pipeline/pipeline.h>
-#include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/engine/targets/offscreen_target.h>
 #include <gfxcoopa/memory/image.h>
 
@@ -30,220 +27,246 @@ namespace passes {
 
 /**
  * @class TaaPass
- * @brief Temporal anti-aliasing: blends the current frame against a reprojected
- *        history buffer.
+ * @brief Temporal anti-aliasing: reprojects an accumulation history through the camera's
+ *        frame-to-frame motion and blends it with the current frame.
  *
- * Owns the history image and copies the resolved result back into it each frame
- * (see update_history()). recreate() drops the history, since it no longer
- * matches a new resolution.
+ * Two internal RGBA16F targets ping-pong as the accumulation buffer: each frame the resolve
+ * renders into one while sampling the other as history, then a passthrough draw copies the
+ * result into the caller's shared AA output target (RGBA8, alpha forced opaque -- the 16F
+ * buffer's alpha carries the per-pixel accumulation age and its colour carries the sub-8-bit
+ * increments late accumulation needs, neither of which may leak into the screenshot path).
+ * The ping-pong replaces a copy-based history update entirely; the render passes' own layout
+ * transitions do all the synchronisation.
+ *
+ * Reprojection is camera-only, from the scene depth buffer and the caller-supplied
+ * reprojection matrix (see Params::reproject); there are no per-object motion vectors, and
+ * dynamic objects rely on the resolve shader's variance clip instead. recreate() drops the
+ * accumulation, since it no longer matches a new resolution.
  */
 class TaaPass {
 public:
+    /// @brief Fragment push constants; must match taa.frag's block exactly.
     struct PushConstants {
+        glm::mat4 reproject;
         glm::vec2 resolution;
-        float blend_factor;
-        float weight_scale;
+        glm::vec2 jitter_ndc;
+        float     feedback_still;
+        float     feedback_motion;
+        float     velocity_scale;
+        float     sharpness;
+        float     variance_gamma;
+        int32_t   history_valid;
+    };
+
+    /// @brief Per-frame resolve inputs, filled by the caller each draw.
+    struct Params {
+        /** Previous frame's UNJITTERED view-projection times the inverse of the current
+         *  JITTERED one: maps current clip space to last frame's unjittered clip space. */
+        glm::mat4 reproject       = glm::mat4(1.0f);
+        /** False until `reproject` describes a real previous frame; the resolve outputs the
+         *  current frame unblended while false (and while the history image is uninitialised
+         *  -- the two validity conditions are ANDed, same as SsrPass's history gate). */
+        bool      reproject_valid = false;
+        glm::vec2 jitter_ndc      = glm::vec2(0.0f); /**< This frame's jitter as an NDC displacement. */
+        float     feedback_still  = 0.98f; /**< History weight the accumulation converges to at rest. */
+        float     feedback_motion = 0.85f; /**< History weight floor under fast motion. */
+        float     velocity_scale  = 30.0f; /**< Feedback hits its floor at ~100/scale px of velocity. */
+        float     sharpness       = 0.25f; /**< Motion-gated high-frequency restore; 0 disables. */
+        float     variance_gamma  = 1.0f;  /**< History clip width in standard deviations. */
     };
 
     /**
-     * @param history_format Pixel format of the internal history buffer -- see history_format_'s
-     *   own doc for why this must match whatever color-space convention the caller's scene-color
-     *   target already uses. Defaults to VK_FORMAT_R8G8B8A8_SRGB, blendy's own choice.
+     * @param output_render_pass The shared AA output target's render pass (RGBA8), which the
+     *   present stage draws into. The resolve stage renders into the pass's own internal
+     *   RGBA16F targets and is independent of it.
+     * @param linear_sampler  For the scene, history and resolved-colour fetches.
+     * @param nearest_sampler For the depth fetch.
      */
     TaaPass(coopa::gfx::core::Device& device,
             coopa::gfx::memory::Allocator& allocator,
-            coopa::gfx::pipeline::RenderPass& render_pass,
-            util::Sampler& sampler,
+            coopa::gfx::pipeline::RenderPass& output_render_pass,
+            util::Sampler& linear_sampler,
+            util::Sampler& nearest_sampler,
             uint32_t width,
             uint32_t height,
             const std::string& vert_path,
-            const std::string& frag_path,
-            VkFormat history_format = VK_FORMAT_R8G8B8A8_SRGB)
-        : device_(device), allocator_(allocator), sampler_(sampler), width_(width), height_(height),
-          history_format_(history_format)
+            const std::string& resolve_frag_path,
+            const std::string& present_frag_path)
+        : device_(device), allocator_(allocator),
+          linear_sampler_(linear_sampler), nearest_sampler_(nearest_sampler),
+          width_(width), height_(height)
     {
-        // History image with TRANSFER_DST so we can copy into it
-        VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        history_image_ = std::make_unique<coopa::gfx::memory::Image>(
-            device, allocator, width, height,
-            history_format_, usage,
-            VK_IMAGE_ASPECT_COLOR_BIT, VMA_MEMORY_USAGE_AUTO
-        );
-        history_initialized_ = false;
+        for (int i = 0; i < 2; ++i) {
+            accum_targets_[i] = std::make_unique<targets::OffscreenTarget>(
+                device, allocator, width, height,
+                coopa::gfx::Format::RGBA16_Sfloat, coopa::gfx::SampleCount::X1);
+        }
 
-        // Clear history immediately? Not strictly necessary as it will be initialized soon,
-        // but it's good practice. (We assume it's just zeroed or we ignore the first frame).
-
-        stage_ = std::make_unique<FullscreenStage>(device, render_pass,
-                                                   describe(vert_path, frag_path));
+        resolve_stage_ = std::make_unique<FullscreenStage>(
+            device, accum_targets_[0]->render_pass_object(),
+            describe_resolve(vert_path, resolve_frag_path));
+        present_stage_ = std::make_unique<FullscreenStage>(
+            device, output_render_pass,
+            describe_present(vert_path, present_frag_path));
     }
 
     void recreate(uint32_t width, uint32_t height) {
-        width_ = width;
+        width_  = width;
         height_ = height;
-        
-        VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        history_image_ = std::make_unique<coopa::gfx::memory::Image>(
-            device_, allocator_, width, height,
-            history_format_, usage,
-            VK_IMAGE_ASPECT_COLOR_BIT, VMA_MEMORY_USAGE_AUTO
-        );
+        accum_targets_[0]->recreate(width, height);
+        accum_targets_[1]->recreate(width, height);
         history_initialized_ = false;
+        parity_ = 0;
 
-        // Need to re-bind because views changed
+        // The recreated targets keep their formats, so the resolve pipeline (built against the
+        // old render pass) stays render-pass compatible; only the image bindings went stale.
         if (last_scene_view_ != coopa::gfx::TextureView::null()) {
-            set_source_image(last_scene_view_);
+            set_source_images(last_scene_view_, last_depth_view_);
         }
     }
 
-    void set_source_image(coopa::gfx::TextureView scene_view) {
+    /**
+     * @brief Binds the resolve inputs for both ping-pong instances.
+     * @param scene_view The post-processed LDR scene (this frame's jittered render).
+     * @param depth_view The scene depth buffer, at the same resolution.
+     */
+    void set_source_images(coopa::gfx::TextureView scene_view,
+                           coopa::gfx::TextureView depth_view) {
         last_scene_view_ = scene_view;
-        stage_->set().bind_image(0, scene_view, sampler_);
-        stage_->set().bind_image(1, history_image_->view_typed(), sampler_);
-    }
-
-    void set_taa_config(float blend_factor, float weight_scale) {
-        blend_factor_ = blend_factor;
-        weight_scale_ = weight_scale;
-    }
-
-    void prepare_history(coopa::gfx::command::CommandBuffer& cmd) {
-        if (!history_initialized_) {
-            VkImageMemoryBarrier barrier{};
-            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image = history_image_->handle();
-            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            barrier.subresourceRange.baseMipLevel = 0;
-            barrier.subresourceRange.levelCount = 1;
-            barrier.subresourceRange.baseArrayLayer = 0;
-            barrier.subresourceRange.layerCount = 1;
-            barrier.srcAccessMask = 0;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-            vkCmdPipelineBarrier(cmd.handle(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        last_depth_view_ = depth_view;
+        for (uint32_t i = 0; i < 2; ++i) {
+            // Instance i renders into accum_targets_[i] and reads the OTHER as history.
+            resolve_stage_->set(0, i).bind_image(0, scene_view, linear_sampler_);
+            resolve_stage_->set(0, i).bind_image(1, accum_targets_[1 - i]->color_view_typed(),
+                                                 linear_sampler_);
+            resolve_stage_->set(0, i).bind_image(2, depth_view, nearest_sampler_);
+            present_stage_->set(0, i).bind_image(0, accum_targets_[i]->color_view_typed(),
+                                                 linear_sampler_);
         }
     }
 
-    void draw(coopa::gfx::command::CommandBuffer& cmd, uint32_t width, uint32_t height) {
-
-        PushConstants pc{};
-        pc.resolution = glm::vec2(static_cast<float>(width), static_cast<float>(height));
-        pc.blend_factor = blend_factor_;
-        pc.weight_scale = weight_scale_;
-
-        stage_->draw(cmd, width, height, coopa::gfx::ShaderStage::Fragment, pc);
-    }
-    
-    // Copy the rendered result back into the history buffer
-    void update_history(coopa::gfx::command::CommandBuffer& cmd, targets::OffscreenTarget& post_process_target) {
-        VkImage src_image = post_process_target.color_image_object()->handle();
-        VkImage dst_image = history_image_->handle();
-        
-        // Transition both to TRANSFER_SRC / TRANSFER_DST
+    /**
+     * @brief On the first frame (and after recreate()), moves both ping-pong images out of
+     *        UNDEFINED so their sampled-image descriptors are legal before either has been
+     *        rendered to. The resolve shader never reads the garbage: history_valid stays 0
+     *        until update at the end of the first draw().
+     */
+    void prepare_history(coopa::gfx::command::CommandBuffer& cmd) {
+        if (history_initialized_) return;
         VkImageMemoryBarrier barriers[2]{};
-        
-        barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barriers[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barriers[0].image = src_image;
-        barriers[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barriers[0].subresourceRange.baseMipLevel = 0;
-        barriers[0].subresourceRange.levelCount = 1;
-        barriers[0].subresourceRange.baseArrayLayer = 0;
-        barriers[0].subresourceRange.layerCount = 1;
-        barriers[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-
-        barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barriers[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barriers[1].image = dst_image;
-        barriers[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barriers[1].subresourceRange.baseMipLevel = 0;
-        barriers[1].subresourceRange.levelCount = 1;
-        barriers[1].subresourceRange.baseArrayLayer = 0;
-        barriers[1].subresourceRange.layerCount = 1;
-        barriers[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-        vkCmdPipelineBarrier(cmd.handle(), VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        for (int i = 0; i < 2; ++i) {
+            barriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barriers[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barriers[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[i].image = accum_targets_[i]->color_image_object()->handle();
+            barriers[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barriers[i].subresourceRange.levelCount = 1;
+            barriers[i].subresourceRange.layerCount = 1;
+            barriers[i].srcAccessMask = 0;
+            barriers[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
+        vkCmdPipelineBarrier(cmd.handle(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              0, 0, nullptr, 0, nullptr, 2, barriers);
+    }
 
-        VkImageCopy copy_region{};
-        copy_region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy_region.srcSubresource.layerCount = 1;
-        copy_region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy_region.dstSubresource.layerCount = 1;
-        copy_region.extent = { width_, height_, 1 };
+    /**
+     * @brief Records the whole pass: the resolve into this frame's accumulation target, then
+     *        the passthrough into `output`. Owns both render-pass brackets (like SmaaPass;
+     *        the caller must NOT bracket `output` itself).
+     *
+     * @param cmd    Command buffer to record into.
+     * @param output The shared AA output target the final colour lands in.
+     * @param params This frame's resolve inputs.
+     * @param width  Render width in pixels.
+     * @param height Render height in pixels.
+     */
+    void draw(coopa::gfx::command::CommandBuffer& cmd,
+              targets::OffscreenTarget& output,
+              const Params& params,
+              uint32_t width, uint32_t height) {
+        PushConstants pc{};
+        pc.reproject       = params.reproject;
+        pc.resolution      = glm::vec2(static_cast<float>(width), static_cast<float>(height));
+        pc.jitter_ndc      = params.jitter_ndc;
+        pc.feedback_still  = params.feedback_still;
+        pc.feedback_motion = params.feedback_motion;
+        pc.velocity_scale  = params.velocity_scale;
+        pc.sharpness       = params.sharpness;
+        pc.variance_gamma  = params.variance_gamma;
+        pc.history_valid   = (history_initialized_ && params.reproject_valid) ? 1 : 0;
 
-        vkCmdCopyImage(cmd.handle(), src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
+        targets::OffscreenTarget& accum = *accum_targets_[parity_];
+        accum.begin(cmd, VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}});
+        resolve_stage_->draw(cmd, width, height, coopa::gfx::ShaderStage::Fragment, pc, parity_);
+        accum.end(cmd);
 
-        // Transition back to SHADER_READ_ONLY
-        barriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barriers[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        barriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        output.begin(cmd);
+        present_stage_->bind(cmd, width, height, parity_);
+        present_stage_->draw(cmd);
+        output.end(cmd);
 
-        barriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barriers[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-        vkCmdPipelineBarrier(cmd.handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             0, 0, nullptr, 0, nullptr, 2, barriers);
-                             
         history_initialized_ = true;
+        parity_ ^= 1u;
     }
 
 private:
-    /// @brief Two sampled images at bindings 0 and 1 (current frame, history),
-    /// plus the fragment push constants.
-    static FullscreenStageDesc describe(const std::string& vert_spv, const std::string& frag_spv) {
+    /// @brief Scene + history + depth at bindings 0-2, two instances for the ping-pong.
+    static FullscreenStageDesc describe_resolve(const std::string& vert_spv,
+                                                const std::string& frag_spv) {
         FullscreenStageDesc d;
         d.vert_spv = vert_spv;
         d.frag_spv = frag_spv;
         d.owned_sets = {{{0, coopa::gfx::DescriptorType::CombinedImageSampler,
                           coopa::gfx::ShaderStage::Fragment, 1},
                          {1, coopa::gfx::DescriptorType::CombinedImageSampler,
+                          coopa::gfx::ShaderStage::Fragment, 1},
+                         {2, coopa::gfx::DescriptorType::CombinedImageSampler,
                           coopa::gfx::ShaderStage::Fragment, 1}}};
         d.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
+        d.instances = 2;
+        return d;
+    }
+
+    /// @brief The resolved colour at binding 0, two instances for the ping-pong.
+    static FullscreenStageDesc describe_present(const std::string& vert_spv,
+                                                const std::string& frag_spv) {
+        FullscreenStageDesc d;
+        d.vert_spv = vert_spv;
+        d.frag_spv = frag_spv;
+        d.owned_sets = {{{0, coopa::gfx::DescriptorType::CombinedImageSampler,
+                          coopa::gfx::ShaderStage::Fragment, 1}}};
+        d.instances = 2;
         return d;
     }
 
     coopa::gfx::core::Device& device_;
     coopa::gfx::memory::Allocator& allocator_;
-    util::Sampler& sampler_;
+    util::Sampler& linear_sampler_;
+    util::Sampler& nearest_sampler_;
     uint32_t width_;
     uint32_t height_;
-    /**
-     * Format of history_image_, fixed at construction (recreate() reuses it). Defaults to
-     * VK_FORMAT_R8G8B8A8_SRGB to match blendy's post_process_target_ (RGBA8_Srgb) exactly --
-     * a caller whose scene color is already sRGB-*encoded* in a UNORM target (e.g. toyengine's
-     * post_target_, RGBA8_Unorm) should pass VK_FORMAT_R8G8B8A8_UNORM instead, or every sampled
-     * history read would get an extra sRGB decode the current frame doesn't, drifting the
-     * temporal blend dark.
-     */
-    VkFormat history_format_ = VK_FORMAT_R8G8B8A8_SRGB;
-    bool history_initialized_ = false;
-    
-    float blend_factor_ = 0.9f;
-    float weight_scale_ = 30.0f;
-    
+
+    bool     history_initialized_ = false;
+    /// @brief Which accumulation target this frame renders into; the other is history.
+    uint32_t parity_ = 0;
+
     coopa::gfx::TextureView last_scene_view_ = coopa::gfx::TextureView::null();
+    coopa::gfx::TextureView last_depth_view_ = coopa::gfx::TextureView::null();
 
-    std::unique_ptr<coopa::gfx::memory::Image>                 history_image_;
+    /**
+     * The accumulation ping-pong. RGBA16F: rgb needs sub-8-bit increments (late accumulation
+     * adds as little as 1/64th of an LSB per frame, which an RGBA8 buffer would round away and
+     * stall), and alpha stores the integer sample age (0..63, exactly representable). Holds
+     * sRGB-ENCODED values, matching post_target_/aa_target_'s convention -- the resolve blends
+     * in encoded space, as the other AA modes filter in it.
+     */
+    std::unique_ptr<targets::OffscreenTarget> accum_targets_[2];
 
-    std::unique_ptr<FullscreenStage> stage_;
+    std::unique_ptr<FullscreenStage> resolve_stage_;
+    std::unique_ptr<FullscreenStage> present_stage_;
 };
 
 } // namespace passes

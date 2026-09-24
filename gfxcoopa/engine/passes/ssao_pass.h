@@ -488,8 +488,8 @@ private:
     }
 
     // Copies resolved_image_ into history_image_ (same barrier/copy/barrier pattern as
-    // SsrPass::update_ssr_history_ / TaaPass::update_history), so the next frame's resolve pass
-    // has something to blend against.
+    // SsrPass::update_ssr_history_), so the next frame's resolve pass has something to
+    // blend against.
     void update_ssao_history_(coopa::gfx::command::CommandBuffer& cmd) {
         VkImage src_image = resolved_image_;
         VkImage dst_image = history_image_->handle();
