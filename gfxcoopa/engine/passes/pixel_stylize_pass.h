@@ -81,8 +81,17 @@ public:
         /// the finished blurred result here would eat the halo falloff the pyramid
         /// exists to produce, and there is no mip chain left to pick an LOD from.
         float     bloom_intensity        = 0.0f;
+        /// != 0 multiplies `exposure` by the adapting value in the 1x1 texture at
+        /// binding 5 (see set_source_images()'s exposure_result param and ExposurePass).
+        /// Harmless to leave 0: the binding then points at a neutral 1.0 texture anyway,
+        /// so this only saves the read.
+        float     auto_exposure          = 0.0f;
+        /// Colour-grading LUT cube side length (GradingLut::size()); <= 1 disables the
+        /// lookup, matching the same "off at its neutral value" convention every other
+        /// field in this block follows.
+        float     grading_size           = 0.0f;
     };
-    static_assert(sizeof(PushConstants) == 64,
+    static_assert(sizeof(PushConstants) == 72,
                  "PushConstants must match pixel_stylize.frag's StylizePushConstants byte-for-byte");
 
     PixelStylizePass(coopa::gfx::core::Device& device,
@@ -100,7 +109,11 @@ public:
                            const coopa::gfx::engine::util::Sampler& linear_sampler,
                            const coopa::gfx::engine::util::Sampler& nearest_sampler,
                            coopa::gfx::TextureView bloom_result = {},
-                           const coopa::gfx::engine::util::Sampler* bloom_sampler = nullptr) {
+                           const coopa::gfx::engine::util::Sampler* bloom_sampler = nullptr,
+                           coopa::gfx::TextureView exposure_result = {},
+                           const coopa::gfx::engine::util::Sampler* exposure_sampler = nullptr,
+                           coopa::gfx::TextureView grading_lut = {},
+                           const coopa::gfx::engine::util::Sampler* grading_sampler = nullptr) {
         // scene_depth/scene_normal use the nearest sampler, not linear: the outline edge
         // detector's taps need exact texel values (linear filtering would blend across the
         // very discontinuities it's looking for), and linear filtering of a D32_SFLOAT depth
@@ -119,6 +132,15 @@ public:
         // at a target that has never been rendered into.
         stage_.set().bind_image(4, bloom_sampler ? bloom_result : scene_color,
                               bloom_sampler ? *bloom_sampler : linear_sampler);
+        // exposure_result / grading_lut: same optional-with-harmless-fallback contract as
+        // bloom_result above. Omitting either re-binds binding 0's own view/sampler, which
+        // the matching push constant (auto_exposure 0 / grading_size 0) makes unread. A
+        // consumer that DOES want them passes a real 1x1 neutral texture instead, so the
+        // shader needs no branch at all.
+        stage_.set().bind_image(5, exposure_sampler ? exposure_result : scene_color,
+                              exposure_sampler ? *exposure_sampler : linear_sampler);
+        stage_.set().bind_image(6, grading_sampler ? grading_lut : scene_color,
+                              grading_sampler ? *grading_sampler : linear_sampler);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& params,
@@ -127,14 +149,14 @@ public:
     }
 
 private:
-    /// @brief Five sampled images at bindings 0..4 (scene colour, depth, normal,
-    /// palette LUT, bloom), plus the fragment push constants.
+    /// @brief Seven sampled images at bindings 0..6 (scene colour, depth, normal,
+    /// palette LUT, bloom, auto-exposure, grading LUT), plus the fragment push constants.
     static FullscreenStageDesc describe(const std::string& vert_spv, const std::string& frag_spv) {
         FullscreenStageDesc d;
         d.vert_spv = vert_spv;
         d.frag_spv = frag_spv;
         d.owned_sets.emplace_back();
-        for (uint32_t i = 0; i < 5; ++i) {
+        for (uint32_t i = 0; i < 7; ++i) {
             d.owned_sets[0].push_back({i, coopa::gfx::DescriptorType::CombinedImageSampler,
                                        coopa::gfx::ShaderStage::Fragment, 1});
         }

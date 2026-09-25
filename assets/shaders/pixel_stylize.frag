@@ -29,6 +29,14 @@ layout(set = 0, binding = 3) uniform sampler2D palette_lut;  // Nx1 RGBA8, NEARE
 // with a plain texture() through a LINEAR sampler -- the bilinear upsample to full
 // resolution is free and is exactly what a soft additive glow wants.
 layout(set = 0, binding = 4) uniform sampler2D bloom_tex;
+// 1x1 adapting exposure multiplier from ExposurePass, or a 1x1 texture of 1.0
+// when auto-exposure is off -- so the read needs no separate flag.
+layout(set = 0, binding = 5) uniform sampler2D exposure_tex;
+// Colour-grading strip LUT (see GradingLut / gfx/grading.glsl); grading_size <= 1
+// disables the lookup, and the binding then points at a 1x1 dummy.
+layout(set = 0, binding = 6) uniform sampler2D grading_lut;
+
+#include <gfx/grading.glsl>
 
 layout(push_constant) uniform StylizePushConstants {
     vec4  outline_color;      // listed first: std430 would otherwise pad around a mid-struct vec4
@@ -43,6 +51,8 @@ layout(push_constant) uniform StylizePushConstants {
     float camera_is_perspective; // >= 0.5 => perspective, else orthographic
     float exposure;              // <= 0 disables the tonemap step (input is already LDR)
     float bloom_intensity;       // <= 0 disables bloom
+    float auto_exposure;         // != 0 -> multiply `exposure` by exposure_tex's adapting value
+    float grading_size;          // colour-grading LUT cube side; <= 1 disables the lookup
 } params;
 
 layout(location = 0) out vec4 out_color;
@@ -181,9 +191,24 @@ void main() {
     // PixelStylizePass doc) feeds already-tonemapped, already-encoded LDR and must not have
     // this reapplied.
     if (params.exposure > 0.0) {
-        color = aces_film(color * params.exposure);
+        // Auto-exposure multiplies the configured exposure rather than replacing it,
+        // so the config value keeps its meaning as the scene's baseline stop and the
+        // metered term is a relative adaptation on top (HDRP's own split between
+        // Fixed exposure and Exposure Compensation).
+        float exposure = params.exposure;
+        if (params.auto_exposure != 0.0) {
+            exposure *= texture(exposure_tex, vec2(0.5)).r;
+        }
+        color = aces_film(color * exposure);
         color = srgb_encode(color);
     }
+
+    // Colour grading, on DISPLAY-REFERRED colour: after the tonemap and sRGB encode
+    // (a LUT authored in an image editor expects the values it would see there) and
+    // before outline/dither/palette, which are stylization the grade must not touch --
+    // an outline is a fixed authored colour, and quantizing to a palette after grading
+    // would grade the palette entries themselves off-palette.
+    color = gfx_apply_grading_lut(grading_lut, color, params.grading_size);
 
     vec3 n0 = texture(scene_normal, in_uv).rgb;
     if (params.outline_thickness > 0.0 && !is_background(n0) &&

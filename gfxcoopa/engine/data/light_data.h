@@ -98,6 +98,17 @@ struct alignas(16) LightUBO {
     glm::mat4     spot_light_space_matrix = glm::mat4(1.0f); /**< Light projection * view matrix for the one shadow-casting spot (see light_counts.w). */
     glm::vec4     spot_shadow_params      = glm::vec4(0.005f, 0.0f, 0.0f, 0.05f); /**< x=bias, y=PCF penumbra scale K in texels*distance -- the shader divides by the fragment's light-space depth for a constant world-width penumbra; 0=hard (see calc_spot_shadow in pixel_shadow_body.glsl), z=shadow_enabled (1 or 0), w=normal_bias */
     SpotLightGPU  spot_lights[MAX_SPOT_LIGHTS];
+
+    // Appended after spot_lights per this struct's own append-only rule: consumers
+    // with no PCSS/contact-shadow support keep compiling against the shorter prefix.
+    glm::vec4     pcss_params    = glm::vec4(0.0f, 0.0f, 8.0f, 8.0f); /**< PCSS contact hardening (calc_dir_shadow):
+                                        x=enabled (1 or 0), y=penumbra texels per unit [0,1] light-space
+                                        depth gap (depth_range_world * light size / texel_world, CPU-derived
+                                        per frame), z=blocker search radius in texels, w=blocker search tap
+                                        count (the quality dial -- the search runs on every shadowed pixel). */
+    glm::vec4     contact_params = glm::vec4(0.0f, 0.5f, 0.15f, 8.0f); /**< Screen-space contact shadows
+                                        (pixel_lighting.frag): x=strength (0 disables), y=march length in
+                                        world units, z=thickness tolerance in world units, w=step count. */
 };
 
 // Pins the offset of sky_zenith -- the field every pre-spot-light shader's LightUBO

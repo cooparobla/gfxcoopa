@@ -38,10 +38,13 @@ layout(set = 1, binding = 3) uniform sampler2D g_ssao;
 // Set 2: Resolved SSR map (temporal-resolved raymarch output)
 layout(set = 2, binding = 0) uniform sampler2D u_ssr_map;
 
-// Set 3: Deferred-lit scene colour (raw, for compositing into) and its
-// prefiltered mip chain (blurry, for the SSGI diffuse-bounce tap).
+// Set 3: Deferred-lit scene colour (raw, for compositing into), its
+// prefiltered mip chain (blurry, for the fallback SSGI diffuse-bounce tap),
+// and the temporally-resolved traced-SSGI buffer (a permanent 1x1 zero
+// fallback when the trace stage is off -- see SsrPass's ssgi_frag_spv).
 layout(set = 3, binding = 0) uniform sampler2D u_scene_color;
 layout(set = 3, binding = 1) uniform sampler2D u_scene_color_mips;
+layout(set = 3, binding = 2) uniform sampler2D u_ssgi_map;
 
 // --- Hooks: no probes, analytic BRDF (see gfx/indirect_specular.glsl) ---
 vec2 hook_env_brdf(float NdotV, float roughness) {

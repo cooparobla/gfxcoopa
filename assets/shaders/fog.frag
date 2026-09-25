@@ -59,35 +59,13 @@ void main() {
     vec4 world    = u_fog.inv_view_proj * vec4(ndc, 1.0);
     vec3 view_dir = normalize(world.xyz / world.w - cam_pos);
 
-    // Global fog is evaluated at a distance capped to misc_params.w -- both here and for
-    // sky pixels below -- rather than sky being a hard-coded T_global = 1.0. A narrow-FOV
-    // camera grazing a large flat surface (this scene's telephoto shot across its ground
-    // plane) has its apparent per-pixel distance blow up near the vanishing point, which
-    // would otherwise fog the last few rows of geometry far more aggressively than anything
-    // else in view, right up against an unconditionally-unfogged sky -- a hard seam at the
-    // horizon. Capping both sides at the SAME distance makes them converge to the same
-    // transmittance instead, so there's nothing to see a seam between. `d` itself stays the
-    // real (uncapped) distance below, for the local-volume occlusion clamps.
-    float max_distance = max(u_fog.misc_params.w, 1.0);
+    // The composite itself lives in gfx/fog.glsl, shared with volumetrics.frag's
+    // merged path (see gfx_fog_apply's doc) so the two cannot drift.
+    float d_geo = is_sky ? 0.0 : distance(A, texture(g_position_roughness, in_uv).rgb);
 
-    float d;
-    float T_global;
-    if (is_sky) {
-        d = 4000.0;   // local-volume occlusion clamps only, see below -- no real occluder
-        T_global = gfx_fog_transmittance(A, A + view_dir * max_distance, u_fog.mode_density, u_fog.height_params);
-    } else {
-        vec3 B = texture(g_position_roughness, in_uv).rgb;
-        d = distance(A, B);
-        float d_fog = min(d, max_distance);
-        T_global = gfx_fog_transmittance(A, A + view_dir * d_fog, u_fog.mode_density, u_fog.height_params);
-    }
-
-    vec3 base_color = gfx_fog_base_color(u_fog.fog_color.rgb, view_dir, u_fog.sun_direction.xyz,
-                                         u_fog.sun_color.rgb, u_fog.height_params, u_fog.misc_params,
-                                         u_fog.sky_zenith.rgb, u_fog.sky_horizon.rgb, u_fog.sky_ground.rgb);
-
-    float max_opacity = u_fog.misc_params.y;
-    float T = clamp(T_global, 1.0 - max_opacity, 1.0);
-
-    out_color = vec4(mix(base_color, color, T), 1.0);
+    out_color = vec4(gfx_fog_apply(color, A, view_dir, d_geo, is_sky,
+                                   u_fog.mode_density, u_fog.height_params, u_fog.misc_params,
+                                   u_fog.fog_color.rgb, u_fog.sun_direction.xyz, u_fog.sun_color.rgb,
+                                   u_fog.sky_zenith.rgb, u_fog.sky_horizon.rgb, u_fog.sky_ground.rgb),
+                     1.0);
 }

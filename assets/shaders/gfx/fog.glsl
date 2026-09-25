@@ -214,4 +214,34 @@ vec3 gfx_fog_base_color(vec3 fog_color, vec3 view_dir, vec3 sun_dir, vec3 sun_co
                               SKY_ZENITH, SKY_HORIZON, SKY_GROUND);
 }
 
+/// The whole GLOBAL fog composite for one pixel: transmittance along the view
+/// ray, blended toward the base colour. Shared by fog.frag (which is nothing but
+/// this call) and volumetrics.frag (which applies fog itself when the two passes
+/// are merged into one, so the frame pays for one fullscreen HDR pass instead of
+/// two) -- one definition, so the merged path cannot drift from the separate one.
+///
+/// `d_geo` is the distance to the geometry this pixel sees; pass any value for a
+/// sky pixel and set `is_sky`. Both sides are evaluated at a distance capped to
+/// `misc_params.w`: a narrow-FOV camera grazing a large flat surface has its
+/// apparent per-pixel distance blow up near the vanishing point, which would fog
+/// the last rows of geometry far more than anything else in view, right against
+/// an unfogged sky -- a hard seam at the horizon. Capping both sides at the SAME
+/// distance makes them converge to the same transmittance instead.
+vec3 gfx_fog_apply(vec3 color, vec3 camera_pos, vec3 view_dir, float d_geo, bool is_sky,
+                   vec4 mode_density, vec4 height_params, vec4 misc_params,
+                   vec3 fog_color, vec3 sun_dir, vec3 sun_color,
+                   vec3 sky_zenith, vec3 sky_horizon, vec3 sky_ground) {
+    float max_distance = max(misc_params.w, 1.0);
+    float d_fog = is_sky ? max_distance : min(d_geo, max_distance);
+    float T_global = gfx_fog_transmittance(camera_pos, camera_pos + view_dir * d_fog,
+                                           mode_density, height_params);
+
+    vec3 base_color = gfx_fog_base_color(fog_color, view_dir, sun_dir, sun_color,
+                                         height_params, misc_params,
+                                         sky_zenith, sky_horizon, sky_ground);
+
+    float T = clamp(T_global, 1.0 - misc_params.y, 1.0);
+    return mix(base_color, color, T);
+}
+
 #endif // GFX_FOG_GLSL

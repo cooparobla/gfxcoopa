@@ -274,6 +274,11 @@ public:
     VkImageView cube_shadow_view() const { return cube_array_view_; }
     VkImageView spot_shadow_view() const { return spot_depth_image_->view(); }
 
+    /// TextureView identities of the same maps, for consumers whose binding API
+    /// takes gfxcoopa's opaque handle (e.g. FullscreenStage's descriptor sets).
+    coopa::gfx::TextureView dir_shadow_view_typed() const { return dir_depth_image_->view_typed(); }
+    coopa::gfx::TextureView spot_shadow_view_typed() const { return spot_depth_image_->view_typed(); }
+
     pipeline::RenderPass& dir_render_pass() const { return *dir_render_pass_; }
     pipeline::RenderPass& cube_render_pass() const { return *cube_render_pass_; }
 

@@ -32,6 +32,30 @@ namespace data {
 /// deliberately -- see VolumetricsPass's doc for why this stays a uniform binding.
 static constexpr uint32_t MAX_VOLUMES = 8;
 
+/// Maximum point/spot lights that in-scatter into the march. Small on purpose:
+/// each one costs a distance/falloff evaluation per march step per pixel.
+static constexpr uint32_t MAX_SCATTER_LIGHTS = 4;
+
+/**
+ * @struct ScatterLightGPU
+ * @brief std140-aligned point or spot light that in-scatters into local volumes.
+ *
+ * A trimmed copy of LightUBO's per-light data (light_data.h) carrying only what
+ * the march needs, so the volumetrics UBO stays self-contained (same reasoning
+ * as VolumetricsUBO's own inv_view_proj) and the caller controls which of the
+ * scene's lights are worth a per-step cost.
+ */
+struct alignas(16) ScatterLightGPU {
+    glm::vec4 position_range  = glm::vec4(0.0f); /**< xyz = world position, w = range. */
+    glm::vec4 color_intensity = glm::vec4(0.0f); /**< rgb = colour, w = intensity (LightUBO's units). */
+    glm::vec4 direction_cone  = glm::vec4(0.0f); /**< xyz = spot direction, w = cos(outer half-angle).
+                                                   Ignored for point lights (params.z = 0). */
+    glm::vec4 params          = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f); /**< x = falloff sharpness (same curve as the
+                                                   lighting pass's point loop), y = cos(inner half-angle),
+                                                   z = 1 spot / 0 point, w = 1 to shadow this light's
+                                                   samples with the spot shadow map. */
+};
+
 /**
  * @struct VolumeGPU
  * @brief std140-aligned local volume: bounds plus a complete field description.
@@ -91,8 +115,21 @@ struct alignas(16) VolumetricsUBO {
                                                  hoisting it keeps the phase evaluated once per pixel. */
     glm::vec4 time_params   = glm::vec4(0.0f); /**< x = elapsed time (seconds; drives advection),
                                                  y = delta time, z = frame index (dither shift). w unused. */
-    glm::vec4 counts        = glm::vec4(0.0f); /**< x = active volume count. yzw unused. */
+    glm::vec4 counts        = glm::vec4(0.0f); /**< x = active volume count, y = active scatter light
+                                                 count, z = light-scatter strength (0 disables the
+                                                 scatter-light loop entirely). w unused. */
     VolumeGPU volumes[MAX_VOLUMES];            /**< Only the first counts.x are read. */
+
+    // Shadowing for the march's in-scatter terms. Appended after `volumes` so no
+    // pre-existing field moves -- the same std140 matching-prefix rule LightUBO
+    // documents (light_data.h).
+    glm::mat4 dir_light_space_matrix  = glm::mat4(1.0f); /**< World -> directional shadow clip (LightUBO's copy). */
+    glm::mat4 spot_light_space_matrix = glm::mat4(1.0f); /**< World -> spot shadow clip (LightUBO's copy). */
+    glm::vec4 shadow_params = glm::vec4(0.0f, 1.0f, 0.002f, 0.002f); /**< x = 1 to shadow the sun term (dir map bound,
+                                                 shadows on), y = shadow strength (dir shadow_intensity *
+                                                 the volumetric-shadow config strength), z = dir depth
+                                                 bias, w = spot depth bias. */
+    ScatterLightGPU scatter_lights[MAX_SCATTER_LIGHTS]; /**< Only the first counts.y are read. */
 };
 
 /**

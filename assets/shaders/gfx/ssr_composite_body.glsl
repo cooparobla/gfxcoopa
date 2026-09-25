@@ -125,23 +125,41 @@ void main() {
     // than "no reflection here".
     vec3 color = max(scene_color + (ssr_specular - confidence * ind.value) * ao_spec, 0.0);
 
-    // Screen-space diffuse bounce ("SSGI"): sample the blurriest scene-colour mip at a point
-    // offset along the surface normal, added as a Lambertian bounce weighted by the same SSR
-    // confidence (so it only contributes where a valid on-screen reflector was found) and the
-    // same screen-edge fade the raymarch itself uses. In the body, not a hook: ssgi_intensity
-    // 0 (blendy's default) makes this a no-op, so a consumer with no SSGI concept of its own
-    // gets the option for free with zero extra shader text.
+    // Screen-space diffuse bounce ("SSGI"), two tiers behind one intensity dial. In the
+    // body, not a hook: ssgi_intensity 0 (blendy's default) makes both a no-op, so a
+    // consumer with no SSGI concept of its own gets the option for free with zero extra
+    // shader text.
     if (pc.ssgi_intensity > 0.0) {
-        vec4 bounce_clip = camera.proj * camera.view * vec4(P + N * pc.ssgi_distance, 1.0);
-        if (bounce_clip.w > 0.0) {
-            vec2 bounce_uv = ssr_ndc_to_uv(bounce_clip.xy / bounce_clip.w);
-            vec2 edge = smoothstep(vec2(0.0), vec2(0.08), bounce_uv)
-                      * smoothstep(vec2(1.0), vec2(0.92), bounce_uv);
-            vec3 bounce = textureLod(u_scene_color_mips, clamp(bounce_uv, 0.0, 1.0),
-                                     float(pc.max_color_mip)).rgb;
-            vec3 kD = (vec3(1.0) - ind.F) * (1.0 - metallic);
-            color += kD * albedo * bounce * (edge.x * edge.y) * confidence
+        vec3 kD = (vec3(1.0) - ind.F) * (1.0 - metallic);
+        if (pc.ssgi_traced > 0.5) {
+            // Traced tier: u_ssgi_map holds the temporally-resolved cosine-hemisphere
+            // trace (ssgi.frag). Its rgb is hit radiance premultiplied by the trace's own
+            // confidence (screen-edge/distance fades included), and cosine-weighted
+            // sampling makes E[radiance] the irradiance over pi -- so albedo * rgb IS the
+            // Lambertian bounce, correctly normalized with no extra factors.
+            //
+            // A plain bilinear tap, NOT gfx_ssr_fetch's depth/normal-aware upsample: under
+            // half-res tracing that costs the bounce a little bleed across silhouettes,
+            // which is invisible on a term this low-frequency (it has already been through
+            // a wide bilateral denoise) and not worth four extra G-buffer fetches per pixel.
+            vec3 gi = texture(u_ssgi_map, in_uv).rgb;
+            color += kD * albedo * gi
                    * pc.ssgi_intensity * gfx_gtao_multi_bounce(occlusion, albedo);
+        } else {
+            // Fallback tier: one blurry scene-colour mip tap at a point offset along the
+            // surface normal, weighted by the same SSR confidence (so it only contributes
+            // where a valid on-screen reflector was found) and the same screen-edge fade
+            // the raymarch itself uses.
+            vec4 bounce_clip = camera.proj * camera.view * vec4(P + N * pc.ssgi_distance, 1.0);
+            if (bounce_clip.w > 0.0) {
+                vec2 bounce_uv = ssr_ndc_to_uv(bounce_clip.xy / bounce_clip.w);
+                vec2 edge = smoothstep(vec2(0.0), vec2(0.08), bounce_uv)
+                          * smoothstep(vec2(1.0), vec2(0.92), bounce_uv);
+                vec3 bounce = textureLod(u_scene_color_mips, clamp(bounce_uv, 0.0, 1.0),
+                                         float(pc.max_color_mip)).rgb;
+                color += kD * albedo * bounce * (edge.x * edge.y) * confidence
+                       * pc.ssgi_intensity * gfx_gtao_multi_bounce(occlusion, albedo);
+            }
         }
     }
 

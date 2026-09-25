@@ -51,15 +51,26 @@ public:
      * @param vert_spv    Fullscreen-triangle vertex shader (the shared fullscreen.vert).
      * @param frag_spv    volumetrics.frag.
      */
+    /**
+     * @param fog_ubo The FogData uniform buffer (engine/data/fog_data.h), for the
+     *                MERGED path where this pass also applies the global fog term
+     *                instead of reading an image FogPass already wrote it into --
+     *                see volumetrics.frag's `merged_fog`. Bound unconditionally (the
+     *                buffer exists whether or not fog is enabled), so the pipeline
+     *                layout never depends on the runtime flag; the caller selects the
+     *                path through VolumetricsUBO::counts.w.
+     */
     VolumetricsPass(coopa::gfx::core::Device& device,
              coopa::gfx::pipeline::RenderPass& target_pass,
              const coopa::gfx::memory::Buffer& wind_ubo,
+             const coopa::gfx::memory::Buffer& fog_ubo,
              const std::string& vert_spv,
              const std::string& frag_spv)
         : nearest_sampler_(coopa::gfx::engine::util::Sampler::nearest(device)),
           stage_(device, target_pass, describe(vert_spv, frag_spv))
     {
         stage_.set(1).bind_buffer(0, wind_ubo);
+        stage_.set(3).bind_buffer(0, fog_ubo);
     }
 
     VolumetricsPass(const VolumetricsPass&) = delete;
@@ -85,6 +96,28 @@ public:
     }
 
     /**
+     * @brief Binds the directional and spot shadow maps the march's in-scatter
+     *        terms sample. Call ONCE, at construction time (same rule as
+     *        set_source_images above).
+     *
+     * @param dir_shadow    The directional shadow depth map.
+     * @param spot_shadow   The spot shadow depth map.
+     * @param shadow_sampler A compare-enabled sampler (util::Sampler::shadow()) --
+     *                      volumetrics.frag declares both bindings as
+     *                      sampler2DShadow, so each march tap is one hardware
+     *                      depth-compare read.
+     *
+     * The bindings are non-optional in the pipeline layout; a consumer that never
+     * shadows its volumes still binds real maps and gates the taps off through
+     * VolumetricsUBO::shadow_params instead (a runtime flag, unlike this binding).
+     */
+    void set_shadow_images(coopa::gfx::TextureView dir_shadow, coopa::gfx::TextureView spot_shadow,
+                           const coopa::gfx::engine::util::Sampler& shadow_sampler) {
+        stage_.set(2).bind_image(0, dir_shadow, shadow_sampler);
+        stage_.set(2).bind_image(1, spot_shadow, shadow_sampler);
+    }
+
+    /**
      * @brief Records the fullscreen wind composite into the caller's open render pass.
      *
      * Sets a POSITIVE-height viewport, overriding the negative-height one
@@ -98,6 +131,8 @@ public:
 
 private:
     /// @brief Set 0: scene colour + G-buffer normal/position. Set 1: the pass's UBO.
+    ///        Set 2: directional + spot shadow maps (see set_shadow_images).
+    ///        Set 3: the fog UBO, for the merged global-fog path.
     static FullscreenStageDesc describe(const std::string& vert_spv, const std::string& frag_spv) {
         using coopa::gfx::DescriptorType;
         using coopa::gfx::ShaderStage;
@@ -108,6 +143,9 @@ private:
             {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
              {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
              {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
+            {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
+            {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
+             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
             {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
         };
         return d;

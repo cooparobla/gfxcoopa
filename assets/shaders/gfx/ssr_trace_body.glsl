@@ -63,39 +63,14 @@ struct GfxSsrHit {
     bool  hit;
 };
 
-/// Traces one reflection ray from world-space origin (P, N, roughness) against the Hi-Z
-/// map. Caller is responsible for the background/roughness-cutoff early-out and the
-/// dot(reflect(V,N), N) <= 0 check -- both are about the ORIGIN, which only the caller knows
-/// how to fetch (G-buffer texelFetch for ssr.frag, forward interpolants for a transparent
-/// pass).
-GfxSsrHit gfx_ssr_trace(vec3 P, vec3 N, float roughness, mat4 inv_proj, GfxSsrParams sp) {
+/// Traces one ray from world-space origin (P, N, roughness) along the EXPLICIT direction R
+/// against the Hi-Z map -- the direction-agnostic core gfx_ssr_trace() wraps with its own
+/// mirror-plus-GGX-jitter direction. A consumer marching a NON-specular ray (toyengine's
+/// ssgi.frag traces a cosine-hemisphere diffuse bounce) calls this directly with its own R.
+/// Caller is responsible for the background early-out and for dot(R, N) > 0; `roughness`
+/// still drives the cone-footprint mip selection and the roughness fade at the end.
+GfxSsrHit gfx_ssr_trace_dir(vec3 P, vec3 N, vec3 R, float roughness, mat4 inv_proj, GfxSsrParams sp) {
     vec3 V = normalize(P - camera.camera_pos);
-    vec3 R = reflect(V, N);
-
-    // Stochastic ray jitter. The far end of a reflection -- where the ray either clears the
-    // reflected object's silhouette or doesn't -- is a hard binary hit/miss decision on a
-    // perfectly deterministic ray; as the camera moves that decision flips in lockstep across
-    // the whole boundary, which is what reads as shimmer no amount of temporal/spatial
-    // filtering downstream can fully absorb. Sampling a fresh point inside the GGX lobe every
-    // pixel, every frame turns that hard edge into per-pixel noise instead, which the
-    // resolve/blur stages already exist to integrate into a soft edge. jitter_strength == 0
-    // skips this entirely and reproduces the old single deterministic ray exactly.
-    if (sp.jitter_strength > 0.0) {
-        vec3 up = (abs(R.z) < 0.999) ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
-        vec3 tangent   = normalize(cross(up, R));
-        vec3 bitangent = cross(R, tangent);
-
-        vec2 xi = ssr_ign2(gl_FragCoord.xy, sp.frame_index);
-        float lobe_radius = sqrt(xi.x) * sp.jitter_strength * ssr_ggx_cone_tan(roughness);
-        float phi = 6.28318530718 * xi.y;
-
-        vec3 candidate = normalize(R + tangent * (lobe_radius * cos(phi))
-                                      + bitangent * (lobe_radius * sin(phi)));
-        // The caller already gated on dot(R, N) <= 0 using this SAME unjittered R (computed
-        // identically, before this branch runs) -- a jittered ray that dips below the origin
-        // surface must fall back to the mirror ray rather than silently trace garbage.
-        if (dot(candidate, N) > 0.0) R = candidate;
-    }
 
     // Depth-scaled bias. The self-reflection this exists to prevent is a screen-space
     // phenomenon -- the ray must clear roughly one texel's worth of the source surface -- so
@@ -288,6 +263,44 @@ GfxSsrHit gfx_ssr_trace(vec3 P, vec3 N, float roughness, mat4 inv_proj, GfxSsrPa
 
     // Premultiplied by confidence -- see GfxSsrHit's own doc above for why.
     return GfxSsrHit(hit_color * confidence, confidence, travel, true);
+}
+
+/// Traces one reflection ray from world-space origin (P, N, roughness) against the Hi-Z
+/// map. Caller is responsible for the background/roughness-cutoff early-out and the
+/// dot(reflect(V,N), N) <= 0 check -- both are about the ORIGIN, which only the caller knows
+/// how to fetch (G-buffer texelFetch for ssr.frag, forward interpolants for a transparent
+/// pass). The march itself lives in gfx_ssr_trace_dir above; this wrapper only chooses the
+/// direction: the mirror ray, GGX-jittered when jitter_strength > 0.
+GfxSsrHit gfx_ssr_trace(vec3 P, vec3 N, float roughness, mat4 inv_proj, GfxSsrParams sp) {
+    vec3 V = normalize(P - camera.camera_pos);
+    vec3 R = reflect(V, N);
+
+    // Stochastic ray jitter. The far end of a reflection -- where the ray either clears the
+    // reflected object's silhouette or doesn't -- is a hard binary hit/miss decision on a
+    // perfectly deterministic ray; as the camera moves that decision flips in lockstep across
+    // the whole boundary, which is what reads as shimmer no amount of temporal/spatial
+    // filtering downstream can fully absorb. Sampling a fresh point inside the GGX lobe every
+    // pixel, every frame turns that hard edge into per-pixel noise instead, which the
+    // resolve/blur stages already exist to integrate into a soft edge. jitter_strength == 0
+    // skips this entirely and reproduces the old single deterministic ray exactly.
+    if (sp.jitter_strength > 0.0) {
+        vec3 up = (abs(R.z) < 0.999) ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+        vec3 tangent   = normalize(cross(up, R));
+        vec3 bitangent = cross(R, tangent);
+
+        vec2 xi = ssr_ign2(gl_FragCoord.xy, sp.frame_index);
+        float lobe_radius = sqrt(xi.x) * sp.jitter_strength * ssr_ggx_cone_tan(roughness);
+        float phi = 6.28318530718 * xi.y;
+
+        vec3 candidate = normalize(R + tangent * (lobe_radius * cos(phi))
+                                      + bitangent * (lobe_radius * sin(phi)));
+        // The caller already gated on dot(R, N) <= 0 using this SAME unjittered R (computed
+        // identically, before this branch runs) -- a jittered ray that dips below the origin
+        // surface must fall back to the mirror ray rather than silently trace garbage.
+        if (dot(candidate, N) > 0.0) R = candidate;
+    }
+
+    return gfx_ssr_trace_dir(P, N, R, roughness, inv_proj, sp);
 }
 
 #endif // GFX_SSR_TRACE_BODY_GLSL

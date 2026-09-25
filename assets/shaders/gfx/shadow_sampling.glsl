@@ -204,6 +204,59 @@ float gfx_shadow_dir_pcf_vogel(sampler2DShadow map, vec3 proj_coords, float bias
     return shadow / float(sample_count);
 }
 
+/// PCSS (percentage-closer soft shadows) against a directional 2D depth map:
+/// a Vogel-disk blocker search on `map_raw` (the SAME image as `map`, bound a
+/// second time through a plain non-compare sampler -- hardware compare taps
+/// cannot return the stored depth the search needs), then the existing
+/// gfx_shadow_dir_pcf_vogel at a radius derived from the average blocker gap.
+/// This is what makes a shadow sharp at its contact point and progressively
+/// softer with occluder distance, instead of one constant-width penumbra.
+///
+/// A directional light sits at infinity, so the penumbra grows LINEARLY with
+/// the blocker-to-receiver gap (gap * tan(angular radius)) -- no division by
+/// blocker depth the classic spotlight PCSS formula has, and none of its
+/// near-plane blowup. `texels_per_depth` is that whole conversion folded into
+/// one CPU-derived factor: penumbra texels per unit [0,1] light-space depth
+/// gap (= depth_range_world * light_size / texel_world -- see
+/// update_dir_shadow_matrix_()'s pcss_params write).
+///
+/// Returns in [0,1], 1 = fully shadowed. No blockers found => 0 (fully lit):
+/// the early-out that makes PCSS barely cost more than plain PCF on open
+/// ground. `max_radius_texels` is the caller's existing constant-radius value,
+/// so PCSS hardens contacts but never exceeds the width the caller tuned.
+/// `search_taps` is the blocker search's own budget, separate from `sample_count`
+/// (the penumbra filter's): the search runs on EVERY shadowed pixel, including the
+/// fully-lit ones it early-outs, so it is the half of PCSS that a quality tier most
+/// needs to scale. Must not exceed 16.
+float gfx_shadow_dir_pcss(sampler2DShadow map, sampler2D map_raw, vec3 proj_coords, float bias,
+                          float texels_per_depth, float search_radius_texels,
+                          float max_radius_texels, float rotation_angle, int sample_count,
+                          int search_taps) {
+    const float GOLDEN_ANGLE = 2.39996323;
+    vec2 map_size  = vec2(textureSize(map_raw, 0));
+    vec2 search_uv = search_radius_texels / map_size;
+
+    float ref = proj_coords.z - bias;
+    float blocker_sum = 0.0;
+    float blocker_n   = 0.0;
+    float taps = float(max(search_taps, 1));
+    for (int i = 0; i < 16; ++i) {
+        if (i >= search_taps) break;
+        float r = sqrt((float(i) + 0.5) / taps);
+        float a = float(i) * GOLDEN_ANGLE + rotation_angle;
+        float d = textureLod(map_raw, proj_coords.xy + r * vec2(cos(a), sin(a)) * search_uv, 0.0).r;
+        if (d < ref) { blocker_sum += d; blocker_n += 1.0; }
+    }
+    if (blocker_n < 0.5) return 0.0;
+
+    float gap = ref - blocker_sum / blocker_n;
+    // 0.35 floor: below ~a third of a texel the Vogel disk collapses onto one
+    // texel and the rotated pattern reads as banding rather than a hard edge.
+    float radius_texels = clamp(gap * texels_per_depth, 0.35, max_radius_texels);
+    return gfx_shadow_dir_pcf_vogel(map, proj_coords, bias, radius_texels / map_size,
+                                    rotation_angle, sample_count);
+}
+
 /// Single hard compare against a point/spot light's depth cube, hardware PCF.
 float gfx_shadow_cube_hard(samplerCubeShadow map, vec3 dir, float current_dist, float bias) {
     return texture(map, vec4(dir, current_dist - bias));

@@ -4,8 +4,14 @@
 // drifting haze -- see gfx/volumetrics.glsl for the three kinds).
 //
 // The counterpart to fog.frag, which handles the GLOBAL atmosphere analytically.
-// Everything here is bounded and scene-placed, so there is no global term: a
-// volume carries its own complete field description alongside its bounds.
+// Everything MARCHED here is bounded and scene-placed: a volume carries its own
+// complete field description alongside its bounds.
+//
+// The global term is still analytic, but this shader applies it itself (through
+// the same gfx_fog_apply() call fog.frag makes) whenever the caller sets the
+// merged flag -- because with both effects on, fog.frag's only job would be to
+// write a full-resolution HDR image this pass immediately reads back. See
+// `merged_fog` in main() and PixelRenderPipeline::fog_merged_into_volumetrics_().
 //
 // Vertex stage is the shared fullscreen triangle (fullscreen.vert). Writes into
 // its own HDR target -- pipeline::RenderPass hardcodes LOAD_OP_CLEAR, so this
@@ -32,6 +38,16 @@ struct Volume {
     vec4 mode_params;      // x = kind, y = sun amount, z = edge softness
 };
 
+// A point or spot light that in-scatters into the march -- a trimmed copy of the
+// lighting pass's per-light data (see ScatterLightGPU, volumetrics_data.h).
+struct ScatterLight {
+    vec4 position_range;   // xyz = world position, w = range
+    vec4 color_intensity;  // rgb = colour, w = intensity
+    vec4 direction_cone;   // xyz = spot direction, w = cos(outer); ignored for points
+    vec4 params;           // x = falloff sharpness, y = cos(inner), z = 1 spot / 0 point,
+                           // w = 1 -> shadow with the spot map
+};
+
 layout(set = 1, binding = 0) uniform VolumetricsUBO {
     mat4 inv_view_proj;
     vec4 camera_pos;     // xyz = world camera position, w = debug view flag
@@ -39,18 +55,79 @@ layout(set = 1, binding = 0) uniform VolumetricsUBO {
     vec4 sun_color;      // rgb = sun colour * intensity
     vec4 march_params;   // x = step count, y = max distance, z = max opacity, w = sun anisotropy
     vec4 time_params;    // x = elapsed time, y = delta time, z = frame index
-    vec4 counts;         // x = active volume count
+    vec4 counts;         // x = active volume count, y = scatter light count,
+                         // z = light-scatter strength (0 skips the light loop)
     Volume volumes[8];
+    mat4 dir_light_space_matrix;   // world -> directional shadow clip
+    mat4 spot_light_space_matrix;  // world -> spot shadow clip
+    vec4 shadow_params;  // x = shadow the sun term (0/1), y = shadow strength,
+                         // z = dir depth bias, w = spot depth bias
+    ScatterLight scatter_lights[4];
 } u_vol;
 
+// Set 2: shadow maps for the in-scatter terms. Compare-enabled samplers
+// (util::Sampler::shadow(), VK_COMPARE_OP_GREATER), so one texture() call is a
+// hardware-filtered depth compare returning 1 = in shadow -- the same convention
+// gfx/shadow_sampling.glsl's *Shadow family documents.
+layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
+layout(set = 2, binding = 1) uniform sampler2DShadow spot_shadow_map;
+
+// Set 3: the GLOBAL fog description (FogUBO's layout, field for field -- see
+// fog.frag). Read only when shadow_params.z selects the merged path, where this
+// pass applies the global fog term itself instead of reading an image FogPass
+// already wrote it into -- one fullscreen HDR pass per frame instead of two. The
+// binding is always declared and always bound (the fog UBO buffer exists
+// regardless of the toggle), so the pipeline layout never depends on the flag.
+layout(set = 3, binding = 0) uniform FogUBO {
+    mat4 inv_view_proj;
+    vec4 camera_pos;
+    vec4 fog_color;
+    vec4 sun_direction;
+    vec4 sun_color;
+    vec4 mode_density;
+    vec4 height_params;
+    vec4 misc_params;
+    vec4 sky_zenith;
+    vec4 sky_horizon;
+    vec4 sky_ground;
+} u_fog;
+
 #include <gfx/volumetrics.glsl>
-#include <gfx/fog.glsl>   // gfx_fog_hg + the box/sphere containment weights
+#include <gfx/fog.glsl>        // gfx_fog_hg + the box/sphere containment weights
+#include <gfx/spot_light.glsl> // gfx_spot_cone for the scatter-light loop
+
+// One hardware-PCF visibility tap of a 2D shadow map at world point p, for the
+// march's in-scatter terms. Out of bounds / behind the map => fully lit: a march
+// sample outside the fitted shadow frustum carries no occlusion information, and
+// darkening it would draw the frustum's edges into the fog as a visible box.
+// One tap per march step is deliberate -- the IGN start-offset dither already
+// decorrelates neighbouring pixels' sample positions, so the tap noise reads as
+// the same fine dither the rest of the march produces and TAA integrates it.
+float vol_shadow_vis(mat4 light_space, sampler2DShadow map, vec3 p, float bias, float strength) {
+    vec4 lsp = light_space * vec4(p, 1.0);
+    if (lsp.w <= 0.0) return 1.0;
+    vec3 proj = lsp.xyz / lsp.w;
+    proj.xy = proj.xy * 0.5 + 0.5;
+    if (proj.z <= 0.0 || proj.z > 1.0 ||
+        proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) {
+        return 1.0;
+    }
+    return 1.0 - texture(map, vec3(proj.xy, proj.z - bias)) * strength;
+}
 
 void main() {
     vec3 color = texture(scene_color, in_uv).rgb;
 
-    int volume_count = int(u_vol.counts.x);
-    if (volume_count <= 0) {
+    int  volume_count = int(u_vol.counts.x);
+    // Merged path: this pass also applies the GLOBAL fog term, so FogPass doesn't run
+    // and the frame pays for one fullscreen HDR pass instead of two. The composite
+    // itself is gfx_fog_apply(), shared with fog.frag, and it is applied to the scene
+    // colour BEFORE the local march -- exactly the order the two separate passes
+    // produce (fog writes an image, volumetrics marches over it), so the merge is
+    // arithmetically identical rather than an approximation.
+    bool merged_fog = u_vol.counts.w > 0.5;
+
+    if (volume_count <= 0 && !merged_fog) {
         out_color = vec4(color, 1.0);   // nothing placed -- costs one fetch, not a march
         return;
     }
@@ -71,6 +148,18 @@ void main() {
     vec3 view_dir = normalize(world.xyz / world.w - cam_pos);
 
     float d_geo = is_sky ? 1e6 : distance(A, texture(g_position_roughness, in_uv).rgb);
+
+    if (merged_fog) {
+        color = gfx_fog_apply(color, A, view_dir, d_geo, is_sky,
+                              u_fog.mode_density, u_fog.height_params, u_fog.misc_params,
+                              u_fog.fog_color.rgb, u_fog.sun_direction.xyz, u_fog.sun_color.rgb,
+                              u_fog.sky_zenith.rgb, u_fog.sky_horizon.rgb, u_fog.sky_ground.rgb);
+        if (volume_count <= 0) {
+            out_color = vec4(color, 1.0);
+            return;
+        }
+    }
+
     float ray_end = min(d_geo, max(u_vol.march_params.y, 0.0));
 
     int steps = int(u_vol.march_params.x);
@@ -79,9 +168,10 @@ void main() {
         return;
     }
 
-    // Clip the march to the UNION of the volumes' bounds. Everything here is bounded
-    // by definition (fog is the global term and lives in fog.frag), so marching a
-    // fixed distance would spend most steps in empty air. Two wins: pixels looking at
+    // Clip the march to the UNION of the volumes' bounds. Every VOLUME is bounded by
+    // definition -- the global term is analytic and was already applied above, not
+    // marched -- so marching a fixed distance would spend most steps in empty air.
+    // Two wins: pixels looking at
     // nothing skip the march entirely, and pixels that do hit a volume spend the whole
     // step budget inside it, sampling it far more finely than a fixed span would.
     //
@@ -138,6 +228,7 @@ void main() {
 
         float sigma     = 0.0;
         vec3  emit      = vec3(0.0);
+        float light_w   = 0.0;   // density-weighted in-scatter response (mode_params.y)
         float occl_sum  = 0.0;
 
         for (int v = 0; v < volume_count; ++v) {
@@ -171,9 +262,65 @@ void main() {
             }
 
             sigma    += s;
-            emit     += s * (u_vol.volumes[v].color_occlusion.rgb
-                             + sun_base * u_vol.volumes[v].mode_params.y);
+            emit     += s * u_vol.volumes[v].color_occlusion.rgb;
+            light_w  += s * u_vol.volumes[v].mode_params.y;
             occl_sum += s * u_vol.volumes[v].color_occlusion.w;
+        }
+
+        // Light in-scatter, evaluated once per STEP (not per volume: it depends
+        // only on the sample point) and only where density responded to light at
+        // all -- shadow taps and the light loop cost nothing over empty air.
+        // Each volume's own response is its density-weighted mode_params.y
+        // (light_w), so sun and local lights share one per-volume dial.
+        if (light_w > 0.0) {
+            float sun_vis = (u_vol.shadow_params.x > 0.5)
+                ? vol_shadow_vis(u_vol.dir_light_space_matrix, dir_shadow_map, p,
+                                 u_vol.shadow_params.z, u_vol.shadow_params.y)
+                : 1.0;
+            vec3 in_scatter = sun_base * sun_vis;
+
+            float light_strength = u_vol.counts.z;
+            int   light_count    = int(u_vol.counts.y);
+            for (int li = 0; li < light_count; ++li) {
+                if (light_strength <= 0.0) break;
+                vec3  to_light = u_vol.scatter_lights[li].position_range.xyz - p;
+                float dist     = length(to_light);
+                float range    = u_vol.scatter_lights[li].position_range.w;
+                if (dist > range || dist < 1e-4) continue;
+                vec3 L = to_light / dist;
+
+                float cone = 1.0;
+                if (u_vol.scatter_lights[li].params.z > 0.5) {
+                    cone = gfx_spot_cone(L, u_vol.scatter_lights[li].direction_cone.xyz,
+                                         u_vol.scatter_lights[li].direction_cone.w,
+                                         u_vol.scatter_lights[li].params.y);
+                    if (cone <= 0.0) continue;
+                }
+
+                // Same distance curve as the lighting pass's point/spot loops
+                // (pixel_lighting.frag), so a light's glow in a volume matches
+                // its glow on the surfaces around it.
+                float sharpness = max(u_vol.scatter_lights[li].params.x, 0.1);
+                float factor    = clamp(dist / range, 0.0, 1.0);
+                float falloff   = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
+                falloff *= falloff;
+                float attenuation = falloff / (12.566370614 * (factor * factor + 1.0)); // 4*pi
+                vec3 radiance = u_vol.scatter_lights[li].color_intensity.rgb
+                              * (u_vol.scatter_lights[li].color_intensity.w * 0.08)
+                              * attenuation * cone;
+
+                float vis = (u_vol.scatter_lights[li].params.w > 0.5)
+                    ? vol_shadow_vis(u_vol.spot_light_space_matrix, spot_shadow_map, p,
+                                     u_vol.shadow_params.w, u_vol.shadow_params.y)
+                    : 1.0;
+
+                // Same HG phase as the sun term: the anisotropy is a property of
+                // the medium's phase function, whichever light the energy came from.
+                float phase_l = gfx_fog_hg(dot(view_dir, L), u_vol.march_params.w);
+                in_scatter += radiance * (phase_l * light_strength * vis);
+            }
+
+            emit += light_w * in_scatter;
         }
 
         if (sigma > 1e-4) {
