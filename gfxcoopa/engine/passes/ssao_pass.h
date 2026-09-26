@@ -71,7 +71,10 @@ public:
     /// vec2 is deliberately flattened to two floats, matching PushConstants' house rule, so nothing
     /// here depends on std430 vec2 base-alignment (8 bytes) lining up with this C++ struct's layout.
     struct ResolvePushConstants {
-        glm::mat4 prev_view_proj = glm::mat4(1.0f); // offset 0
+        // Current clip space -> previous frame's clip space: prev jittered (proj * view) times
+        // the inverse of the current jittered (proj * view). Callers compose it in DOUBLE
+        // precision (see Params::reproject) so the shader never touches world-scale numbers.
+        glm::mat4 reproject      = glm::mat4(1.0f); // offset 0
         float     resolution_x   = 1.0f;            // offset 64
         float     resolution_y   = 1.0f;            // offset 68
         // Accumulation-count cap: each pixel blends the new frame at 1/(count+1) until its
@@ -127,10 +130,15 @@ public:
         // Accumulation depth: how many frames a pixel averages before the running mean turns
         // into a fixed-rate EMA. Mapped straight into ResolvePushConstants::max_accum.
         int   temporal_frames  = 32;
-        // Reprojection: previous frame's JITTERED proj * view, and whether it (and the history
-        // image) are actually valid yet -- see execute()'s history_valid derivation.
-        glm::mat4 prev_view_proj       = glm::mat4(1.0f);
-        bool      prev_view_proj_valid = false;
+        // Reprojection: previous frame's jittered (proj * view) times the inverse of the
+        // current frame's, composed in double precision (glm::dmat4) before truncating to
+        // float -- world-scale magnitudes cancel inside the double product, so the resulting
+        // matrix reprojects at sub-pixel accuracy where a float composition (or a reprojection
+        // routed through the RGBA16F G-buffer position) drifts by whole pixels. Same scheme as
+        // TaaPass's reprojection matrix. reproject_valid says whether it (and the history
+        // image) actually exist yet -- see execute()'s history_valid derivation.
+        glm::mat4 reproject       = glm::mat4(1.0f);
+        bool      reproject_valid = false;
         // This frame's eye position. The pass remembers the previous frame's itself, so callers
         // only ever supply the current one.
         glm::vec3 camera_pos           = glm::vec3(0.0f);
@@ -206,14 +214,15 @@ public:
         raw_sd.push_constants = {{ShaderStage::Fragment, 0, sizeof(PushConstants)}};
         raw_ = std::make_unique<FullscreenStage>(device, *raw_render_pass_, raw_sd);
 
-        // Resolve pass. No camera set -- reprojection uses the prev_view_proj push constant,
-        // matching SsrPass's resolve set: current raw AO, history AO, G2 position, G1 normal.
+        // Resolve pass. No camera set -- reprojection uses the reproject push constant:
+        // current raw AO, history AO, G2 position, G1 normal, plus the AO depth pyramid
+        // (mip 0 is an exact copy of the rasterized depth, the reprojection's clip-z source).
         // Two set instances, one per ping-pong parity: instance i reads target 1-i as history
         // while the pass renders into target i, so no descriptor is ever updated per frame.
         FullscreenStageDesc resolve_sd;
         resolve_sd.vert_spv = vert_spv;
         resolve_sd.frag_spv = resolve_frag_spv;
-        resolve_sd.owned_sets = {sampled(4)};
+        resolve_sd.owned_sets = {sampled(5)};
         resolve_sd.push_constants = {{ShaderStage::Fragment, 0, sizeof(ResolvePushConstants)}};
         resolve_sd.instances = 2;
         resolve_ = std::make_unique<FullscreenStage>(device, *resolve_render_pass_, resolve_sd);
@@ -288,6 +297,7 @@ public:
                                            linear_sampler);
             resolve_->set(0, i).bind_image(2, g2_view, *raw_sampler_);
             resolve_->set(0, i).bind_image(3, g1_view, *raw_sampler_);
+            resolve_->set(0, i).bind_image(4, hiz_view, hiz_sampler);
 
             blur_->set(0, i).bind_image(1, g1_view, *raw_sampler_);
             blur_->set(0, i).bind_image(2, g2_view, *raw_sampler_);
@@ -395,15 +405,15 @@ public:
         resolve_->bind(cmd, width_, height_, resolve_parity_);
 
         ResolvePushConstants resolve_pc{};
-        resolve_pc.prev_view_proj = params.prev_view_proj;
+        resolve_pc.reproject      = params.reproject;
         resolve_pc.resolution_x   = static_cast<float>(width_);
         resolve_pc.resolution_y   = static_cast<float>(height_);
         resolve_pc.max_accum      = params.temporal_enabled
             ? static_cast<float>(params.temporal_frames) : 0.0f;
-        // Both a history IMAGE (history_initialized_) and a previous view-projection MATRIX
-        // (prev_view_proj_valid) must exist -- the matrix lags the image by a frame on a
+        // Both a history IMAGE (history_initialized_) and a reprojection MATRIX
+        // (reproject_valid) must exist -- the matrix lags the image by a frame on a
         // fresh-start/resize, so ANDing avoids reprojecting with a stale/identity matrix.
-        resolve_pc.history_valid = (history_initialized_ && params.prev_view_proj_valid) ? 1 : 0;
+        resolve_pc.history_valid = (history_initialized_ && params.reproject_valid) ? 1 : 0;
         resolve_pc.camera_pos_x      = params.camera_pos.x;
         resolve_pc.camera_pos_y      = params.camera_pos.y;
         resolve_pc.camera_pos_z      = params.camera_pos.z;

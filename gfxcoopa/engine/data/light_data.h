@@ -109,6 +109,10 @@ struct alignas(16) LightUBO {
     glm::vec4     contact_params = glm::vec4(0.0f, 0.5f, 0.15f, 8.0f); /**< Screen-space contact shadows
                                         (pixel_lighting.frag): x=strength (0 disables), y=march length in
                                         world units, z=thickness tolerance in world units, w=step count. */
+    glm::vec4     contact_soft_params = glm::vec4(0.0f); /**< Soft contact-shadow penumbra
+                                        (pixel_lighting.frag): x=cone half-angle tangent (the sun's angular
+                                        size, shadow_pcss_light_size, when soft_shadows is on; 0 selects the
+                                        hard single-ray march). y/z/w reserved. */
 };
 
 // Pins the offset of sky_zenith -- the field every pre-spot-light shader's LightUBO
@@ -121,6 +125,9 @@ static_assert(offsetof(LightUBO, sky_zenith) == offsetof(LightUBO, point_lights)
     "byte-matches this prefix; see the point_lights/sky_zenith comment above.");
 static_assert(offsetof(LightUBO, spot_lights) == offsetof(LightUBO, spot_light_space_matrix) + sizeof(glm::mat4) + sizeof(glm::vec4),
     "LightUBO::spot_lights must immediately follow spot_light_space_matrix/spot_shadow_params.");
+static_assert(offsetof(LightUBO, contact_soft_params) == offsetof(LightUBO, contact_params) + sizeof(glm::vec4),
+    "LightUBO::contact_soft_params must immediately follow contact_params -- appended last per the "
+    "append-only rule, so every shorter shader prefix still byte-matches.");
 
 /**
  * @class LightData
