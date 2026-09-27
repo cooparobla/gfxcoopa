@@ -58,11 +58,19 @@ layout(set = 1, binding = 0) uniform VolumetricsUBO {
     vec4 counts;         // x = active volume count, y = scatter light count,
                          // z = light-scatter strength (0 skips the light loop)
     Volume volumes[8];
-    mat4 dir_light_space_matrix;   // world -> directional shadow clip
+    mat4 dir_light_space_matrix;   // world -> cascade 0's shadow clip; the sun term reads
+                                   // dir_cascade_matrix below instead, but the field holds
+                                   // this block's place in the std140 layout
     mat4 spot_light_space_matrix;  // world -> spot shadow clip
     vec4 shadow_params;  // x = shadow the sun term (0/1), y = shadow strength,
                          // z = dir depth bias, w = spot depth bias
     ScatterLight scatter_lights[4];
+    // Directional shadow cascades -- see VolumetricsUBO (volumetrics_data.h). The
+    // directional map is a tile atlas, so dir_light_space_matrix above only reaches
+    // cascade 0; a shaft marching the full distance needs the whole set.
+    mat4 dir_cascade_matrix[4];
+    vec4 dir_cascade_info; // x = cascade count, y = tiles per atlas row, z = selection
+                           // inset in tile uv, w = dither band (unused here)
 } u_vol;
 
 // Set 2: shadow maps for the in-scatter terms. Compare-enabled samplers
@@ -95,6 +103,7 @@ layout(set = 3, binding = 0) uniform FogUBO {
 #include <gfx/volumetrics.glsl>
 #include <gfx/fog.glsl>        // gfx_fog_hg + the box/sphere containment weights
 #include <gfx/spot_light.glsl> // gfx_spot_cone for the scatter-light loop
+#include <gfx/shadow_sampling.glsl> // gfx_csm_select/gfx_csm_atlas_coords for the sun term
 
 // One hardware-PCF visibility tap of a 2D shadow map at world point p, for the
 // march's in-scatter terms. Out of bounds / behind the map => fully lit: a march
@@ -113,6 +122,24 @@ float vol_shadow_vis(mat4 light_space, sampler2DShadow map, vec3 p, float bias, 
         return 1.0;
     }
     return 1.0 - texture(map, vec3(proj.xy, proj.z - bias)) * strength;
+}
+
+// The same tap against the CASCADED directional map, whose tiles each cover one slice of
+// the camera's depth range. vol_shadow_vis() above still serves the spot map, which is a
+// single frustum; the sun needs this one, because a shaft marches out to
+// volumetrics_max_distance and most of it lands past the near cascade's tile.
+//
+// Dither is passed as 0: gfx_csm_select()'s transition dither exists for TAA to average
+// away, and there is no temporal filter behind this march to do it -- an undithered hard
+// switch between two cascades is invisible in fog, where a shadow tap only modulates
+// in-scatter, while the dither would read as grain.
+float vol_shadow_vis_cascaded(sampler2DShadow map, vec3 p, float bias, float strength) {
+    int c = gfx_csm_select(u_vol.dir_cascade_matrix, u_vol.dir_cascade_info, p, 0.0);
+    // Past the last cascade: fully lit, the same reasoning vol_shadow_vis()'s
+    // out-of-bounds early-out documents.
+    if (c < 0) return 1.0;
+    vec3 atlas = gfx_csm_atlas_coords(u_vol.dir_cascade_matrix, u_vol.dir_cascade_info, p, c);
+    return 1.0 - texture(map, vec3(atlas.xy, atlas.z - bias)) * strength;
 }
 
 void main() {
@@ -274,8 +301,8 @@ void main() {
         // (light_w), so sun and local lights share one per-volume dial.
         if (light_w > 0.0) {
             float sun_vis = (u_vol.shadow_params.x > 0.5)
-                ? vol_shadow_vis(u_vol.dir_light_space_matrix, dir_shadow_map, p,
-                                 u_vol.shadow_params.z, u_vol.shadow_params.y)
+                ? vol_shadow_vis_cascaded(dir_shadow_map, p,
+                                          u_vol.shadow_params.z, u_vol.shadow_params.y)
                 : 1.0;
             vec3 in_scatter = sun_base * sun_vis;
 

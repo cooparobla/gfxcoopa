@@ -90,6 +90,97 @@ vec3 gfx_rotate_around_axis(vec3 v, vec3 axis, float angle) {
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
 }
 
+// --- Directional cascade selection ---
+//
+// The directional shadow map is an ATLAS of up to 4 square tiles (ShadowMapTarget),
+// one per cascade, each an independent ortho fit to one slice of the camera's depth
+// range. These two helpers are the whole difference that makes for a sampler: pick
+// a cascade, then remap its [0,1] light-space xy into that cascade's tile. Every
+// kernel below stays unaware of cascades and samples the atlas as a plain 2D map.
+//
+// `cascade_info` is LightUBO::dir_cascade_info (also copied into VolumetricsUBO):
+//   x = live cascade count, y = tiles per atlas row, z = selection inset in TILE uv,
+//   w = dither transition band in tile uv.
+//
+// Selection is by CONTAINMENT, not by view depth: the first cascade whose tile the
+// point lands inside wins, and cascade 0 is the smallest box, so first-hit is always
+// the highest-resolution tile that covers the point. That needs nothing but the
+// matrices -- no camera view matrix, no split distances -- which is what lets the
+// reflection/refraction capture passes (shading from a DIFFERENT camera) and the
+// volumetrics march run the identical rule as the main lighting pass.
+//
+// The `inset` is load-bearing, not a safety margin: a point is only accepted into a
+// cascade it sits at least `inset` inside, and the CPU sizes that inset to exceed the
+// widest PCF disk plus the PCSS blocker search (see update_dir_shadow_matrix_()). So
+// no tap can reach across a tile border into a neighbouring cascade's depths, and the
+// kernels need no clamping.
+
+/// True when `world_pos` lands inside cascade `c`'s inset tile region.
+bool gfx_csm_contains(mat4 cascade_matrix, float inset, vec3 world_pos) {
+    vec4 lsp = cascade_matrix * vec4(world_pos, 1.0);
+    if (lsp.w <= 0.0) return false;
+    vec3 pc = lsp.xyz / lsp.w;
+    pc.xy = pc.xy * 0.5 + 0.5;
+    return pc.z >= 0.0 && pc.z <= 1.0 &&
+           all(greaterThanEqual(pc.xy, vec2(inset))) &&
+           all(lessThanEqual(pc.xy, vec2(1.0 - inset)));
+}
+
+/// The cascade covering `world_pos`, or -1 when it is past the last one (which the
+/// caller treats as unshadowed, exactly as a single map treats out-of-frustum).
+///
+/// `dither` in [0,1) drives the transition: within `cascade_info.w` of the selected
+/// tile's inset edge, a pixel is promoted to the next cascade with a probability that
+/// rises to 1 at the edge, so the resolution step resolves as a gradient rather than a
+/// seam once TAA averages neighbouring frames. Pass 0.0 to disable it -- a consumer
+/// with no temporal filter behind it (the volumetrics march) would see the dither as
+/// grain instead.
+int gfx_csm_select(mat4 cascade_matrix[4], vec4 cascade_info, vec3 world_pos, float dither) {
+    int   count = int(cascade_info.x);
+    float inset = cascade_info.z;
+    float band  = cascade_info.w;
+
+    for (int c = 0; c < 4; ++c) {
+        if (c >= count) break;
+        if (!gfx_csm_contains(cascade_matrix[c], inset, world_pos)) continue;
+
+        if (band > 0.0 && c + 1 < count) {
+            vec4 lsp = cascade_matrix[c] * vec4(world_pos, 1.0);
+            vec3 pc  = lsp.xyz / lsp.w;
+            pc.xy    = pc.xy * 0.5 + 0.5;
+            // Distance to the nearest inset edge, in units of the band: 0 at the edge,
+            // 1 a full band inside. Promote when the dither draw falls below it.
+            vec2  d    = min(pc.xy - vec2(inset), vec2(1.0 - inset) - pc.xy);
+            float edge = min(d.x, d.y) / max(band, 1e-6);
+            if (edge < 1.0 && dither > edge &&
+                gfx_csm_contains(cascade_matrix[c + 1], inset, world_pos)) {
+                return c + 1;
+            }
+        }
+        return c;
+    }
+    return -1;
+}
+
+/// `world_pos` in cascade `cascade`'s ATLAS coordinates: xy = atlas uv inside that
+/// cascade's tile, z = the [0,1] depth to compare. Feed straight to the kernels below.
+///
+/// Separate from gfx_csm_select() because the caller picks its cascade from the RAW
+/// shading point but samples with the normal-offset applied, and the offset it applies
+/// is itself per-cascade -- so the two projections are of different points.
+vec3 gfx_csm_atlas_coords(mat4 cascade_matrix[4], vec4 cascade_info, vec3 world_pos, int cascade) {
+    float grid_x = max(cascade_info.y, 1.0);
+    float grid_y = ceil(max(cascade_info.x, 1.0) / grid_x);
+    vec2  scale  = vec2(1.0 / grid_x, 1.0 / grid_y);
+
+    vec4 lsp = cascade_matrix[cascade] * vec4(world_pos, 1.0);
+    vec3 pc  = lsp.xyz / lsp.w;
+    pc.xy    = pc.xy * 0.5 + 0.5;
+
+    vec2 origin = vec2(mod(float(cascade), grid_x), floor(float(cascade) / grid_x)) * scale;
+    return vec3(origin + clamp(pc.xy, vec2(0.0), vec2(1.0)) * scale, pc.z);
+}
+
 /// Single hard compare against a directional/spot 2D depth map. `proj_coords`
 /// is the light-space position after the perspective divide and [0,1] remap
 /// (the caller has already early-out'd on out-of-bounds/behind-map).

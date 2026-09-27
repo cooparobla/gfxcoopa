@@ -22,6 +22,9 @@
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/memory/buffer.h>
+// For MAX_DIR_CASCADES: the march's sun term samples the SAME directional shadow atlas the
+// surface lighting does, so the cascade count is one shared constant, not a second copy.
+#include <gfxcoopa/engine/data/light_data.h>
 
 namespace coopa {
 namespace gfx {
@@ -130,6 +133,20 @@ struct alignas(16) VolumetricsUBO {
                                                  the volumetric-shadow config strength), z = dir depth
                                                  bias, w = spot depth bias. */
     ScatterLightGPU scatter_lights[MAX_SCATTER_LIGHTS]; /**< Only the first counts.y are read. */
+
+    // Directional shadow cascades, appended last per the matching-prefix rule above. The
+    // directional shadow map is an atlas of per-slice tiles (see ShadowMapTarget), so a
+    // march point past the near cascade has to be projected with ITS cascade's matrix and
+    // remapped into ITS tile -- dir_light_space_matrix above is only cascade 0's. Copied
+    // verbatim from LightUBO's fields of the same name, so the shaft and the surface
+    // shadow agree by construction.
+    glm::mat4 dir_cascade_matrix[MAX_DIR_CASCADES] = {
+        glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f)
+    };
+    glm::vec4 dir_cascade_info = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f); /**< x = cascade count,
+                                                 y = tiles per atlas row, z = selection inset in
+                                                 tile uv, w = dither band (unused here -- the
+                                                 march has no TAA behind it to resolve a dither). */
 };
 
 /**

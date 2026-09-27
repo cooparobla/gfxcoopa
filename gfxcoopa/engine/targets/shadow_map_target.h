@@ -9,6 +9,7 @@
 
 #include <volk/volk.h>
 #include <algorithm>
+#include <utility>
 #include <vector>
 #include <memory>
 #include <stdexcept>
@@ -29,17 +30,44 @@ namespace targets {
 
 /**
  * @class ShadowMapTarget
- * @brief Manages directional shadow depth map, point light cubemap depth target,
+ * @brief Manages the directional shadow atlas, point light cubemap depth target,
  *        and spot light depth map.
+ *
+ * The directional map is an ATLAS of `dir_cascades` square tiles, each `dir_res` texels on
+ * a side, laid out 1x1 / 2x1 / 2x2 (see grid_for()). Each tile holds one cascade -- an
+ * independent ortho fit to one slice of the camera's depth range -- so near-camera geometry
+ * gets a shadow box a few metres across while distant geometry keeps a coarse one. A
+ * one-cascade target is bit-identical to a plain single shadow map.
+ *
+ * The tiles share one image, one VkRenderPass and one framebuffer: the cascade loop
+ * (record_directional_shadow_() in toyengine's pixel_render_pipeline.h) calls
+ * set_cascade_viewport() between draws rather than beginning a pass per cascade. That keeps
+ * the sampler a plain sampler2D/sampler2DShadow, so every gfx/shadow_sampling.glsl kernel
+ * works on a cascade unchanged -- only the uv remap into the tile is new.
  */
 class ShadowMapTarget {
 public:
     ShadowMapTarget(core::Device& device, memory::Allocator& allocator,
-                    uint32_t dir_res = 2048, uint32_t cube_res = 512, uint32_t spot_res = 1024)
+                    uint32_t dir_res = 2048, uint32_t cube_res = 512, uint32_t spot_res = 1024,
+                    uint32_t dir_cascades = 1)
         : device_(device), allocator_(allocator),
-          dir_res_(dir_res), cube_res_(cube_res), spot_res_(spot_res)
+          dir_res_(dir_res), cube_res_(cube_res), spot_res_(spot_res),
+          dir_cascades_(std::clamp(dir_cascades, 1u, 4u)),
+          dir_grid_(grid_for(dir_cascades))
     {
         create_resources_();
+    }
+
+    /**
+     * @brief The atlas tile grid a cascade count uses: `.first` tiles per row, `.second` rows.
+     *
+     * 1 -> 1x1, 2 -> 2x1, 3 and 4 -> 2x2. Never a square grid with an unused row: the image
+     * is allocated at `dir_res * grid`, so a wasted row is wasted VRAM. Mirrors
+     * toy::render::cascade_atlas_grid(), which the shader-side uv math is derived from.
+     */
+    static std::pair<uint32_t, uint32_t> grid_for(uint32_t cascades) {
+        const uint32_t n = std::clamp(cascades, 1u, 4u);
+        return {std::min(n, 2u), (n + 1u) / 2u};
     }
 
     ~ShadowMapTarget() {
@@ -51,6 +79,13 @@ public:
 
     // --- Directional Shadow Pass ---
 
+    /**
+     * @brief Opens the one render pass that covers the WHOLE atlas and clears every tile.
+     *
+     * The viewport starts at the full atlas; a multi-cascade caller narrows it per cascade
+     * with set_cascade_viewport() before each cascade's draws. Clearing once here (rather
+     * than per tile) is why the cascade loop needs no extra pass or barrier.
+     */
     void begin_directional_pass(command::CommandBuffer& cmd) const {
         VkClearValue clear_value{};
         clear_value.depthStencil = {1.0f, 0};
@@ -60,13 +95,33 @@ public:
         rp_info.renderPass        = dir_render_pass_->handle();
         rp_info.framebuffer       = dir_framebuffer_;
         rp_info.renderArea.offset = {0, 0};
-        rp_info.renderArea.extent = {dir_res_, dir_res_};
+        rp_info.renderArea.extent = {dir_atlas_width(), dir_atlas_height()};
         rp_info.clearValueCount   = 1;
         rp_info.pClearValues      = &clear_value;
 
         vkCmdBeginRenderPass(cmd.handle(), &rp_info, VK_SUBPASS_CONTENTS_INLINE);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(dir_res_), static_cast<float>(dir_res_));
-        cmd.set_scissor(0, 0, dir_res_, dir_res_);
+        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(dir_atlas_width()),
+                         static_cast<float>(dir_atlas_height()));
+        cmd.set_scissor(0, 0, dir_atlas_width(), dir_atlas_height());
+    }
+
+    /**
+     * @brief Restricts subsequent draws to cascade `index`'s tile of the open atlas pass.
+     *
+     * Pure dynamic viewport/scissor state -- the directional shadow pipeline already
+     * declares both dynamic (begin_directional_pass sets them), so a cascade needs no
+     * pipeline variant and no second render pass.
+     *
+     * @param cmd   Command buffer inside begin_directional_pass()/end_directional_pass().
+     * @param index Cascade index; clamped to the live cascade count.
+     */
+    void set_cascade_viewport(command::CommandBuffer& cmd, uint32_t index) const {
+        const uint32_t i = std::min(index, dir_cascades_ - 1u);
+        const uint32_t x = (i % dir_grid_.first) * dir_res_;
+        const uint32_t y = (i / dir_grid_.first) * dir_res_;
+        cmd.set_viewport(static_cast<float>(x), static_cast<float>(y),
+                         static_cast<float>(dir_res_), static_cast<float>(dir_res_));
+        cmd.set_scissor(static_cast<int32_t>(x), static_cast<int32_t>(y), dir_res_, dir_res_);
     }
 
     void end_directional_pass(command::CommandBuffer& cmd) const {
@@ -270,6 +325,13 @@ public:
 
     // --- Accessors ---
 
+    /// Cascades this atlas holds; 1 means a plain single shadow map.
+    uint32_t dir_cascade_count() const { return dir_cascades_; }
+    /// Edge length of one cascade TILE in texels -- what the per-cascade ortho fit snaps to.
+    uint32_t dir_tile_resolution() const { return dir_res_; }
+    uint32_t dir_atlas_width() const { return dir_res_ * dir_grid_.first; }
+    uint32_t dir_atlas_height() const { return dir_res_ * dir_grid_.second; }
+
     VkImageView dir_shadow_view() const { return dir_depth_image_->view(); }
     VkImageView cube_shadow_view() const { return cube_array_view_; }
     VkImageView spot_shadow_view() const { return spot_depth_image_->view(); }
@@ -284,9 +346,10 @@ public:
 
 private:
     void create_resources_() {
-        // 1. Directional Depth Image (2D)
+        // 1. Directional Depth Atlas (2D) -- dir_cascades_ tiles of dir_res_ in a
+        //    dir_grid_ layout; one cascade makes this exactly a dir_res_ square map.
         dir_depth_image_ = std::make_unique<memory::Image>(
-            device_, allocator_, dir_res_, dir_res_,
+            device_, allocator_, dir_atlas_width(), dir_atlas_height(),
             VK_FORMAT_D32_SFLOAT,
             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             VK_IMAGE_ASPECT_DEPTH_BIT
@@ -306,8 +369,8 @@ private:
         fb_info.renderPass      = dir_render_pass_->handle();
         fb_info.attachmentCount = 1;
         fb_info.pAttachments    = &dir_view;
-        fb_info.width           = dir_res_;
-        fb_info.height          = dir_res_;
+        fb_info.width           = dir_atlas_width();
+        fb_info.height          = dir_atlas_height();
         fb_info.layers          = 1;
         GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb_info, nullptr, &dir_framebuffer_));
 
@@ -433,9 +496,11 @@ private:
 
     core::Device&      device_;
     memory::Allocator& allocator_;
-    uint32_t           dir_res_;
+    uint32_t           dir_res_;   ///< One cascade TILE's edge, not the atlas edge.
     uint32_t           cube_res_;
     uint32_t           spot_res_;
+    uint32_t           dir_cascades_ = 1;
+    std::pair<uint32_t, uint32_t> dir_grid_{1u, 1u}; ///< Tiles per row, rows.
 
     std::unique_ptr<memory::Image>        dir_depth_image_;
     std::unique_ptr<pipeline::RenderPass> dir_render_pass_;

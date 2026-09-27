@@ -79,14 +79,23 @@ public:
     };
 
     struct ResolvePushConstants {
-        glm::mat4 prev_view_proj;   // offset 0  (mat4 must be 16-byte aligned; put it first)
-        glm::vec2 resolution;       // offset 64
-        float     blend_factor;     // offset 72
-        int       history_valid;    // offset 76
-        float     gamma = 1.0f;     // offset 80 -- variance-clipping width, in std deviations
+        // Current clip space -> previous frame's clip space. mat4 must be 16-byte aligned, so it
+        // goes first; vec2 is flattened to two floats below, matching SsaoPass's own house rule.
+        glm::mat4 reproject;        // offset 0
+        float     resolution_x;     // offset 64
+        float     resolution_y;     // offset 68
+        // Accumulation cap for the chain being resolved -- the specular and diffuse chains share
+        // one count buffer and clamp it to different depths. 0 makes the resolve a passthrough.
+        float     max_accum;        // offset 72
+        // Fallback fixed-rate history weight, used only where the shared count buffer is
+        // unavailable (the 1x1 neutral texture).
+        float     blend_factor;     // offset 76
+        int       history_valid;    // offset 80
+        float     gamma = 1.0f;     // offset 84 -- variance-clipping width, in std deviations
                                      // (ssr_temporal_gamma); see ssr_resolve.frag's own doc
-    };                              // 84 bytes
-    static_assert(sizeof(ResolvePushConstants) == 84, "ssr_resolve.frag's PushConstants block must match this layout byte-for-byte");
+        int       frozen = 0;       // offset 88 -- hold accepted history verbatim (still camera)
+    };                              // 92 bytes
+    static_assert(sizeof(ResolvePushConstants) == 92, "ssr_resolve.frag's PushConstants block must match this layout byte-for-byte");
 
     /// Union layout shared with the composite's GLSL push-constant block, so
     /// every consumer's ssr_composite.frag -- whatever else it does -- reads
@@ -140,15 +149,34 @@ public:
         float jitter_strength  = 0.0f;
         int   frame_index      = 0;
         bool  temporal_enabled = true;
+        // Accumulation depth of the specular chain's temporal resolve: each pixel averages this
+        // many frames of the jittered trace (frame N blended at 1/N against the shared count
+        // TemporalHistoryPass publishes) before the running mean becomes a fixed-rate blend.
+        int   temporal_frames  = 32;
+        // Same, for the traced-SSGI chain. Deeper by default: one cosine-hemisphere ray has far
+        // higher variance than a near-mirror reflection ray.
+        int   ssgi_temporal_frames = 48;
+        // Fallback fixed-rate history weight, used only where the shared count buffer is
+        // unavailable (see set_temporal_count_image() -- a consumer that never calls it).
         float temporal_blend   = 0.85f;
         // Variance-clipping gamma for the temporal resolve's history rejection (see
         // ResolvePushConstants' own doc) -- widens or tightens the accepted history band as a
         // multiple of the 3x3 neighbourhood's standard deviation.
         float temporal_gamma   = 1.0f;
-        // Reprojection: previous frame's JITTERED proj * view, and whether it (and the history
-        // buffer) actually exist yet. False for the first two frames and right after a resize.
-        glm::mat4 prev_view_proj       = glm::mat4(1.0f);
-        bool      prev_view_proj_valid = false;
+        // True once the camera has been still long enough for the accumulated average to top up;
+        // the resolve then holds accepted history verbatim, which is what makes a resting image
+        // byte-static. Same signal SsaoPass::Params::frozen carries.
+        bool  temporal_frozen  = false;
+        // Reprojection: current clip space -> previous frame's clip space, composed in DOUBLE
+        // precision by the caller (glm::dmat4(prev_view_proj) * glm::inverse(glm::dmat4(proj) *
+        // glm::dmat4(view))) before truncating to float. World-scale magnitudes cancel inside the
+        // double product; a float composition -- or the RGBA16F G-buffer position this replaces --
+        // drifts by whole pixels at scene scales of a few hundred units, which made the
+        // accumulated reflection slide and boil against the geometry in motion. Same scheme
+        // SsaoPass::Params::reproject and TaaPass use. reproject_valid says whether it (and the
+        // history buffer) exist yet -- false for the first two frames and right after a resize.
+        glm::mat4 reproject       = glm::mat4(1.0f);
+        bool      reproject_valid = false;
         // Indirect-specular/SSGI terms fed straight into CompositePushConstants -- see that
         // struct's doc. sky_intensity must match whatever the lighting pass used for the same
         // frame; ssgi_intensity 0 (the default) makes the diffuse-bounce term a no-op for
@@ -388,14 +416,20 @@ public:
                 .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
                 .build(device));
 
-        // Resolve pass layout: 0 = current raymarch output, 1 = history, 2 = G2 world position
-        // (the reprojection source -- G2 already stores world position, so no motion-vector
-        // attachment is needed anywhere in the engine).
+        // Resolve pass layout: 0 = current raymarch output, 1 = history, 2 = the rasterized scene
+        // depth the reprojection reconstructs this pixel's clip position from, 3 = the shared
+        // per-pixel accumulation count (see set_temporal_count_image(), which also explains the
+        // permanent neutral fallback binding 3 starts out holding).
+        //
+        // Depth, NOT the G-buffer world position this binding used to hold: G2 is RGBA16F, and at
+        // world coordinates of a few hundred units its quantization alone is multiple pixels of
+        // reprojection error. See ssr_resolve.frag's file doc.
         resolve_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
                 .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(3, coopa::gfx::ShaderStage::Fragment)
                 .build(device));
 
         // 4. Descriptor Pool -- sizes derived from the layouts above (10 sets, 11 when
@@ -472,6 +506,14 @@ public:
         secondary_gbuf2_set_->bind_image(1, zero_rgba_->view_typed(), *neutral_sampler_);
         hiz_b_set_->bind_image(0, one_r32_->view_typed(), *neutral_sampler_);
         scene_color_b_set_->bind_image(0, zero_rgba_->view_typed(), *neutral_sampler_);
+        // Resolve binding 3 (the shared accumulation count) starts on the same all-zero fallback:
+        // a zero count is ssr_resolve.frag's "no count buffer" sentinel, which selects the
+        // fixed-rate blend_factor path. A consumer that wants the converging average calls
+        // set_temporal_count_image().
+        resolve_set_->bind_image(3, zero_rgba_->view_typed(), *neutral_sampler_);
+        if (ssgi_enabled_) {
+            ssgi_resolve_set_->bind_image(3, zero_rgba_->view_typed(), *neutral_sampler_);
+        }
 
         // 5. SSR Pipeline Creation
         coopa::gfx::pipeline::PipelineDesc common_desc;
@@ -604,14 +646,16 @@ public:
         scene_color_set_->bind_image(0, scene_color_mip_view, scene_color_mip_sampler);
 
         // Temporal resolve descriptors: current frame's raw raymarch output + last frame's
-        // resolved history + G2 (the reprojection source). The current buffer is still sampled
-        // at texel-centered in_uv, so nearest_sampler_ avoids implying this HDR data buffer
-        // should ever be blurred.
+        // resolved history + the rasterized scene depth the reprojection reconstructs from. The
+        // current buffer is still sampled at texel-centered in_uv, so nearest_sampler_ avoids
+        // implying this HDR data buffer should ever be blurred.
         resolve_set_->bind_image(0, target_->color_view_typed(), *nearest_sampler_);
         // LINEAR, not nearest: reprojected UVs are no longer texel-centred, and point-sampling
         // them makes the accumulated reflection stair-step and crawl under camera motion.
         resolve_set_->bind_image(1, history_image_->view_typed(), linear_sampler);
-        resolve_set_->bind_image(2, gbuffer.g2_view_typed(), *nearest_sampler_);
+        // NEAREST is mandatory, not a preference: D32_SFLOAT is not guaranteed to support linear
+        // filtering, and a blended depth would reproject to a point on no real surface anyway.
+        resolve_set_->bind_image(2, gbuffer.depth_view_typed(), *nearest_sampler_);
 
         // SSR Composite descriptors
         comp_gbuf3_set_->bind_image(0, gbuffer.g0_view_typed(), linear_sampler);
@@ -654,7 +698,7 @@ public:
         if (ssgi_enabled_) {
             ssgi_resolve_set_->bind_image(0, ssgi_target_->color_view_typed(), *nearest_sampler_);
             ssgi_resolve_set_->bind_image(1, ssgi_history_image_->view_typed(), linear_sampler);
-            ssgi_resolve_set_->bind_image(2, gbuffer.g2_view_typed(), *nearest_sampler_);
+            ssgi_resolve_set_->bind_image(2, gbuffer.depth_view_typed(), *nearest_sampler_);
             if (blur_enabled_) {
                 ssgi_blur_set_->bind_image(0, ssgi_resolved_target_->color_view_typed(), *nearest_sampler_);
                 ssgi_blur_set_->bind_image(1, gbuffer.g1_view_typed(), *nearest_sampler_);
@@ -669,6 +713,23 @@ public:
     /// passes always attenuate indirect specular by the identical ao * ssao term.
     void set_ssao_image(VkImageView ssao_view, VkSampler ssao_sampler) {
         comp_gbuf3_set_->bind_image(3, ssao_view, ssao_sampler);
+    }
+
+    /// Points both resolve chains at the shared per-pixel accumulation count
+    /// (TemporalHistoryPass's output), which is what turns their temporal blend from a fixed-rate
+    /// exponential -- incapable of converging on a per-frame-rejittered trace -- into a running
+    /// average over `Params::temporal_frames` draws.
+    ///
+    /// Optional, like set_secondary_source(): the constructor leaves binding 3 on a permanent
+    /// all-zero 1x1 texture, and a zero count is ssr_resolve.frag's sentinel for "no count buffer
+    /// here", which selects the Params::temporal_blend path instead. A consumer with no
+    /// TemporalHistoryPass never needs to call this. Bound once at setup, like
+    /// update_descriptors(): the image identity is stable, only its contents change per frame.
+    void set_temporal_count_image(coopa::gfx::TextureView count_view, const util::Sampler& count_sampler) {
+        resolve_set_->bind_image(3, count_view, count_sampler);
+        if (ssgi_enabled_) {
+            ssgi_resolve_set_->bind_image(3, count_view, count_sampler);
+        }
     }
 
     /// Points the raymarch's secondary source (sets 4-6, see gfx/ssr_trace_secondary_body.glsl)
@@ -758,7 +819,14 @@ public:
         pc.min_mip0_steps   = params.min_mip0_steps;
         pc.max_color_mip    = params.max_color_mip;
         pc.jitter_strength  = params.jitter_strength;
-        pc.frame_index      = params.frame_index;
+        // 0 when there is no temporal accumulation running. Every stochastic term in the two
+        // traces re-seeds from this -- ssr.frag's GGX ray jitter AND ssgi.frag's cosine
+        // hemisphere direction, which samples from it unconditionally, not only when
+        // jitter_strength is nonzero. Advancing it without an accumulator downstream is pure
+        // per-frame noise with nothing left to integrate it, so a consumer running the resolves
+        // as passthroughs (an A/B capture) would see an image that never repeats. Same rule
+        // SsaoPass applies to its own noise_rotation, for the same reason.
+        pc.frame_index      = params.temporal_enabled ? params.frame_index : 0;
         pc.has_secondary    = params.has_secondary ? 1.0f : 0.0f;
         pc.max_hiz_mip_b    = params.max_hiz_mip_b;
         pc.max_color_mip_b  = params.max_color_mip_b;
@@ -787,15 +855,20 @@ public:
         cmd.set_scissor(0, 0, trace_width_, trace_height_);
 
         ResolvePushConstants rpc{};
-        rpc.prev_view_proj = params.prev_view_proj;
-        rpc.resolution     = glm::vec2(static_cast<float>(trace_width_), static_cast<float>(trace_height_));
-        rpc.blend_factor   = params.temporal_enabled ? params.temporal_blend : 0.0f;
-        // Both a history IMAGE (history_initialized_) and a previous view-projection MATRIX
-        // (prev_view_proj_valid) must exist -- the matrix lags a frame behind the image on a
-        // fresh start (frames 0 and 1), so ANDing them is what keeps the very first reprojected
-        // sample from reading a stale/identity prev_view_proj.
-        rpc.history_valid = (history_initialized_ && params.prev_view_proj_valid) ? 1 : 0;
+        rpc.reproject    = params.reproject;
+        rpc.resolution_x = static_cast<float>(trace_width_);
+        rpc.resolution_y = static_cast<float>(trace_height_);
+        // 0 makes the resolve a passthrough of the current frame -- one code path, no branching
+        // pipeline structure, matching how SsaoPass expresses the same toggle.
+        rpc.max_accum    = params.temporal_enabled ? static_cast<float>(params.temporal_frames) : 0.0f;
+        rpc.blend_factor = params.temporal_enabled ? params.temporal_blend : 0.0f;
+        // Both a history IMAGE (history_initialized_) and a reprojection MATRIX (reproject_valid)
+        // must exist -- the matrix lags a frame behind the image on a fresh start (frames 0 and
+        // 1), so ANDing them is what keeps the very first reprojected sample from reading a
+        // stale/identity matrix.
+        rpc.history_valid = (history_initialized_ && params.reproject_valid) ? 1 : 0;
         rpc.gamma         = params.temporal_gamma;
+        rpc.frozen        = params.temporal_frozen ? 1 : 0;
 
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, rpc);
         cmd.bind_descriptor_set(*resolve_set_, 0);
@@ -854,7 +927,14 @@ public:
             cmd.bind_pipeline(*resolve_pipeline_);
             cmd.set_viewport(0.0f, 0.0f, static_cast<float>(trace_width_), static_cast<float>(trace_height_));
             cmd.set_scissor(0, 0, trace_width_, trace_height_);
-            cmd.push_constants(coopa::gfx::ShaderStage::Fragment, rpc);
+            // Same push block as the specular resolve above with only the accumulation depth
+            // swapped: the bounce averages deeper, since one cosine-hemisphere ray carries far
+            // more variance than a near-mirror reflection ray. Both clamp the SAME shared count
+            // buffer, which is why one buffer can serve two schedules.
+            ResolvePushConstants gi_rpc = rpc;
+            gi_rpc.max_accum = params.temporal_enabled
+                ? static_cast<float>(params.ssgi_temporal_frames) : 0.0f;
+            cmd.push_constants(coopa::gfx::ShaderStage::Fragment, gi_rpc);
             cmd.bind_descriptor_set(*ssgi_resolve_set_, 0);
             cmd.draw(3);
             ssgi_resolved_target_->end(cmd);
@@ -921,6 +1001,31 @@ public:
     VkImageView output_view() const { return composite_target_->color_view(); }
     coopa::gfx::TextureView output_view_typed() const { return composite_target_->color_view_typed(); }
     targets::OffscreenTarget& composite_target() { return *composite_target_; }
+
+    /// @brief The resolved reflection buffer the composite reads (post spatial-denoise
+    /// blur when enabled, matching comp_raw_ssr_set_'s own choice above) -- for a caller
+    /// that wants to inspect the reflection term itself rather than the finished
+    /// scene-colour-plus-reflection composite output_view() returns.
+    coopa::gfx::TextureView reflection_view_typed() const {
+        return blur_enabled_ ? blurred_target_->color_view_typed() : resolved_target_->color_view_typed();
+    }
+
+    /// @brief The resolved traced-SSGI bounce buffer (post spatial-denoise blur when
+    /// enabled), or a 1x1 neutral zero texture when this instance has no SSGI stage
+    /// (ssgi_enabled_ false) -- the same fallback comp_scene_color_set_'s own SSGI
+    /// binding uses, so a caller never binds a descriptor still in VK_IMAGE_LAYOUT_UNDEFINED.
+    coopa::gfx::TextureView ssgi_view_typed() const {
+        if (!ssgi_enabled_) return zero_rgba_->view_typed();
+        return blur_enabled_ ? ssgi_blurred_target_->color_view_typed() : ssgi_resolved_target_->color_view_typed();
+    }
+
+    /// @brief The same 1x1 neutral zero texture ssgi_view_typed() falls back to when this
+    /// instance has no SSGI stage -- exposed unconditionally for a caller (e.g. a debug
+    /// view) that needs a safe fallback for reflection_view_typed()/ssgi_view_typed() too
+    /// on a frame where execute() never runs at all (this pass is always CONSTRUCTED, per
+    /// this class's own file doc, but its targets only leave VK_IMAGE_LAYOUT_UNDEFINED
+    /// once execute() has run at least once).
+    coopa::gfx::TextureView zero_view_typed() const { return zero_rgba_->view_typed(); }
 
 private:
     /// NEAREST + ClampToEdge, matching the raw ctor's default mipmap_mode (NEAREST) too -- see

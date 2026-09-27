@@ -66,6 +66,7 @@ inline VkFormat to_vk(Format f) {
         case Format::BGRA8_Unorm:        return VK_FORMAT_B8G8R8A8_UNORM;
         case Format::BGRA8_Srgb:         return VK_FORMAT_B8G8R8A8_SRGB;
         case Format::R16_Sfloat:         return VK_FORMAT_R16_SFLOAT;
+        case Format::RG16_Sfloat:        return VK_FORMAT_R16G16_SFLOAT;
         case Format::RGBA16_Sfloat:      return VK_FORMAT_R16G16B16A16_SFLOAT;
         case Format::A2B10G10R10_Unorm:  return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
         case Format::R32_Sfloat:         return VK_FORMAT_R32_SFLOAT;
@@ -94,6 +95,7 @@ inline Format from_vk(VkFormat f) {
         case VK_FORMAT_B8G8R8A8_UNORM:             return Format::BGRA8_Unorm;
         case VK_FORMAT_B8G8R8A8_SRGB:              return Format::BGRA8_Srgb;
         case VK_FORMAT_R16_SFLOAT:                 return Format::R16_Sfloat;
+        case VK_FORMAT_R16G16_SFLOAT:              return Format::RG16_Sfloat;
         case VK_FORMAT_R16G16B16A16_SFLOAT:        return Format::RGBA16_Sfloat;
         case VK_FORMAT_A2B10G10R10_UNORM_PACK32:   return Format::A2B10G10R10_Unorm;
         case VK_FORMAT_R32_SFLOAT:                 return Format::R32_Sfloat;

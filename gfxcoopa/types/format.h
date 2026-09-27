@@ -35,6 +35,7 @@ enum class Format : uint16_t {
     BGRA8_Srgb,
 
     R16_Sfloat,
+    RG16_Sfloat,
     RGBA16_Sfloat,
     A2B10G10R10_Unorm,
 
@@ -92,6 +93,7 @@ inline uint32_t format_byte_size(Format format) {
         case Format::BGRA8_Srgb:
         case Format::A2B10G10R10_Unorm:    return 4;
         case Format::R16_Sfloat:           return 2;
+        case Format::RG16_Sfloat:          return 4;
         case Format::RGBA16_Sfloat:        return 8;
         case Format::R32_Sfloat:
         case Format::R32_Uint:             return 4;

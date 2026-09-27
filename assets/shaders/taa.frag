@@ -1,5 +1,7 @@
 #version 450
 
+#include <gfx/ycocg.glsl>
+
 // Temporal anti-aliasing resolve.
 //
 // Inputs are the post-processed LDR scene (sRGB-encoded bytes, rasterised with this frame's
@@ -43,22 +45,6 @@ const float kMaxAge = 255.0;
 // visible for a much shorter post-stop settle tail (the image_settles_after_camera_stops
 // contract). Self-limiting under motion: the motion-side age cap still applies first.
 const float kRestAgeBoost = 15.0;
-
-// ---------------------------------------------------------------------------
-// RGB <-> YCoCg. Neighbourhood statistics are taken in YCoCg: its luma/chroma
-// separation makes the variance box tighter than an RGB box around the same
-// samples, so the clip rejects ghosts sooner without eating real detail.
-// ---------------------------------------------------------------------------
-
-vec3 rgb_to_ycocg(vec3 c) {
-    return vec3( 0.25 * c.r + 0.50 * c.g + 0.25 * c.b,
-                 0.50 * c.r               - 0.50 * c.b,
-                -0.25 * c.r + 0.50 * c.g - 0.25 * c.b);
-}
-
-vec3 ycocg_to_rgb(vec3 c) {
-    return vec3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
-}
 
 // NDC xy <-> UV, matching ssr_common.glsl's convention (Y flips between the two spaces).
 vec2 ndc_to_uv(vec2 ndc) { return vec2(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5); }
@@ -130,9 +116,9 @@ void main() {
     vec3 s7 = textureOffset(tex_scene, frag_uv, ivec2( 0, -1)).rgb;
     vec3 s8 = textureOffset(tex_scene, frag_uv, ivec2( 1, -1)).rgb;
 
-    vec3 y0 = rgb_to_ycocg(s0), y1 = rgb_to_ycocg(s1), y2 = rgb_to_ycocg(s2);
-    vec3 y3 = rgb_to_ycocg(s3), y4 = rgb_to_ycocg(s4), y5 = rgb_to_ycocg(s5);
-    vec3 y6 = rgb_to_ycocg(s6), y7 = rgb_to_ycocg(s7), y8 = rgb_to_ycocg(s8);
+    vec3 y0 = gfx_rgb_to_ycocg(s0), y1 = gfx_rgb_to_ycocg(s1), y2 = gfx_rgb_to_ycocg(s2);
+    vec3 y3 = gfx_rgb_to_ycocg(s3), y4 = gfx_rgb_to_ycocg(s4), y5 = gfx_rgb_to_ycocg(s5);
+    vec3 y6 = gfx_rgb_to_ycocg(s6), y7 = gfx_rgb_to_ycocg(s7), y8 = gfx_rgb_to_ycocg(s8);
 
     vec3 m1 = y0 + y1 + y2 + y3 + y4 + y5 + y6 + y7 + y8;
     vec3 m2 = y0*y0 + y1*y1 + y2*y2 + y3*y3 + y4*y4 + y5*y5 + y6*y6 + y7*y7 + y8*y8;
@@ -229,9 +215,9 @@ void main() {
     // Two 8-bit LSB covers the quantisation band real convergence sits inside.
     float clip_units;
     vec3 extent        = gamma * sigma + vec3(2.0 / 255.0);
-    vec3 hist_ycocg    = rgb_to_ycocg(history.rgb);
+    vec3 hist_ycocg    = gfx_rgb_to_ycocg(history.rgb);
     vec3 clipped_ycocg = clip_to_aabb(mean, extent, hist_ycocg, clip_units);
-    vec3 clipped_rgb   = ycocg_to_rgb(clipped_ycocg);
+    vec3 clipped_rgb   = gfx_ycocg_to_rgb(clipped_ycocg);
 
     // Age: how many frames this pixel's accumulation has been valid. Blending at
     // 1/(age+1) makes the still-camera path a TRUE running average -- its increments shrink
