@@ -790,8 +790,15 @@ void test_context() {
 
     app::Context ctx(config);
 
+#ifdef __APPLE__
+    // Retina: the swapchain is sized in framebuffer pixels, an integer multiple
+    // (the backing scale factor) of the 320x240 window points requested.
+    ASSERT_TRUE(ctx.extent().width % 320 == 0 && ctx.extent().width >= 320);
+    ASSERT_TRUE(ctx.extent().height * 320 == ctx.extent().width * 240);
+#else
     ASSERT_TRUE(ctx.extent().width == 320);
     ASSERT_TRUE(ctx.extent().height == 240);
+#endif
     ASSERT_TRUE(ctx.color_format() != Format::Undefined);
     ASSERT_EQ(ctx.frames_in_flight(), presentation::MAX_FRAMES_IN_FLIGHT);
     ASSERT_TRUE(!ctx.should_close());

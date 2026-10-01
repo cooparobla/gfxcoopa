@@ -27,6 +27,10 @@
 
 #include <gfxcoopa/detail/glfw_keys.h>
 
+#ifdef __APPLE__
+#include <gfxcoopa/util/volk_init.h>
+#endif
+
 namespace coopa {
 namespace gfx {
 namespace presentation {
@@ -78,6 +82,12 @@ public:
         // gfx::app::Context's own -- verified this crashes without the
         // refcount: the second Window's teardown otherwise invalidates the
         // first, which then segfaults on its next GLFW call).
+#ifdef __APPLE__
+        // macOS: glfwInitVulkanLoader() must run before glfwInit(), so the
+        // loader is resolved here rather than first in Instance -- see
+        // util::ensure_volk_initialized().
+        util::ensure_volk_initialized();
+#endif
         if (!glfwInit()) {
             throw std::runtime_error("[gfxcoopa] glfwInit() failed.");
         }
@@ -118,6 +128,9 @@ public:
         // reports a zero delta rather than jumping from (0, 0).
         double init_x = 0.0, init_y = 0.0;
         glfwGetCursorPos(window_, &init_x, &init_y);
+#ifdef __APPLE__
+        to_framebuffer_coords_(window_, init_x, init_y);
+#endif
         input_.push_cursor_position(init_x, init_y);
     }
 
@@ -258,6 +271,9 @@ private:
         }
 
         void set_cursor_position(double x, double y) override {
+#ifdef __APPLE__
+            to_window_coords_(owner->window_, x, y);
+#endif
             glfwSetCursorPos(owner->window_, x, y);
         }
 
@@ -328,9 +344,38 @@ private:
     static void cursor_pos_callback(GLFWwindow* window, double xpos, double ypos) {
         auto* self = reinterpret_cast<Window*>(glfwGetWindowUserPointer(window));
         if (self) {
+#ifdef __APPLE__
+            to_framebuffer_coords_(window, xpos, ypos);
+#endif
             self->input_.push_cursor_position(xpos, ypos);
         }
     }
+
+#ifdef __APPLE__
+    // Retina: GLFW reports cursor positions in window points, but the swapchain
+    // (and therefore every consumer's letterbox / UI / picking maths) is sized in
+    // framebuffer pixels. Convert at the boundary so Input speaks pixels, the
+    // same unit it already speaks on a 1:1 Linux display.
+    static void cursor_scale_(GLFWwindow* window, double& sx, double& sy) {
+        int ww = 0, wh = 0, fw = 0, fh = 0;
+        glfwGetWindowSize(window, &ww, &wh);
+        glfwGetFramebufferSize(window, &fw, &fh);
+        sx = (ww > 0 && fw > 0) ? static_cast<double>(fw) / ww : 1.0;
+        sy = (wh > 0 && fh > 0) ? static_cast<double>(fh) / wh : 1.0;
+    }
+    static void to_framebuffer_coords_(GLFWwindow* window, double& x, double& y) {
+        double sx, sy;
+        cursor_scale_(window, sx, sy);
+        x *= sx;
+        y *= sy;
+    }
+    static void to_window_coords_(GLFWwindow* window, double& x, double& y) {
+        double sx, sy;
+        cursor_scale_(window, sx, sy);
+        x /= sx;
+        y /= sy;
+    }
+#endif
 
     /// @brief GLFW cursor-enter/leave callback. Forwarded straight into Input.
     static void cursor_enter_callback(GLFWwindow* window, int entered) {

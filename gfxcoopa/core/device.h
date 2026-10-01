@@ -300,15 +300,58 @@ private:
         VkPhysicalDeviceFeatures features{};
         features.samplerAnisotropy = VK_TRUE; // Enable anisotropic filtering
 
-        const char* extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        std::vector<const char*> extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+
+        // The spec requires enabling VK_KHR_portability_subset whenever a device
+        // advertises it (MoltenVK on macOS does; native drivers never do). Named
+        // by string: its macro lives in vulkan_beta.h behind VK_ENABLE_BETA_EXTENSIONS.
+        //
+        // Its feature struct is likewise beta-only, so it is mirrored here (layout
+        // identical to VkPhysicalDevicePortabilitySubsetFeaturesKHR). Every feature
+        // the device reports is enabled -- notably mutableComparisonSamplers, which
+        // the shadow passes' compare samplers require.
+        struct PortabilitySubsetFeatures {
+            // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR (also beta-guarded).
+            VkStructureType sType = static_cast<VkStructureType>(1000163000);
+            void*           pNext = nullptr;
+            VkBool32        flags[15] = {}; // constantAlphaColorBlendFactors .. vertexAttributeAccessBeyondStride
+        } portability_features;
+        bool has_portability_subset = false;
+        {
+            const char* k_portability_subset = "VK_KHR_portability_subset";
+            uint32_t count = 0;
+            vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &count, nullptr);
+            std::vector<VkExtensionProperties> available(count);
+            vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &count, available.data());
+            for (const auto& ext : available) {
+                if (std::strcmp(ext.extensionName, k_portability_subset) == 0) {
+                    extensions.push_back(k_portability_subset);
+                    has_portability_subset = true;
+                    break;
+                }
+            }
+        }
+        if (has_portability_subset) {
+            PFN_vkGetPhysicalDeviceFeatures2 get_features2 = vkGetPhysicalDeviceFeatures2
+                ? vkGetPhysicalDeviceFeatures2 : vkGetPhysicalDeviceFeatures2KHR;
+            if (get_features2) {
+                VkPhysicalDeviceFeatures2 query{};
+                query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+                query.pNext = &portability_features;
+                get_features2(physical_device_, &query);
+            }
+        }
 
         VkDeviceCreateInfo create_info{};
         create_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         create_info.queueCreateInfoCount    = static_cast<uint32_t>(queue_infos.size());
         create_info.pQueueCreateInfos       = queue_infos.data();
-        create_info.enabledExtensionCount   = 1;
-        create_info.ppEnabledExtensionNames = extensions;
+        create_info.enabledExtensionCount   = static_cast<uint32_t>(extensions.size());
+        create_info.ppEnabledExtensionNames = extensions.data();
         create_info.pEnabledFeatures        = &features;
+        if (has_portability_subset) {
+            create_info.pNext = &portability_features;
+        }
 
         GFX_VK_CHECK(vkCreateDevice(physical_device_, &create_info, nullptr, &device_));
 

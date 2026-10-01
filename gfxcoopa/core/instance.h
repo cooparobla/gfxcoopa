@@ -71,11 +71,32 @@ public:
         // --- Extensions ---
         uint32_t glfw_ext_count = 0;
         const char** glfw_exts  = glfwGetRequiredInstanceExtensions(&glfw_ext_count);
+#ifdef __APPLE__
+        if (!glfw_exts) {
+            throw std::runtime_error(
+                "[gfxcoopa] glfwGetRequiredInstanceExtensions() returned none -- "
+                "GLFW could not find a Vulkan loader.");
+        }
+#endif
         std::vector<const char*> extensions(glfw_exts, glfw_exts + glfw_ext_count);
 
         if (enable_validation) {
             extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
         }
+
+        // Portability drivers (MoltenVK on macOS) are hidden by loaders >= 1.3.216
+        // unless the instance opts in. Apple-only: the loader advertises this
+        // extension on every platform, and native drivers don't need it.
+        VkInstanceCreateFlags instance_flags = 0;
+#ifdef __APPLE__
+        if (instance_extension_available(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
+            extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+            if (instance_extension_available(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
+                extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+            }
+            instance_flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+        }
+#endif
 
         // --- Validation layers ---
         const char* k_validation_layer = "VK_LAYER_KHRONOS_validation";
@@ -96,6 +117,7 @@ public:
         VkInstanceCreateInfo create_info{};
         create_info.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         create_info.pApplicationInfo        = &app_info;
+        create_info.flags                   = instance_flags;
         create_info.enabledExtensionCount   = static_cast<uint32_t>(extensions.size());
         create_info.ppEnabledExtensionNames = extensions.data();
         create_info.enabledLayerCount       = static_cast<uint32_t>(layers.size());
@@ -151,6 +173,23 @@ private:
 
         for (const auto& p : props) {
             if (std::strcmp(p.layerName, name) == 0) return true;
+        }
+        return false;
+    }
+
+    /**
+     * @brief Checks whether a given instance extension is available on this system.
+     * @param name Extension name string (e.g. "VK_KHR_portability_enumeration").
+     * @return True if the extension exists in the enumerated instance extension list.
+     */
+    static bool instance_extension_available(const char* name) {
+        uint32_t count = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+        std::vector<VkExtensionProperties> props(count);
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, props.data());
+
+        for (const auto& p : props) {
+            if (std::strcmp(p.extensionName, name) == 0) return true;
         }
         return false;
     }
