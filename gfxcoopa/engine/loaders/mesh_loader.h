@@ -26,6 +26,7 @@
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/engine/data/mesh.h>
 
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
@@ -46,24 +47,45 @@ namespace loaders {
  * auto mesh = assets.load<gfx::data::Mesh>("meshes/cube.000.yaml", ctx.scene_dir);
  * @endcode
  */
-class MeshLoader : public coopa::asset::TypedAssetLoader<data::Mesh, fkyaml::node> {
+class MeshLoader : public coopa::asset::TypedAssetLoader<data::Mesh, data::MeshCpuData> {
 public:
     MeshLoader(core::Device& device, memory::Allocator& allocator, command::CommandPool& cmd_pool)
         : device_(device), allocator_(allocator), cmd_pool_(cmd_pool) {}
 
-    std::shared_ptr<fkyaml::node> decode_typed(const coopa::asset::AssetId& id,
-                                               const coopa::asset::LoadContext& ctx) override {
-        std::ifstream ifs(ctx.resolved_path);
-        if (!ifs) {
+    /// Worker thread: parse, weld, optimize and build LODs (Mesh::build_cpu). A
+    /// `<mesh>.lod.yaml` sidecar next to the mesh file, when present, supplies the LOD setup
+    /// in place of the mesh's own `lods` block; a level's `mesh: name` resolves to
+    /// `name.yaml` in the same directory.
+    std::shared_ptr<data::MeshCpuData> decode_typed(const coopa::asset::AssetId& id,
+                                                    const coopa::asset::LoadContext& ctx) override {
+        auto read = [](const std::filesystem::path& path) -> std::shared_ptr<fkyaml::node> {
+            std::ifstream ifs(path);
+            if (!ifs) return nullptr;
+            return std::make_shared<fkyaml::node>(fkyaml::node::deserialize(ifs));
+        };
+        const std::filesystem::path path(ctx.resolved_path);
+        std::shared_ptr<fkyaml::node> node = read(path);
+        if (!node) {
             throw std::runtime_error("[MeshLoader] Failed to open '" + id.path() + "'");
         }
-        return std::make_shared<fkyaml::node>(fkyaml::node::deserialize(ifs));
+
+        std::filesystem::path sidecar = path;
+        sidecar.replace_extension(".lod.yaml");
+        std::shared_ptr<fkyaml::node> lod_cfg;
+        if (std::filesystem::exists(sidecar)) lod_cfg = read(sidecar);
+
+        const std::filesystem::path dir = path.parent_path();
+        auto load_sibling = [&read, &dir](const std::string& name) { return read(dir / (name + ".yaml")); };
+
+        return std::make_shared<data::MeshCpuData>(
+            data::Mesh::build_cpu(*node, lod_cfg.get(), load_sibling));
     }
 
-    std::shared_ptr<data::Mesh> finalize_typed(std::shared_ptr<fkyaml::node> node,
+    /// Main thread: upload only.
+    std::shared_ptr<data::Mesh> finalize_typed(std::shared_ptr<data::MeshCpuData> cpu,
                                                const coopa::asset::AssetId&,
                                                const coopa::asset::LoadContext&) override {
-        return std::make_shared<data::Mesh>(data::Mesh::from_node(device_, allocator_, cmd_pool_, *node));
+        return std::make_shared<data::Mesh>(data::Mesh::from_cpu(device_, allocator_, std::move(*cpu)));
     }
 
     const char* type_name() const override { return "Mesh"; }

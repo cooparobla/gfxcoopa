@@ -39,6 +39,8 @@ layout(set = 2, binding = 0) uniform sampler2D u_hiz_map;
 // Set 3: prefiltered scene-colour mip chain
 layout(set = 3, binding = 0) uniform sampler2D u_scene_color;
 
+// Only colour * confidence is used below, so a zero-weight ray may skip its march outright.
+#define GFX_SSR_SKIP_ZERO_WEIGHT
 #include <gfx/ssr_trace_body.glsl>
 
 // Same block as ssr.frag's (SsrPass pushes one SsrPushConstants struct for both

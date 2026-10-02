@@ -47,13 +47,13 @@ namespace passes {
  * Output is `kFormat` (RG16F): R carries the pixel's linear view distance (next frame's
  * surface-identity reference), G the count. See `temporal_history.frag` for the test itself.
  *
- * One render target plus one history image, copied at the end of every execute() the way
- * SsrPass manages its own reflection history. A ping-pong would save the copy (SsaoPass does
- * that for its resolve), but it costs every consumer a stable view to bind: descriptors here are
- * bound once at setup, because rebinding per frame is unsafe under an overlapped-frame pipeline,
- * and a consumer pinned to one of two alternating images would read a frame-stale count on half
- * the frames. A full-resolution RG16F copy is 4 MB of transfer; a correct, never-stale count is
- * worth more than that.
+ * Two render targets in ping-pong, the way SsaoPass keeps its resolve history: each frame
+ * draws into one while reading the other as last frame's reference, so no copy and no
+ * transfer barriers are needed. Descriptors are still bound once at setup -- rebinding per
+ * frame is unsafe under an overlapped-frame pipeline -- which is why every consumer binds BOTH
+ * images, one descriptor set per parity, and selects the set with current_parity() on each
+ * frame it records (SsrPass::Params::count_parity, for one). The pass itself does the same for
+ * its own history read.
  */
 class TemporalHistoryPass {
 public:
@@ -140,6 +140,7 @@ public:
             {1, coopa::gfx::DescriptorType::CombinedImageSampler, coopa::gfx::ShaderStage::Fragment, 1},
         }};
         sd.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
+        sd.instances = 2;   // one owned set per ping-pong parity (see recreate())
         stage_ = std::make_unique<FullscreenStage>(device, *render_pass_, sd);
     }
 
@@ -148,40 +149,44 @@ public:
     TemporalHistoryPass(const TemporalHistoryPass&) = delete;
     TemporalHistoryPass& operator=(const TemporalHistoryPass&) = delete;
 
-    /// Allocates (or reallocates) the target and its history image at the given resolution, and
-    /// binds the history read. A fresh pair on resize means counts accumulated at the old
-    /// resolution can never leak into the new one. The depth binding comes from
-    /// set_depth_image(), which every caller runs after this.
+    /// Allocates (or reallocates) the two ping-pong targets at the given resolution, and binds
+    /// each parity's history read (the other target). A fresh pair on resize means counts
+    /// accumulated at the old resolution can never leak into the new one. The depth binding
+    /// comes from set_depth_image(), which every caller runs after this.
     void recreate(uint32_t width, uint32_t height) {
         destroy_resources_();
         width_  = width;
         height_ = height;
 
-        create_target_();
-        history_image_ = std::make_unique<memory::Image>(
-            device_, allocator_, width_, height_, kFormat,
-            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT, VMA_MEMORY_USAGE_AUTO);
+        for (uint32_t i = 0; i < 2; ++i) create_target_(i);
         history_initialized_ = false;
+        write_parity_   = 0;
+        current_parity_ = 0;
 
-        // LINEAR: the history is read at a reprojected, non-texel-aligned UV. Filtering the
-        // stored distance across a silhouette is not a flaw here -- it makes the depth test
-        // reject exactly at the edge, which is where blended history would be wrong anyway.
-        stage_->set().bind_image(1, history_image_->view_typed(), *linear_sampler_);
+        // Parity i renders into target i and reads target 1-i as its history. LINEAR: the
+        // history is read at a reprojected, non-texel-aligned UV. Filtering the stored distance
+        // across a silhouette is not a flaw here -- it makes the depth test reject exactly at
+        // the edge, which is where blended history would be wrong anyway.
+        for (uint32_t i = 0; i < 2; ++i) {
+            stage_->set(0, i).bind_image(1, coopa::gfx::detail::wrap(views_[1 - i]), *linear_sampler_);
+        }
     }
 
     /// Points the pass at the live scene depth image (rebind after every resize). Depth must
     /// already be in SHADER_READ_ONLY_OPTIMAL by the time execute() records.
     void set_depth_image(coopa::gfx::TextureView depth_view) {
-        stage_->set().bind_image(0, depth_view, *nearest_sampler_);
+        for (uint32_t i = 0; i < 2; ++i) stage_->set(0, i).bind_image(0, depth_view, *nearest_sampler_);
     }
 
     void execute(command::CommandBuffer& cmd, const Params& params) {
-        // On the first frame (or right after a resize) the history image has never been written
-        // and sits in UNDEFINED; transition it before it is bound as a sampled image. The shader
-        // doesn't read it in that case (history_valid = 0), but the descriptor still needs a valid
-        // layout at draw time regardless of the runtime branch — identical reasoning to
-        // SsaoPass::execute()'s own check.
+        const uint32_t p = write_parity_;
+
+        // On the first frame (or right after a resize) this parity's history -- the OTHER
+        // target -- has never been rendered and sits in UNDEFINED; transition it before it is
+        // bound as a sampled image. The shader doesn't read it in that case (history_valid =
+        // 0), but the descriptor still needs a valid layout at draw time regardless of the
+        // runtime branch — identical reasoning to SsaoPass::execute()'s own check. The target
+        // being written needs nothing: its render pass starts from UNDEFINED every frame.
         if (!history_initialized_) {
             VkImageMemoryBarrier barrier{};
             barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -189,7 +194,7 @@ public:
             barrier.newLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
             barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image                           = history_image_->handle();
+            barrier.image                           = images_[1 - p];
             barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
             barrier.subresourceRange.levelCount     = 1;
             barrier.subresourceRange.layerCount     = 1;
@@ -207,14 +212,18 @@ public:
         VkRenderPassBeginInfo rp_info{};
         rp_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         rp_info.renderPass        = render_pass_->handle();
-        rp_info.framebuffer       = framebuffer_;
+        rp_info.framebuffer       = framebuffers_[p];
         rp_info.renderArea.offset = {0, 0};
         rp_info.renderArea.extent = {width_, height_};
         rp_info.clearValueCount   = 1;
         rp_info.pClearValues      = &clear;
 
+        // Last frame's consumers read this target; the render pass's entry dependency on
+        // COLOR_ATTACHMENT_OUTPUT orders their draws (every reader is a draw whose fragment
+        // reads precede its own colour output) ahead of this clear -- the same write-after-read
+        // argument SsaoPass::execute() makes for its ping-pong.
         vkCmdBeginRenderPass(cmd.handle(), &rp_info, VK_SUBPASS_CONTENTS_INLINE);
-        stage_->bind(cmd, width_, height_);
+        stage_->bind(cmd, width_, height_, p);
 
         PushConstants pc{};
         pc.reproject      = params.reproject;
@@ -241,7 +250,7 @@ public:
         barrier.newLayout                   = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.srcQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image                       = image_;
+        barrier.image                       = images_[p];
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         barrier.subresourceRange.levelCount = 1;
         barrier.subresourceRange.layerCount = 1;
@@ -251,13 +260,22 @@ public:
                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-        copy_history_(cmd);
+        current_parity_      = p;
+        write_parity_        = 1 - p;
         history_initialized_ = true;
     }
 
-    /// @brief The count buffer consumers sample. One image for the pass's whole lifetime (until
-    /// a recreate()), so a consumer binds it once at setup and always reads this frame's counts.
-    coopa::gfx::TextureView count_view_typed() const { return coopa::gfx::detail::wrap(view_); }
+    /// @brief The count buffer of one ping-pong parity. Both images live for the pass's whole
+    /// lifetime (until a recreate()), so a consumer binds each once at setup -- one descriptor
+    /// set per parity -- and selects by current_parity() on the frame it records.
+    coopa::gfx::TextureView count_view_typed(uint32_t parity) const {
+        return coopa::gfx::detail::wrap(views_[parity & 1]);
+    }
+
+    /// @brief Parity of the target the most recent execute() wrote -- the one holding THIS
+    /// frame's counts. Valid after execute(); consumers recorded later in the same frame select
+    /// their descriptor set with it.
+    uint32_t current_parity() const { return current_parity_; }
 
     /// @brief NEAREST/ClampToEdge sampler every consumer should read this buffer through — the
     /// count is discrete per-pixel data and must never be filtered.
@@ -282,7 +300,7 @@ private:
             device_, allocator_, cmd_pool, texel, 1, 1, coopa::gfx::Format::RG16_Sfloat, 4);
     }
 
-    void create_target_() {
+    void create_target_(uint32_t i) {
         VkImageCreateInfo img_info{};
         img_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         img_info.imageType     = VK_IMAGE_TYPE_2D;
@@ -292,106 +310,54 @@ private:
         img_info.arrayLayers   = 1;
         img_info.samples       = VK_SAMPLE_COUNT_1_BIT;
         img_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-        // TRANSFER_SRC too: copy_history_() reads this image into history_image_ every frame.
-        img_info.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-                               | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        img_info.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         img_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
         VmaAllocationCreateInfo alloc_info{};
         alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
 
-        GFX_VK_CHECK(vmaCreateImage(allocator_.handle(), &img_info, &alloc_info, &image_,
-                                    &allocation_, nullptr));
+        GFX_VK_CHECK(vmaCreateImage(allocator_.handle(), &img_info, &alloc_info, &images_[i],
+                                    &allocations_[i], nullptr));
 
         VkImageViewCreateInfo view_info{};
         view_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        view_info.image                           = image_;
+        view_info.image                           = images_[i];
         view_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
         view_info.format                          = kFormat;
         view_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
         view_info.subresourceRange.levelCount     = 1;
         view_info.subresourceRange.layerCount     = 1;
 
-        GFX_VK_CHECK(vkCreateImageView(device_.handle(), &view_info, nullptr, &view_));
+        GFX_VK_CHECK(vkCreateImageView(device_.handle(), &view_info, nullptr, &views_[i]));
 
         VkFramebufferCreateInfo fb_info{};
         fb_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         fb_info.renderPass      = render_pass_->handle();
         fb_info.attachmentCount = 1;
-        fb_info.pAttachments    = &view_;
+        fb_info.pAttachments    = &views_[i];
         fb_info.width           = width_;
         fb_info.height          = height_;
         fb_info.layers          = 1;
 
-        GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb_info, nullptr, &framebuffer_));
-    }
-
-    /// Copies this frame's counts into the history image, so the next execute() has something to
-    /// reproject against. Structurally identical to SsrPass::copy_history_(), over one image pair.
-    void copy_history_(command::CommandBuffer& cmd) {
-        VkImageMemoryBarrier barriers[2]{};
-        for (uint32_t i = 0; i < 2; ++i) {
-            barriers[i].sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barriers[i].srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-            barriers[i].dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-            barriers[i].subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-            barriers[i].subresourceRange.levelCount     = 1;
-            barriers[i].subresourceRange.layerCount     = 1;
-        }
-        barriers[0].oldLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barriers[0].newLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barriers[0].image         = image_;
-        barriers[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        // Already SHADER_READ_ONLY_OPTIMAL: either from the one-time UNDEFINED transition at the
-        // top of execute() (first frame) or from the end of this same function last frame.
-        barriers[1].oldLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barriers[1].newLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barriers[1].image         = history_image_->handle();
-        barriers[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-        vkCmdPipelineBarrier(cmd.handle(), VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, barriers);
-
-        VkImageCopy copy{};
-        copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy.srcSubresource.layerCount = 1;
-        copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy.dstSubresource.layerCount = 1;
-        copy.extent                    = {width_, height_, 1};
-        vkCmdCopyImage(cmd.handle(), image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       history_image_->handle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-
-        barriers[0].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barriers[0].newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        barriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barriers[1].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barriers[1].newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-        vkCmdPipelineBarrier(cmd.handle(), VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, barriers);
+        GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb_info, nullptr, &framebuffers_[i]));
     }
 
     void destroy_resources_() {
-        if (framebuffer_ != VK_NULL_HANDLE) {
-            vkDestroyFramebuffer(device_.handle(), framebuffer_, nullptr);
-            framebuffer_ = VK_NULL_HANDLE;
+        for (uint32_t i = 0; i < 2; ++i) {
+            if (framebuffers_[i] != VK_NULL_HANDLE) {
+                vkDestroyFramebuffer(device_.handle(), framebuffers_[i], nullptr);
+                framebuffers_[i] = VK_NULL_HANDLE;
+            }
+            if (views_[i] != VK_NULL_HANDLE) {
+                vkDestroyImageView(device_.handle(), views_[i], nullptr);
+                views_[i] = VK_NULL_HANDLE;
+            }
+            if (images_[i] != VK_NULL_HANDLE) {
+                vmaDestroyImage(allocator_.handle(), images_[i], allocations_[i]);
+                images_[i]      = VK_NULL_HANDLE;
+                allocations_[i] = VK_NULL_HANDLE;
+            }
         }
-        if (view_ != VK_NULL_HANDLE) {
-            vkDestroyImageView(device_.handle(), view_, nullptr);
-            view_ = VK_NULL_HANDLE;
-        }
-        if (image_ != VK_NULL_HANDLE) {
-            vmaDestroyImage(allocator_.handle(), image_, allocation_);
-            image_      = VK_NULL_HANDLE;
-            allocation_ = VK_NULL_HANDLE;
-        }
-        // history_image_ (a memory::Image) releases its own view and allocation.
-        history_image_.reset();
     }
 
     core::Device&      device_;
@@ -400,14 +366,14 @@ private:
     uint32_t width_  = 0;
     uint32_t height_ = 0;
 
-    VkImage       image_       = VK_NULL_HANDLE;
-    VmaAllocation allocation_  = VK_NULL_HANDLE;
-    VkImageView   view_        = VK_NULL_HANDLE;
-    VkFramebuffer framebuffer_ = VK_NULL_HANDLE;
-
-    /// Last frame's copy of the target, the surface-identity reference the disocclusion test
-    /// reprojects onto.
-    std::unique_ptr<memory::Image> history_image_;
+    /// Ping-pong pair: parity p is written on a frame and read as history (the surface-identity
+    /// reference the disocclusion test reprojects onto) on the next.
+    VkImage       images_[2]       = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VmaAllocation allocations_[2]  = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkImageView   views_[2]        = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkFramebuffer framebuffers_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    uint32_t write_parity_   = 0;   ///< Target the next execute() renders into.
+    uint32_t current_parity_ = 0;   ///< Target the last execute() rendered into.
     bool history_initialized_ = false;
 
     std::unique_ptr<memory::Image>  neutral_image_;

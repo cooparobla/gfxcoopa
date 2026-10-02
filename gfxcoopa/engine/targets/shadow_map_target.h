@@ -330,6 +330,8 @@ public:
     /// Edge length of one cascade TILE in texels -- what the per-cascade ortho fit snaps to.
     uint32_t dir_tile_resolution() const { return dir_res_; }
     uint32_t dir_atlas_width() const { return dir_res_ * dir_grid_.first; }
+    /** @brief Cascade tiles per atlas row (cascade c sits at column c % this, row c / this). */
+    uint32_t dir_grid_columns() const { return dir_grid_.first; }
     uint32_t dir_atlas_height() const { return dir_res_ * dir_grid_.second; }
 
     VkImageView dir_shadow_view() const { return dir_depth_image_->view(); }

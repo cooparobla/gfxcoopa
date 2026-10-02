@@ -1,13 +1,16 @@
 /**
- * @file wind_pass.h
- * @brief Fullscreen volumetric wind composite (see assets/shaders/volumetrics.frag).
+ * @file volumetrics_pass.h
+ * @brief Raymarched LOCAL volumes (see assets/shaders/volumetrics_march.frag and
+ *        volumetrics_composite.frag).
  *
- * Structural copy of FogPass -- same two descriptor sets, same fullscreen
- * triangle, same G-buffer taps -- because the two passes differ only in their
- * fragment shader's middle (fog integrates analytically, wind raymarches). Like
- * FogPass, it writes into its own target: pipeline::RenderPass's hardcoded
- * LOAD_OP_CLEAR (gfxcoopa/pipeline/render_pass.h) means the target it reads
- * scene colour from can't be reopened and composited onto in place.
+ * Two fullscreen stages. The MARCH integrates the medium into a low-resolution
+ * target (rgb = in-scatter, a = transmittance) -- the expensive part, so it runs at
+ * a fraction of the render resolution. The COMPOSITE then upsamples that over the
+ * full-resolution scene colour with a depth-aware (joint-bilateral) filter, and
+ * applies the global fog term on the merged path. Like FogPass, the composite writes
+ * into its own target: pipeline::RenderPass's hardcoded LOAD_OP_CLEAR
+ * (gfxcoopa/pipeline/render_pass.h) means the target it reads scene colour from
+ * can't be reopened and composited onto in place.
  */
 
 #ifndef GFXCOOPA_ENGINE_PASSES_VOLUMETRICS_PASS_H
@@ -34,50 +37,56 @@ namespace passes {
 
 /**
  * @class VolumetricsPass
- * @brief Composites wind-driven volumetric scattering over a scene colour image.
+ * @brief Marches the local volumes at reduced resolution, then composites them over
+ *        a scene colour image at full resolution.
  *
- * Same shape as FogPass: scene colour plus G-buffer normal and position at set
- * 0, the caller's VolumetricsData UBO at set 1, writing into its own target.
+ * Usage: bind everything once at construction time (set_source_images,
+ * set_march_result, set_shadow_images), then per frame record draw_march() into the
+ * low-res target's render pass and draw_composite() into the full-res one.
  */
 class VolumetricsPass {
 public:
     /**
-     * @brief Builds the wind pipeline and its two descriptor sets.
-     * @param device      Logical device.
-     * @param target_pass Render pass of the (separate) HDR target this pass writes into.
-     * @param wind_ubo    The VolumetricsData's uniform buffer (see engine/data/wind_data.h). Bound
-     *                    once here, at set 1 binding 0 -- the buffer's VkBuffer handle never
-     *                    changes after creation, so only its per-frame upload() repeats.
-     * @param vert_spv    Fullscreen-triangle vertex shader (the shared fullscreen.vert).
-     * @param frag_spv    volumetrics.frag.
-     */
-    /**
-     * @param fog_ubo The FogData uniform buffer (engine/data/fog_data.h), for the
-     *                MERGED path where this pass also applies the global fog term
-     *                instead of reading an image FogPass already wrote it into --
-     *                see volumetrics.frag's `merged_fog`. Bound unconditionally (the
-     *                buffer exists whether or not fog is enabled), so the pipeline
-     *                layout never depends on the runtime flag; the caller selects the
-     *                path through VolumetricsUBO::counts.w.
+     * @brief Builds both pipelines and their descriptor sets.
+     * @param device         Logical device.
+     * @param march_pass     Render pass of the low-resolution march target
+     *                       (RGBA16F: rgb = in-scatter, a = transmittance).
+     * @param composite_pass Render pass of the full-resolution HDR target the composite
+     *                       writes into.
+     * @param vol_ubo        The VolumetricsData uniform buffer (engine/data/volumetrics_data.h).
+     *                       Bound once here -- its VkBuffer never changes, only its
+     *                       per-frame upload() repeats.
+     * @param fog_ubo        The FogData uniform buffer (engine/data/fog_data.h), for the
+     *                       MERGED path where the composite also applies the global fog
+     *                       term -- see volumetrics_composite.frag. Bound unconditionally,
+     *                       so the pipeline layout never depends on the runtime flag; the
+     *                       caller selects the path through VolumetricsUBO::counts.w.
+     * @param vert_spv       Fullscreen-triangle vertex shader (the shared fullscreen.vert).
+     * @param march_frag_spv     volumetrics_march.frag.
+     * @param composite_frag_spv volumetrics_composite.frag.
      */
     VolumetricsPass(coopa::gfx::core::Device& device,
-             coopa::gfx::pipeline::RenderPass& target_pass,
-             const coopa::gfx::memory::Buffer& wind_ubo,
+             coopa::gfx::pipeline::RenderPass& march_pass,
+             coopa::gfx::pipeline::RenderPass& composite_pass,
+             const coopa::gfx::memory::Buffer& vol_ubo,
              const coopa::gfx::memory::Buffer& fog_ubo,
              const std::string& vert_spv,
-             const std::string& frag_spv)
+             const std::string& march_frag_spv,
+             const std::string& composite_frag_spv)
         : nearest_sampler_(coopa::gfx::engine::util::Sampler::nearest(device)),
-          stage_(device, target_pass, describe(vert_spv, frag_spv))
+          march_(device, march_pass, describe_march(vert_spv, march_frag_spv)),
+          composite_(device, composite_pass, describe_composite(vert_spv, composite_frag_spv))
     {
-        stage_.set(1).bind_buffer(0, wind_ubo);
-        stage_.set(3).bind_buffer(0, fog_ubo);
+        march_.set(1).bind_buffer(0, vol_ubo);
+        composite_.set(1).bind_buffer(0, vol_ubo);
+        composite_.set(2).bind_buffer(0, fog_ubo);
     }
 
     VolumetricsPass(const VolumetricsPass&) = delete;
     VolumetricsPass& operator=(const VolumetricsPass&) = delete;
 
     /**
-     * @brief Binds the three source images. Call ONCE, at construction time.
+     * @brief Binds the scene colour and G-buffer images. Call ONCE, at construction time.
      *
      * DescriptorSet::bind_image issues vkUpdateDescriptorSets immediately, so
      * rebinding mid-frame races this pipeline's in-flight command buffers.
@@ -85,14 +94,27 @@ public:
      * g_normal/g_position use the nearest sampler this pass owns, not linear:
      * linear filtering would blend world positions across silhouette edges,
      * producing a wrong ray-termination distance at every object outline -- the
-     * same reasoning FogPass and PixelStylizePass both document.
+     * same reasoning FogPass and PixelStylizePass both document. The composite's
+     * upsample also depends on it: it re-reads G2 at the march's texel centres to
+     * recover each low-res sample's exact depth.
      */
     void set_source_images(coopa::gfx::TextureView scene_color, coopa::gfx::TextureView g_normal,
                            coopa::gfx::TextureView g_position,
                            const coopa::gfx::engine::util::Sampler& linear_sampler) {
-        stage_.set(0).bind_image(0, scene_color, linear_sampler);
-        stage_.set(0).bind_image(1, g_normal, nearest_sampler_);
-        stage_.set(0).bind_image(2, g_position, nearest_sampler_);
+        march_.set(0).bind_image(0, g_normal, nearest_sampler_);
+        march_.set(0).bind_image(1, g_position, nearest_sampler_);
+        composite_.set(0).bind_image(0, scene_color, linear_sampler);
+        composite_.set(0).bind_image(1, g_normal, nearest_sampler_);
+        composite_.set(0).bind_image(2, g_position, nearest_sampler_);
+    }
+
+    /**
+     * @brief Binds the march target's colour image as the composite's input. Call ONCE,
+     *        at construction time (same rule as set_source_images). The composite reads
+     *        it with texelFetch, so the sampler choice is immaterial.
+     */
+    void set_march_result(coopa::gfx::TextureView march_result) {
+        composite_.set(0).bind_image(3, march_result, nearest_sampler_);
     }
 
     /**
@@ -103,7 +125,7 @@ public:
      * @param dir_shadow    The directional shadow depth map.
      * @param spot_shadow   The spot shadow depth map.
      * @param shadow_sampler A compare-enabled sampler (util::Sampler::shadow()) --
-     *                      volumetrics.frag declares both bindings as
+     *                      volumetrics_march.frag declares both bindings as
      *                      sampler2DShadow, so each march tap is one hardware
      *                      depth-compare read.
      *
@@ -113,27 +135,55 @@ public:
      */
     void set_shadow_images(coopa::gfx::TextureView dir_shadow, coopa::gfx::TextureView spot_shadow,
                            const coopa::gfx::engine::util::Sampler& shadow_sampler) {
-        stage_.set(2).bind_image(0, dir_shadow, shadow_sampler);
-        stage_.set(2).bind_image(1, spot_shadow, shadow_sampler);
+        march_.set(2).bind_image(0, dir_shadow, shadow_sampler);
+        march_.set(2).bind_image(1, spot_shadow, shadow_sampler);
     }
 
     /**
-     * @brief Records the fullscreen wind composite into the caller's open render pass.
+     * @brief Records the low-resolution march into the caller's open render pass
+     *        (the march target's). Sizes are the MARCH target's.
      *
      * Sets a POSITIVE-height viewport, overriding the negative-height one
      * OffscreenTarget::begin() installs for geometry passes -- a fullscreen
      * triangle must undo it (the same trap TiltShiftPass::begin_stage_ documents).
      */
-    void draw(coopa::gfx::command::CommandBuffer& cmd, uint32_t viewport_w, uint32_t viewport_h) const {
-        stage_.bind(cmd, viewport_w, viewport_h);
-        stage_.draw(cmd);
+    void draw_march(coopa::gfx::command::CommandBuffer& cmd, uint32_t viewport_w, uint32_t viewport_h) const {
+        march_.bind(cmd, viewport_w, viewport_h);
+        march_.draw(cmd);
+    }
+
+    /**
+     * @brief Records the full-resolution composite into the caller's open render pass.
+     *        Must follow draw_march() in the same frame, after that render pass ended
+     *        (its final layout, SHADER_READ_ONLY_OPTIMAL, is what the composite reads).
+     */
+    void draw_composite(coopa::gfx::command::CommandBuffer& cmd, uint32_t viewport_w, uint32_t viewport_h) const {
+        composite_.bind(cmd, viewport_w, viewport_h);
+        composite_.draw(cmd);
     }
 
 private:
-    /// @brief Set 0: scene colour + G-buffer normal/position. Set 1: the pass's UBO.
+    /// @brief Set 0: G-buffer normal/position. Set 1: the volumetrics UBO.
     ///        Set 2: directional + spot shadow maps (see set_shadow_images).
-    ///        Set 3: the fog UBO, for the merged global-fog path.
-    static FullscreenStageDesc describe(const std::string& vert_spv, const std::string& frag_spv) {
+    static FullscreenStageDesc describe_march(const std::string& vert_spv, const std::string& frag_spv) {
+        using coopa::gfx::DescriptorType;
+        using coopa::gfx::ShaderStage;
+        FullscreenStageDesc d;
+        d.vert_spv = vert_spv;
+        d.frag_spv = frag_spv;
+        d.owned_sets = {
+            {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
+             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
+            {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
+            {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
+             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
+        };
+        return d;
+    }
+
+    /// @brief Set 0: scene colour, G-buffer normal/position, march result.
+    ///        Set 1: the volumetrics UBO. Set 2: the fog UBO, for the merged global-fog path.
+    static FullscreenStageDesc describe_composite(const std::string& vert_spv, const std::string& frag_spv) {
         using coopa::gfx::DescriptorType;
         using coopa::gfx::ShaderStage;
         FullscreenStageDesc d;
@@ -142,17 +192,17 @@ private:
         d.owned_sets = {
             {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
              {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
-             {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
+             {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
+             {3, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
             {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
-            {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
-             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
             {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
         };
         return d;
     }
 
     coopa::gfx::engine::util::Sampler nearest_sampler_;
-    FullscreenStage                   stage_;
+    FullscreenStage                   march_;
+    FullscreenStage                   composite_;
 };
 
 } // namespace passes

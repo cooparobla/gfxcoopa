@@ -255,6 +255,10 @@ inline void register_render_components(core::Device& device,
 
             if (node.contains("affects_reflection_probes"))
                 mr->affects_reflection_probes = node.at("affects_reflection_probes").get_value<bool>();
+            if (node.contains("lod_bias"))
+                mr->lod_bias = node.at("lod_bias").get_value<float>();
+            if (node.contains("lods_enabled"))
+                mr->lods_enabled = node.at("lods_enabled").get_value<bool>();
 
             if (!mesh_path_key.empty()) {
                 // Async: the fkYAML mesh parse (data::Mesh::from_node) is pure CPU decode with

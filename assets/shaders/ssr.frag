@@ -37,8 +37,11 @@ layout(set = 6, binding = 0) uniform sampler2D u_scene_color_b;
 // g_position_roughness/u_hiz_map/u_scene_color) is satisfied by the declarations above --
 // must include AFTER them, not before (matches transparent.frag's own ordering). Same for
 // gfx_ssr_trace_secondary()'s _b-suffixed contract.
+// Only colour * confidence is used below, so a zero-weight ray may skip its march outright.
+#define GFX_SSR_SKIP_ZERO_WEIGHT
 #include <gfx/ssr_trace_body.glsl>
 #include <gfx/ssr_trace_secondary_body.glsl>
+#include <gfx/brdf.glsl>  // fresnel_schlick_roughness / env_brdf_approx, for the negligible-weight skip
 
 layout(push_constant) uniform SsrPushConstants {
     mat4  inv_proj;
@@ -65,6 +68,7 @@ layout(push_constant) uniform SsrPushConstants {
     float has_secondary;
     int   max_hiz_mip_b;
     int   max_color_mip_b;
+    float skip_threshold;    // > 0: skip negligible reflections (ssr_skip_negligible)
 } u_ssr;
 
 void main() {
@@ -96,6 +100,29 @@ void main() {
     if (dot(R, N) <= 0.0) {
         out_ssr_color = vec4(0.0);
         return;
+    }
+
+    // Negligible-reflection skip (ssr_skip_negligible). The composite scales this pixel's SSR
+    // colour by the split-sum specular term F * brdf.x + brdf.y (gfx/ssr_composite_body.glsl,
+    // gfx/indirect_specular.glsl), and the trace scales its confidence by fades known before
+    // marching. On a rough dielectric (F0 0.04) their product is a few percent, so whatever
+    // the ray hit could barely show: skip the march. An estimate, not exact -- env_brdf_approx
+    // stands in for the composite's BRDF hook and the mirror ray for the jittered one -- which
+    // is why it is a config switch with a tunable threshold.
+    if (u_ssr.skip_threshold > 0.0) {
+        vec3  albedo   = texelFetch(g_albedo_ao, origin_px, 0).rgb;
+        vec3  F0       = mix(vec3(0.04), albedo, norm_met.a);
+        float NdotV    = max(dot(N, -V), 0.0);
+        vec3  F        = fresnel_schlick_roughness(NdotV, F0, roughness);
+        vec2  brdf     = env_brdf_approx(NdotV, roughness);
+        vec3  spec     = F * brdf.x + brdf.y;
+        float fade     = (1.0 - smoothstep(0.25, 0.85, dot(-V, R)))
+                       * (1.0 - smoothstep(u_ssr.roughness_cutoff - 0.3, u_ssr.roughness_cutoff, roughness))
+                       * smoothstep(0.0, 0.05, NdotV);
+        if (max(spec.r, max(spec.g, spec.b)) * fade < u_ssr.skip_threshold) {
+            out_ssr_color = vec4(0.0);
+            return;
+        }
     }
 
     GfxSsrParams sp;

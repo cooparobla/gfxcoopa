@@ -2,7 +2,7 @@
 #define GFX_VOLUMETRICS_GLSL
 
 // gfx/volumetrics.glsl -- density field for raymarched LOCAL volumes, used by
-// volumetrics.frag (see engine/passes/volumetrics_pass.h).
+// volumetrics_march.frag (see engine/passes/volumetrics_pass.h).
 //
 // Declares no uniforms, samplers, or blocks -- same rule as gfx/fog.glsl and
 // gfx/ssr_common.glsl: every input is a function parameter.
@@ -10,7 +10,7 @@
 // The counterpart to gfx/fog.glsl, and the contrast is the point. Fog is the
 // GLOBAL atmosphere: a medium everywhere, so its optical depth has a closed form
 // and fog.frag never marches. Everything here is a BOUNDED volume whose density
-// varies within it -- which has no closed form, so volumetrics.frag marches.
+// varies within it -- which has no closed form, so volumetrics_march.frag marches.
 //
 // One function serves three looks, selected by `kind`:
 //
@@ -86,9 +86,7 @@ float gfx_volume_field(vec3 p, float time, int kind,
     // you actually want to see it on.
     if (flow.x > 0.0) {
         vec3 wp = q * flow.y;
-        vec3 warp = vec3(gfx_value_noise_3d(wp),
-                         gfx_value_noise_3d(wp + 19.3),
-                         gfx_value_noise_3d(wp + 41.7)) * 2.0 - 1.0;
+        vec3 warp = gfx_value_noise3_3d(wp) * 2.0 - 1.0;
         q += warp * flow.x;
     }
 

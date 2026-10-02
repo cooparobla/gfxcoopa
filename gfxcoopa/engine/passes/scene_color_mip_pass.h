@@ -172,10 +172,23 @@ public:
         }
 
         stage_->rebuild_sets(mip_levels_);
+        bound_source_ = coopa::gfx::TextureView{};   // fresh sets: nothing bound yet
+    }
+
+    /// True when execute() with `source` would have to (re)write descriptors -- the first
+    /// call after construction/recreate(), or a different source view than last time.
+    /// vkUpdateDescriptorSets on a set a pending command buffer references is invalid, so
+    /// a caller that overlaps frames in flight must wait for the GPU before such a frame.
+    bool needs_descriptor_update(coopa::gfx::TextureView source) const {
+        return mip_levels_ != 0 && source != bound_source_;
     }
 
     void update_descriptors(coopa::gfx::TextureView scene_color_view) {
         if (mip_levels_ == 0) return;
+        // Every view this binds is fixed between recreate()s, so an unchanged source means
+        // the sets already hold exactly this -- skip the write (see needs_descriptor_update).
+        if (scene_color_view == bound_source_) return;
+        bound_source_ = scene_color_view;
         // Level 0 samples the deferred-lit HDR scene colour (post skybox).
         stage_->set(0, 0).bind_image(0, scene_color_view, *sampler_);
 
@@ -262,6 +275,7 @@ public:
     const util::Sampler& sampler() const { return *sampler_; }
 
 private:
+    coopa::gfx::TextureView bound_source_{};   ///< Source view the sets were last bound to.
     void destroy_resources_() {
         if (full_view_ != VK_NULL_HANDLE) {
             vkDestroyImageView(device_.handle(), full_view_, nullptr);

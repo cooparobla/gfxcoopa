@@ -103,8 +103,8 @@ public:
                   const std::string& frag_spv)
         : out_width_(out_width), out_height_(out_height),
           linear_sampler_(coopa::gfx::engine::util::Sampler::linear(device)),
-          h_target_(device, allocator, out_width, out_height),
-          v_target_(device, allocator, out_width, out_height)
+          h_target_(device, allocator, out_width, out_height, coopa::gfx::Format::RGBA8_Unorm, targets::kColorOnly),
+          v_target_(device, allocator, out_width, out_height, coopa::gfx::Format::RGBA8_Unorm, targets::kColorOnly)
     {
         // Instance 0 is the horizontal stage, instance 1 the vertical: one layout and
         // one pipeline, two sets.

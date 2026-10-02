@@ -70,12 +70,16 @@ public:
         alloc_info.usage = memory_usage;
         alloc_info.flags = flags;
 
+        VmaAllocationInfo info{};
         VkResult result = vmaCreateBuffer(allocator_, &buffer_info, &alloc_info,
-                                          &buffer_, &allocation_, nullptr);
+                                          &buffer_, &allocation_, &info);
         if (result != VK_SUCCESS) {
             throw std::runtime_error("[gfxcoopa] vmaCreateBuffer failed: " +
                                      util::vk_result_string(result));
         }
+        // Non-null only for VMA_ALLOCATION_CREATE_MAPPED_BIT allocations (every host-visible
+        // factory below): upload() then copies straight in, with no per-call map/unmap.
+        mapped_ = info.pMappedData;
     }
 
     /**
@@ -124,10 +128,12 @@ public:
      */
     Buffer(Buffer&& other) noexcept
         : device_(other.device_), allocator_(other.allocator_),
-          buffer_(other.buffer_), allocation_(other.allocation_), size_(other.size_)
+          buffer_(other.buffer_), allocation_(other.allocation_), size_(other.size_),
+          mapped_(other.mapped_)
     {
         other.buffer_     = VK_NULL_HANDLE;
         other.allocation_ = VK_NULL_HANDLE;
+        other.mapped_     = nullptr;
         other.size_        = 0;
     }
 
@@ -137,8 +143,9 @@ public:
     /**
      * @brief Uploads data into a host-visible buffer (analogous to glBufferSubData).
      *
-     * Maps the VMA allocation, copies data, then unmaps. Only valid for
-     * host-visible (CPU-accessible) allocations such as staging or uniform buffers.
+     * Copies into the persistent mapping when the buffer was created mapped (every
+     * host-visible factory below does that); otherwise maps, copies, then unmaps. Only
+     * valid for host-visible (CPU-accessible) allocations such as staging or uniform buffers.
      *
      * @param data   Pointer to the source data.
      * @param size   Number of bytes to copy.
@@ -146,6 +153,10 @@ public:
      * @throws std::runtime_error if the mapping fails.
      */
     void upload(const void* data, VkDeviceSize size, VkDeviceSize offset = 0) {
+        if (mapped_) {
+            std::memcpy(static_cast<uint8_t*>(mapped_) + offset, data, static_cast<size_t>(size));
+            return;
+        }
         void* mapped = nullptr;
         VkResult result = vmaMapMemory(allocator_, allocation_, &mapped);
         if (result != VK_SUCCESS) {
@@ -259,6 +270,7 @@ private:
     VkBuffer      buffer_    = VK_NULL_HANDLE;      /**< The Vulkan buffer handle. */
     VmaAllocation allocation_ = VK_NULL_HANDLE;     /**< VMA allocation tracking this buffer's memory. */
     VkDeviceSize  size_      = 0;                   /**< Buffer size in bytes. */
+    void*         mapped_    = nullptr;             /**< Persistent mapping (MAPPED_BIT allocations), else null. */
 };
 
 } // namespace memory

@@ -86,6 +86,12 @@ void gfx_surface_fragment(inout GfxSurface s) {}
 #ifndef GFX_SURFACE_SAMPLE
 #define GFX_SURFACE_SAMPLE(tex, uv) texture(tex, uv)
 #endif
+// The normal map has its own hook: GFX_SURFACE_SAMPLE above is commonly redefined for
+// albedo-style sampling (e.g. toyengine's texel-AA gbuffer.frag), which a normal map
+// should not inherit. A variant that remaps UVs (toyengine's terrain.frag) defines both.
+#ifndef GFX_SURFACE_SAMPLE_NORMAL
+#define GFX_SURFACE_SAMPLE_NORMAL(tex, uv) texture(tex, uv)
+#endif
 
 void main() {
     vec4 albedo_tex = GFX_SURFACE_SAMPLE(u_albedo_map, frag_uv);
@@ -115,7 +121,7 @@ void main() {
     // untextured material's normal_ws is off by ~0.32 degrees rather than bit-identical -- see
     // engine::util::MaterialTextureCache's doc, which makes the same call for the same reason.
     s.tbn         = frag_TBN;
-    s.normal_ws   = normalize(s.tbn * (texture(u_normal_map, frag_uv).xyz * 2.0 - 1.0));
+    s.normal_ws   = normalize(s.tbn * (GFX_SURFACE_SAMPLE_NORMAL(u_normal_map, frag_uv).xyz * 2.0 - 1.0));
     if (!gl_FrontFacing) s.normal_ws = -s.normal_ws; // correct for double-sided materials
                                                       // (PBRMaterial::cull_backfaces == false)
                                                       // and any CullMode::None shader variant

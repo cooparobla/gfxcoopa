@@ -2,8 +2,8 @@
  * @file offscreen_target.h
  * @brief Low-resolution render target for the retro rendering pipeline.
  *
- * Creates a color attachment (VK_FORMAT_R8G8B8A8_UNORM) and depth attachment
- * at a configurable resolution, with a matching RenderPass that transitions the
+ * Creates a color attachment (VK_FORMAT_R8G8B8A8_UNORM) and, unless built with
+ * kColorOnly, a depth attachment at a configurable resolution, with a matching RenderPass that transitions the
  * color image to SHADER_READ_ONLY_OPTIMAL after rendering so it can be sampled
  * by subsequent passes (post-processing, upscale).
  *
@@ -31,6 +31,20 @@ namespace coopa {
 namespace gfx {
 namespace engine {
 namespace targets {
+
+/// Tag selecting OffscreenTarget's colour-only constructor -- see kColorOnly.
+struct ColorOnlyTag {};
+
+/**
+ * Pass as OffscreenTarget's last constructor argument for a target with NO depth
+ * attachment. For targets that only ever receive fullscreen-triangle draws (post
+ * effects, resolves, blurs), where a depth buffer is never tested against or read:
+ * without it, every such pass would still clear and write back a full-size D32 image
+ * (the depth attachment's final layout is SHADER_READ_ONLY_OPTIMAL, which makes it
+ * STORE_OP_STORE) -- pure memory bandwidth, which tile-based GPUs feel most.
+ * depth_view() must not be called on such a target.
+ */
+inline constexpr ColorOnlyTag kColorOnly{};
 
 /**
  * @class OffscreenTarget
@@ -77,6 +91,22 @@ public:
     }
 
     /**
+     * @brief Creates a colour-only target -- no depth attachment. See kColorOnly.
+     */
+    OffscreenTarget(core::Device&      device,
+                    memory::Allocator& allocator,
+                    uint32_t           width,
+                    uint32_t           height,
+                    Format             color_format,
+                    ColorOnlyTag)
+        : device_(device), allocator_(allocator),
+          width_(width), height_(height),
+          color_format_(color_format), samples_(SampleCount::X1), has_depth_(false)
+    {
+        create_resources_();
+    }
+
+    /**
      * @brief Destroys the framebuffer and resources.
      */
     ~OffscreenTarget() {
@@ -92,7 +122,7 @@ public:
      * @brief Begins the offscreen render pass.
      *
      * Records begin_render_pass with the given clear color (dark gray by
-     * default) and a far-depth clear. Sets
+     * default) and a far-depth clear (ignored on a colour-only target). Sets
      * dynamic viewport and scissor to the full render resolution.
      *
      * @param cmd   Command buffer to record into.
@@ -169,10 +199,13 @@ public:
             ? resolve_image_.get()
             : color_image_.get();
     }
-    /** @brief Returns the depth image view (for edge detection shaders). */
-    VkImageView depth_view() const { return depth_image_->view(); }
+    /** @brief Returns the depth image view (for edge detection shaders). Not on a kColorOnly target. */
+    VkImageView depth_view() const { return depth_image_or_throw_().view(); }
     /** @brief Sealed sibling of depth_view(). */
-    coopa::gfx::TextureView depth_view_typed() const { return depth_image_->view_typed(); }
+    coopa::gfx::TextureView depth_view_typed() const { return depth_image_or_throw_().view_typed(); }
+
+    /** @brief False for a target built with kColorOnly. */
+    bool has_depth() const { return has_depth_; }
 
     /** @brief Returns the render pass handle. */
     VkRenderPass render_pass() const { return render_pass_->handle(); }
@@ -214,20 +247,22 @@ private:
             );
         }
 
-        // Depth attachment.
-        depth_image_ = std::make_unique<memory::Image>(
-            device_, allocator_,
-            width_, height_,
-            Format::D32_Sfloat,
-            ImageUsage::DepthAttachment | ImageUsage::Sampled,
-            MemoryResidency::GpuOnly,
-            samples_
-        );
+        // Depth attachment (none on a kColorOnly target).
+        if (has_depth_) {
+            depth_image_ = std::make_unique<memory::Image>(
+                device_, allocator_,
+                width_, height_,
+                Format::D32_Sfloat,
+                ImageUsage::DepthAttachment | ImageUsage::Sampled,
+                MemoryResidency::GpuOnly,
+                samples_
+            );
+        }
 
         render_pass_ = std::make_unique<pipeline::RenderPass>(
             device_,
             detail::to_vk(color_format_),
-            VK_FORMAT_D32_SFLOAT,
+            has_depth_ ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   // color final
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   // depth final
             detail::to_vk(samples_)
@@ -242,7 +277,7 @@ private:
     void create_framebuffer_() {
         std::vector<VkImageView> attachments;
         attachments.push_back(color_image_->view());
-        attachments.push_back(depth_image_->view());
+        if (depth_image_) attachments.push_back(depth_image_->view());
         if (samples_ != SampleCount::X1 && resolve_image_) {
             attachments.push_back(resolve_image_->view());
         }
@@ -257,6 +292,13 @@ private:
         fb_info.layers          = 1;
 
         GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb_info, nullptr, &framebuffer_));
+    }
+
+    const memory::Image& depth_image_or_throw_() const {
+        if (!depth_image_) {
+            throw std::logic_error("[gfxcoopa] OffscreenTarget: depth requested from a kColorOnly target");
+        }
+        return *depth_image_;
     }
 
     /**
@@ -275,6 +317,7 @@ private:
     uint32_t           height_;    /**< Render height in pixels. */
     Format             color_format_ = Format::RGBA8_Unorm;
     SampleCount        samples_      = SampleCount::X1;
+    bool               has_depth_    = true;   /**< False for a kColorOnly target. */
 
     std::unique_ptr<memory::Image>          color_image_;   /**< Color attachment. */
     std::unique_ptr<memory::Image>          resolve_image_; /**< MSAA resolve attachment. */

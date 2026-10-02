@@ -157,7 +157,7 @@ public:
             uint32_t w = std::max(1u, base_width_  >> i);
             uint32_t h = std::max(1u, base_height_ >> i);
             down_targets_.push_back(std::make_unique<targets::OffscreenTarget>(
-                device_, allocator_, w, h, coopa::gfx::Format::RGBA16_Sfloat, coopa::gfx::SampleCount::X1));
+                device_, allocator_, w, h, coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly));
         }
 
         // up_targets_[i] is the same size as down_targets_[i], for i in
@@ -171,7 +171,7 @@ public:
             for (uint32_t i = 0; i + 1 < level_count_; ++i) {
                 up_targets_.push_back(std::make_unique<targets::OffscreenTarget>(
                     device_, allocator_, down_targets_[i]->width(), down_targets_[i]->height(),
-                    coopa::gfx::Format::RGBA16_Sfloat, coopa::gfx::SampleCount::X1));
+                    coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly));
             }
         }
 

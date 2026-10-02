@@ -208,7 +208,7 @@ The `coopa::gfx::engine` module provides high-level rendering engine abstraction
 - [tilt_shift_pass.h](passes/tilt_shift_pass.h) (`TiltShiftPass`) — separable horizontal/vertical band blur, folded with the upscale.
 - [fxaa_pass.h](passes/fxaa_pass.h) (`FxaaPass`) — standalone LDR FXAA 3.11, for a source already tonemapped.
 - [ssao_pass.h](passes/ssao_pass.h) (`SsaoPass`) — hemisphere-kernel SSAO with a bilateral blur and temporal resolve.
-- [volumetrics_pass.h](passes/volumetrics_pass.h) (`VolumetricsPass`) — wind-driven volumetric scattering.
+- [volumetrics_pass.h](passes/volumetrics_pass.h) (`VolumetricsPass`) — raymarched local volumes: reduced-resolution march + depth-aware full-resolution composite.
 - [pixel_stylize_pass.h](passes/pixel_stylize_pass.h) (`PixelStylizePass`) — outline, palette quantization, dither and bloom composite.
 
 #### Geometry and transparency passes

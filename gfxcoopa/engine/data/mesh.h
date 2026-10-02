@@ -34,6 +34,13 @@
 #include <gfxcoopa/types/vertex_layout.h>
 #include <gfxcoopa/types/format.h>
 
+#include <meshoptimizer.h>
+
+#include <algorithm>
+#include <cstdio>
+#include <functional>
+#include <memory>
+#include <string>
 #include <vector>
 #include <array>
 #include <stdexcept>
@@ -174,6 +181,36 @@ struct InstanceData {
 };
 
 /**
+ * @struct MeshLod
+ * @brief One level of detail: a range of the mesh's shared index buffer.
+ *
+ * Every level lives in the same vertex/index buffers, so switching levels changes only the
+ * draw's index range (and vertex offset, for a hand-authored level whose vertices are
+ * appended after LOD 0's) -- never a buffer bind.
+ */
+struct MeshLod {
+    uint32_t first_index   = 0;
+    uint32_t index_count   = 0;
+    int32_t  vertex_offset = 0;
+    /// Draw this level while the object's projected height (fraction of the screen, see
+    /// toyengine/render/visibility.h's screen_height_fraction) is below this. Unused for LOD 0.
+    float    screen_size   = 0.0f;
+};
+
+/**
+ * @struct MeshCpuData
+ * @brief A mesh fully prepared on the CPU (Mesh::build_cpu), awaiting upload (Mesh::from_cpu).
+ */
+struct MeshCpuData {
+    std::vector<Vertex>   vertices;
+    std::vector<uint32_t> indices;
+    std::vector<MeshLod>  lods;              ///< [0] is the full mesh.
+    float                 cull_screen_size = 0.0f;
+    glm::vec3             bounds_min{0.0f};
+    glm::vec3             bounds_max{0.0f};
+};
+
+/**
  * @class Mesh
  * @brief GPU-resident interleaved vertex + index buffer, loaded from YAML.
  *
@@ -209,161 +246,83 @@ public:
                           const fkyaml::node&       node)
     {
         (void)cmd_pool; // Host-visible buffers; staging not required.
+        return from_cpu(device, allocator, build_cpu(node));
+    }
 
-        // --- Parse positions ---
-        std::vector<glm::vec3> positions;
-        if (node.contains("vertices")) {
-            for (const auto& v : node.at("vertices")) {
-                positions.push_back({
-                    v.at(0).get_value<float>(),
-                    v.at(1).get_value<float>(),
-                    v.at(2).get_value<float>()
-                });
-            }
+    /**
+     * @brief The CPU half of from_node(): parses a mesh YAML node into welded, cache-ordered
+     *        vertex/index arrays plus its LOD table. No GPU calls -- MeshLoader runs this on a
+     *        JobEngine worker and only from_cpu()'s upload on the main thread.
+     *
+     * Blender's export lists one vertex per face CORNER; the triangulated stream is welded
+     * back together here (meshopt_generateVertexRemap over the whole Vertex, so only
+     * byte-identical corners merge -- hard edges and UV seams, whose normals/UVs differ, stay
+     * split), then reordered for the post-transform vertex cache and for fetch locality.
+     *
+     * @param node         The mesh YAML root (vertices, normals, uvs, tangents, faces, and
+     *                     optionally `lods` / `cull_screen_size`).
+     * @param lod_config   A node whose `lods` / `cull_screen_size` override the mesh's own --
+     *                     the `<mesh>.lod.yaml` sidecar MeshLoader looks for, so a Blender
+     *                     re-export cannot wipe the LOD setup. Null: use the mesh's own.
+     * @param load_sibling Loads another mesh YAML by logical name, for a LOD level that names
+     *                     a hand-authored `mesh:` instead of a simplification `ratio:`. Empty:
+     *                     such levels are skipped with a warning.
+     */
+    static MeshCpuData build_cpu(const fkyaml::node& node,
+                                 const fkyaml::node* lod_config = nullptr,
+                                 const std::function<std::shared_ptr<fkyaml::node>(const std::string&)>&
+                                     load_sibling = {})
+    {
+        MeshCpuData out;
+        const bool needs_tangents = parse_unwelded_(node, out.vertices, out.indices);
+        weld_and_optimize_(out.vertices, out.indices);
+        if (needs_tangents) compute_tangents_(out.vertices, out.indices);
+
+        out.bounds_min = glm::vec3(std::numeric_limits<float>::max());
+        out.bounds_max = glm::vec3(std::numeric_limits<float>::lowest());
+        for (const auto& v : out.vertices) {
+            out.bounds_min = glm::min(out.bounds_min, v.position);
+            out.bounds_max = glm::max(out.bounds_max, v.position);
         }
 
-        // --- Parse normals ---
-        std::vector<glm::vec3> normals;
-        if (node.contains("normals")) {
-            for (const auto& n : node.at("normals")) {
-                normals.push_back({
-                    n.at(0).get_value<float>(),
-                    n.at(1).get_value<float>(),
-                    n.at(2).get_value<float>()
-                });
-            }
+        // LOD 0 is always the full mesh; its threshold is never consulted.
+        out.lods.push_back({0u, static_cast<uint32_t>(out.indices.size()), 0, 0.0f});
+
+        const fkyaml::node* cfg = lod_config ? lod_config : &node;
+        if (cfg->contains("cull_screen_size")) {
+            out.cull_screen_size = cfg->at("cull_screen_size").get_value<float>();
         }
-
-        // --- Parse UVs ---
-        std::vector<glm::vec2> uvs;
-        if (node.contains("uvs")) {
-            for (const auto& uv : node.at("uvs")) {
-                uvs.push_back({
-                    uv.at(0).get_value<float>(),
-                    uv.at(1).get_value<float>()
-                });
-            }
+        if (cfg->contains("lods")) {
+            build_lods_(cfg->at("lods"), out, load_sibling);
         }
+        return out;
+    }
 
-        // --- Parse tangents ---
-        std::vector<glm::vec4> tangents;
-        if (node.contains("tangents")) {
-            for (const auto& tan : node.at("tangents")) {
-                float w = (tan.size() > 3) ? tan.at(3).get_value<float>() : 1.0f;
-                tangents.push_back({
-                    tan.at(0).get_value<float>(),
-                    tan.at(1).get_value<float>(),
-                    tan.at(2).get_value<float>(),
-                    w
-                });
-            }
+    /**
+     * @brief The GPU half of from_node(): uploads a build_cpu() result.
+     */
+    static Mesh from_cpu(core::Device& device, memory::Allocator& allocator, MeshCpuData data) {
+        if (data.vertices.empty() || data.indices.empty()) {
+            throw std::runtime_error("[Mesh] from_cpu() needs non-empty vertex and index arrays.");
         }
-
-        // --- Parse faces and build interleaved vertices + indices ---
-        // Faces are quads [i0,i1,i2,i3]; split into two triangles:
-        //   tri1: [i0, i1, i2]   tri2: [i0, i2, i3]
-        std::vector<Vertex>   vertices;
-        std::vector<uint32_t> indices;
-
-        if (node.contains("faces")) {
-            for (const auto& face : node.at("faces")) {
-                // Each face element is a list of vertex indices.
-                std::vector<uint32_t> face_indices;
-                for (const auto& idx_node : face) {
-                    face_indices.push_back(idx_node.get_value<uint32_t>());
-                }
-
-                if (face_indices.size() < 3) continue;
-
-                // Fan triangulation from the first vertex.
-                for (size_t i = 1; i + 1 < face_indices.size(); ++i) {
-                    uint32_t v_indices[3] = {
-                        face_indices[0],
-                        face_indices[i],
-                        face_indices[i + 1]
-                    };
-
-                    for (uint32_t vi : v_indices) {
-                        Vertex vert{};
-                        vert.position = (vi < positions.size()) ? positions[vi] : glm::vec3(0.0f);
-                        vert.normal   = (vi < normals.size())   ? normals[vi]   : glm::vec3(0.0f, 1.0f, 0.0f);
-                        vert.uv       = (vi < uvs.size())       ? uvs[vi]       : glm::vec2(0.0f);
-                        vert.tangent  = (vi < tangents.size())  ? tangents[vi]  : glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
-
-                        indices.push_back(static_cast<uint32_t>(vertices.size()));
-                        vertices.push_back(vert);
-                    }
-                }
-            }
-        }
-
-        if (vertices.empty()) {
-            throw std::runtime_error("[Mesh] No vertices parsed — empty or invalid mesh YAML.");
-        }
-
-        // --- Fallback tangent computation if tangents were absent in YAML ---
-        if (tangents.empty()) {
-            std::vector<glm::vec3> tan_sum(vertices.size(), glm::vec3(0.0f));
-            for (size_t i = 0; i + 2 < vertices.size(); i += 3) {
-                const auto& v0 = vertices[i];
-                const auto& v1 = vertices[i + 1];
-                const auto& v2 = vertices[i + 2];
-
-                glm::vec3 edge1 = v1.position - v0.position;
-                glm::vec3 edge2 = v2.position - v0.position;
-                glm::vec2 deltaUV1 = v1.uv - v0.uv;
-                glm::vec2 deltaUV2 = v2.uv - v0.uv;
-
-                float f = (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y);
-                glm::vec3 t;
-                if (std::abs(f) > 1e-6f) {
-                    float r = 1.0f / f;
-                    t = (edge1 * deltaUV2.y - edge2 * deltaUV1.y) * r;
-                } else {
-                    t = glm::vec3(1.0f, 0.0f, 0.0f);
-                }
-                tan_sum[i]     += t;
-                tan_sum[i + 1] += t;
-                tan_sum[i + 2] += t;
-            }
-
-            for (size_t i = 0; i < vertices.size(); ++i) {
-                glm::vec3 t = glm::length(tan_sum[i]) > 1e-5f ? glm::normalize(tan_sum[i]) : glm::vec3(1.0f, 0.0f, 0.0f);
-                glm::vec3 n = vertices[i].normal;
-                t = glm::normalize(t - n * glm::dot(n, t));
-                vertices[i].tangent = glm::vec4(t, 1.0f);
-            }
-        }
-
-        // --- Upload to GPU (host-visible buffers, no staging required) ---
-        VkDeviceSize vb_size = sizeof(Vertex)   * vertices.size();
-        VkDeviceSize ib_size = sizeof(uint32_t) * indices.size();
+        const VkDeviceSize vb_size = sizeof(Vertex)   * data.vertices.size();
+        const VkDeviceSize ib_size = sizeof(uint32_t) * data.indices.size();
 
         auto vb = memory::Buffer::vertex(device, allocator, vb_size);
         auto ib = memory::Buffer::index (device, allocator, ib_size);
-
-        vb.upload(vertices.data(), vb_size);
-        ib.upload(indices.data(),  ib_size);
+        vb.upload(data.vertices.data(), vb_size);
+        ib.upload(data.indices.data(),  ib_size);
 
         std::vector<memory::Buffer> vbs;
         vbs.push_back(std::move(vb)); // a YAML-loaded mesh is static: exactly one buffer
 
-        // Object-space AABB over the triangulated vertex stream (not the raw
-        // `positions` array, which can contain entries no face references) --
-        // this is exactly the geometry that gets drawn. Used by callers that
-        // need to fit a projection (e.g. a directional shadow-map ortho box)
-        // to what a mesh instance actually occupies.
-        glm::vec3 bounds_min(std::numeric_limits<float>::max());
-        glm::vec3 bounds_max(std::numeric_limits<float>::lowest());
-        for (const auto& v : vertices) {
-            bounds_min = glm::min(bounds_min, v.position);
-            bounds_max = glm::max(bounds_max, v.position);
-        }
-
-        return Mesh(std::move(vbs), std::move(ib),
-                    static_cast<uint32_t>(indices.size()),
-                    static_cast<uint32_t>(vertices.size()),
-                    bounds_min, bounds_max);
+        Mesh mesh(std::move(vbs), std::move(ib),
+                  data.lods.empty() ? static_cast<uint32_t>(data.indices.size()) : data.lods[0].index_count,
+                  static_cast<uint32_t>(data.vertices.size()),
+                  data.bounds_min, data.bounds_max);
+        if (!data.lods.empty()) mesh.lods_ = std::move(data.lods);
+        mesh.cull_screen_size_ = data.cull_screen_size;
+        return mesh;
     }
 
     /**
@@ -437,8 +396,8 @@ public:
      * currently reading is what makes this safe without a per-frame fence wait.
      *
      * The object-space bounds are recomputed here rather than left at their creation values: the
-     * directional shadow pass fits its ortho box to bounds_min()/bounds_max(), so a cloth that has
-     * drooped well outside its rest-pose box would have its shadow clipped.
+     * renderer frustum-culls every view against bounds_min()/bounds_max(), so a cloth that has
+     * drooped well outside its rest-pose box would otherwise be culled while still visible.
      *
      * @param data       Vertices to upload; must hold at least `count` entries.
      * @param count      Number of vertices to write. Must not exceed vertex_count().
@@ -509,8 +468,26 @@ public:
         cmd.draw_indexed(index_count_, 0, 0, instance_count, first_instance);
     }
 
-    /** @brief Returns the number of indices in the mesh. */
+    /** @brief Returns the number of indices in the mesh (LOD 0). */
     uint32_t index_count() const { return index_count_; }
+
+    /** @brief The LOD table; [0] is the full mesh. A mesh without a `lods` block has one entry. */
+    const std::vector<MeshLod>& lods() const { return lods_; }
+
+    /** @brief Below this projected screen size the mesh is not drawn at all; 0 = never culled. */
+    float cull_screen_size() const { return cull_screen_size_; }
+
+    /**
+     * @brief Records an instanced indexed draw of one LOD level (clamped to the table).
+     * @param lod            Level index into lods().
+     * @param instance_count Number of instances to draw.
+     * @param first_instance Offset into the bound instance-rate stream.
+     */
+    void draw_lod(command::CommandBuffer& cmd, uint32_t lod, uint32_t instance_count,
+                  uint32_t first_instance) const {
+        const MeshLod& l = lods_[std::min<size_t>(lod, lods_.size() - 1)];
+        cmd.draw_indexed(l.index_count, l.first_index, l.vertex_offset, instance_count, first_instance);
+    }
 
     /** @brief Returns the minimum corner of the object-space bounding box. */
     const glm::vec3& bounds_min() const { return bounds_min_; }
@@ -525,6 +502,287 @@ public:
     Mesh& operator=(const Mesh&) = delete;
 
 private:
+    /// Parses Blender's per-corner mesh YAML into a triangulated, UNWELDED stream (one Vertex
+    /// per triangle corner, indices 0..N-1).
+    /// @return True when the file carries no tangents: every corner then holds the same
+    ///         placeholder tangent, and the caller must run compute_tangents_() after welding.
+    static bool parse_unwelded_(const fkyaml::node& node, std::vector<Vertex>& vertices,
+                                std::vector<uint32_t>& indices) {
+        // --- Parse positions ---
+        std::vector<glm::vec3> positions;
+        if (node.contains("vertices")) {
+            for (const auto& v : node.at("vertices")) {
+                positions.push_back({
+                    v.at(0).get_value<float>(),
+                    v.at(1).get_value<float>(),
+                    v.at(2).get_value<float>()
+                });
+            }
+        }
+
+        // --- Parse normals ---
+        std::vector<glm::vec3> normals;
+        if (node.contains("normals")) {
+            for (const auto& n : node.at("normals")) {
+                normals.push_back({
+                    n.at(0).get_value<float>(),
+                    n.at(1).get_value<float>(),
+                    n.at(2).get_value<float>()
+                });
+            }
+        }
+
+        // --- Parse UVs ---
+        std::vector<glm::vec2> uvs;
+        if (node.contains("uvs")) {
+            for (const auto& uv : node.at("uvs")) {
+                uvs.push_back({
+                    uv.at(0).get_value<float>(),
+                    uv.at(1).get_value<float>()
+                });
+            }
+        }
+
+        // --- Parse tangents ---
+        std::vector<glm::vec4> tangents;
+        if (node.contains("tangents")) {
+            for (const auto& tan : node.at("tangents")) {
+                float w = (tan.size() > 3) ? tan.at(3).get_value<float>() : 1.0f;
+                tangents.push_back({
+                    tan.at(0).get_value<float>(),
+                    tan.at(1).get_value<float>(),
+                    tan.at(2).get_value<float>(),
+                    w
+                });
+            }
+        }
+
+        // --- Parse faces and build interleaved vertices + indices ---
+        // Faces are quads [i0,i1,i2,i3]; split into two triangles:
+        //   tri1: [i0, i1, i2]   tri2: [i0, i2, i3]
+
+        if (node.contains("faces")) {
+            for (const auto& face : node.at("faces")) {
+                // Each face element is a list of vertex indices.
+                std::vector<uint32_t> face_indices;
+                for (const auto& idx_node : face) {
+                    face_indices.push_back(idx_node.get_value<uint32_t>());
+                }
+
+                if (face_indices.size() < 3) continue;
+
+                // Fan triangulation from the first vertex.
+                for (size_t i = 1; i + 1 < face_indices.size(); ++i) {
+                    uint32_t v_indices[3] = {
+                        face_indices[0],
+                        face_indices[i],
+                        face_indices[i + 1]
+                    };
+
+                    for (uint32_t vi : v_indices) {
+                        Vertex vert{};
+                        vert.position = (vi < positions.size()) ? positions[vi] : glm::vec3(0.0f);
+                        vert.normal   = (vi < normals.size())   ? normals[vi]   : glm::vec3(0.0f, 1.0f, 0.0f);
+                        vert.uv       = (vi < uvs.size())       ? uvs[vi]       : glm::vec2(0.0f);
+                        vert.tangent  = (vi < tangents.size())  ? tangents[vi]  : glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+                        // Canonicalize signed zeros (-0.0 + 0.0 == +0.0): the exporter writes
+                        // both, and welding compares bytes, so otherwise identical corners on
+                        // an axis would never merge.
+                        vert.position += glm::vec3(0.0f);
+                        vert.normal   += glm::vec3(0.0f);
+                        vert.uv       += glm::vec2(0.0f);
+
+                        indices.push_back(static_cast<uint32_t>(vertices.size()));
+                        vertices.push_back(vert);
+                    }
+                }
+            }
+        }
+
+        if (vertices.empty()) {
+            throw std::runtime_error("[Mesh] No vertices parsed — empty or invalid mesh YAML.");
+        }
+
+        // Tangents absent from the YAML are computed AFTER welding (compute_tangents_(), from
+        // build_cpu()), on the indexed mesh -- computing them here, per unwelded corner, would
+        // give every triangle's corners a different tangent and stop identical corners welding.
+        return tangents.empty();
+    }
+
+    /// Per-vertex tangents for an INDEXED mesh: each triangle's UV-derived tangent summed onto
+    /// its three vertices, then Gram-Schmidt'd against the vertex normal. Shared vertices
+    /// therefore get the average of their triangles' tangents -- smooth across a welded
+    /// surface, and still split wherever welding kept a hard edge or UV seam.
+    static void compute_tangents_(std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices) {
+        std::vector<glm::vec3> tan_sum(vertices.size(), glm::vec3(0.0f));
+        for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+            const Vertex& v0 = vertices[indices[i]];
+            const Vertex& v1 = vertices[indices[i + 1]];
+            const Vertex& v2 = vertices[indices[i + 2]];
+            const glm::vec3 edge1 = v1.position - v0.position;
+            const glm::vec3 edge2 = v2.position - v0.position;
+            const glm::vec2 duv1  = v1.uv - v0.uv;
+            const glm::vec2 duv2  = v2.uv - v0.uv;
+            const float f = duv1.x * duv2.y - duv2.x * duv1.y;
+            const glm::vec3 t = (std::abs(f) > 1e-6f) ? (edge1 * duv2.y - edge2 * duv1.y) / f
+                                                     : glm::vec3(1.0f, 0.0f, 0.0f);
+            for (int c = 0; c < 3; ++c) tan_sum[indices[i + c]] += t;
+        }
+        for (size_t i = 0; i < vertices.size(); ++i) {
+            glm::vec3 t = glm::length(tan_sum[i]) > 1e-5f ? glm::normalize(tan_sum[i]) : glm::vec3(1.0f, 0.0f, 0.0f);
+            const glm::vec3 n = vertices[i].normal;
+            t = t - n * glm::dot(n, t);
+            if (glm::length(t) < 1e-5f) {   // tangent parallel to the normal: any perpendicular
+                t = glm::cross(n, std::abs(n.x) < 0.9f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0));
+            }
+            vertices[i].tangent = glm::vec4(glm::normalize(t), 1.0f);
+        }
+    }
+
+public:
+    /// Welds byte-identical vertices and reorders for the vertex cache and fetch locality.
+    /// Public for CPU-built meshes (e.g. terrain chunks) that go through from_arrays().
+    static void weld_and_optimize(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices) {
+        weld_and_optimize_(vertices, indices);
+    }
+
+private:
+    static void weld_and_optimize_(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices) {
+        if (vertices.empty() || indices.empty()) return;
+        std::vector<unsigned int> remap(vertices.size());
+        const size_t unique = meshopt_generateVertexRemap(remap.data(), indices.data(), indices.size(),
+                                                          vertices.data(), vertices.size(), sizeof(Vertex));
+        std::vector<Vertex> welded(unique);
+        meshopt_remapVertexBuffer(welded.data(), vertices.data(), vertices.size(), sizeof(Vertex), remap.data());
+        meshopt_remapIndexBuffer(indices.data(), indices.data(), indices.size(), remap.data());
+        meshopt_optimizeVertexCache(indices.data(), indices.data(), indices.size(), unique);
+        meshopt_optimizeVertexFetch(welded.data(), indices.data(), indices.size(),
+                                    welded.data(), unique, sizeof(Vertex));
+        vertices = std::move(welded);
+    }
+
+    /// Appends the `lods` list's levels to `out` (see build_cpu()). Each entry is either
+    /// `{ ratio: r, screen_size: s [, error: e] }` -- LOD 0's indices simplified to about r of
+    /// their count (stopping early if the optional relative error cap e is reached), sharing
+    /// LOD 0's vertices -- or `{ mesh: name, screen_size: s }`, a
+    /// hand-authored mesh whose vertices are appended behind LOD 0's (drawn with a vertex
+    /// offset). Levels must get coarser in order: screen_size decreasing.
+    static void build_lods_(const fkyaml::node& lods, MeshCpuData& out,
+                            const std::function<std::shared_ptr<fkyaml::node>(const std::string&)>& load_sibling) {
+        const uint32_t base_count = out.lods[0].index_count;
+        const std::vector<uint32_t> base(out.indices.begin(), out.indices.begin() + base_count);
+        const size_t base_vertices = out.vertices.size();
+
+        // Simplify on POSITION topology. A hard-edged mesh (a flat-shaded sphere, a cube) welds
+        // into islands -- its corners differ in normal, so no two triangles share a vertex --
+        // and an edge-collapse simplifier cannot collapse an island's border. The shadow index
+        // buffer points every corner at the first vertex with the same position, joining the
+        // islands into one surface for the simplifier.
+        std::vector<uint32_t> shadow(base_count);
+        meshopt_generateShadowIndexBuffer(shadow.data(), base.data(), base_count,
+                                          &out.vertices[0].position.x, base_vertices,
+                                          sizeof(glm::vec3), sizeof(Vertex));
+        // ...and the way back: every real vertex sharing each canonical position, so a
+        // simplified triangle's corner can pick the one whose normal (and so whose UV chart
+        // and hard-edge side) suits that triangle best.
+        std::vector<std::vector<uint32_t>> at_position(base_vertices);
+        {
+            std::vector<uint8_t> seen(base_vertices, 0);
+            for (uint32_t k = 0; k < base_count; ++k) {
+                const uint32_t v = base[k];
+                if (seen[v]) continue;
+                seen[v] = 1;
+                at_position[shadow[k]].push_back(v);
+            }
+        }
+        // The simplifier is given ONLY the distinct positions, compacted. meshopt_simplify does
+        // its own position matching too, and a vertex array that still holds unreferenced
+        // copies of each position (corners split by normal/UV/tangent) reads to it as a pile
+        // of complex seams and locks nearly every vertex -- it simplifies nothing.
+        std::vector<uint32_t>  compact_of(base_vertices, UINT32_MAX);
+        std::vector<uint32_t>  canonical_of;          // compact id -> canonical vertex
+        std::vector<glm::vec3> compact_positions;
+        std::vector<uint32_t>  compact_indices(base_count);
+        for (uint32_t k = 0; k < base_count; ++k) {
+            const uint32_t v = shadow[k];
+            if (compact_of[v] == UINT32_MAX) {
+                compact_of[v] = static_cast<uint32_t>(compact_positions.size());
+                compact_positions.push_back(out.vertices[v].position);
+                canonical_of.push_back(v);
+            }
+            compact_indices[k] = compact_of[v];
+        }
+
+        auto resolve_corners = [&](std::vector<uint32_t>& tri_indices) {
+            for (size_t t = 0; t + 2 < tri_indices.size(); t += 3) {
+                const glm::vec3& p0 = out.vertices[tri_indices[t]].position;
+                const glm::vec3& p1 = out.vertices[tri_indices[t + 1]].position;
+                const glm::vec3& p2 = out.vertices[tri_indices[t + 2]].position;
+                glm::vec3 n = glm::cross(p1 - p0, p2 - p0);
+                const float len = glm::length(n);
+                if (len > 0.0f) n /= len;
+                for (int c = 0; c < 3; ++c) {
+                    const auto& candidates = at_position[tri_indices[t + c]];
+                    uint32_t best = tri_indices[t + c];
+                    float best_dot = -2.0f;
+                    for (uint32_t v : candidates) {
+                        const float d = glm::dot(out.vertices[v].normal, n);
+                        if (d > best_dot) { best_dot = d; best = v; }
+                    }
+                    tri_indices[t + c] = best;
+                }
+            }
+        };
+
+        for (const auto& level : lods) {
+            const float screen_size = level.contains("screen_size")
+                                    ? level.at("screen_size").get_value<float>() : 0.0f;
+            MeshLod lod{static_cast<uint32_t>(out.indices.size()), 0u, 0, screen_size};
+
+            if (level.contains("mesh")) {
+                const std::string name = level.at("mesh").get_value<std::string>();
+                std::shared_ptr<fkyaml::node> sib = load_sibling ? load_sibling(name) : nullptr;
+                if (!sib) {
+                    std::fprintf(stderr, "[Mesh] LOD mesh '%s' could not be loaded; level skipped\n", name.c_str());
+                    continue;
+                }
+                std::vector<Vertex>   v;
+                std::vector<uint32_t> i;
+                const bool sib_needs_tangents = parse_unwelded_(*sib, v, i);
+                weld_and_optimize_(v, i);
+                if (sib_needs_tangents) compute_tangents_(v, i);
+                lod.vertex_offset = static_cast<int32_t>(out.vertices.size());
+                lod.index_count   = static_cast<uint32_t>(i.size());
+                out.vertices.insert(out.vertices.end(), v.begin(), v.end());
+                out.indices.insert(out.indices.end(), i.begin(), i.end());
+            } else {
+                const float ratio = level.contains("ratio") ? level.at("ratio").get_value<float>() : 0.5f;
+                // `ratio` drives the level; `error` (relative to the mesh extent, as
+                // meshopt_simplify defines it) optionally caps how far it may deviate, and
+                // stops simplification early when hit. Unset = no cap: a low-poly mesh would
+                // otherwise hit a tight default cap long before the requested ratio.
+                const float error = level.contains("error") ? level.at("error").get_value<float>() : 1.0f;
+                const size_t target = std::max<size_t>(3, static_cast<size_t>(base_count * ratio) / 3 * 3);
+                std::vector<uint32_t> simplified(base_count);
+                float result_error = 0.0f;
+                size_t count = meshopt_simplify(simplified.data(), compact_indices.data(), base_count,
+                                                &compact_positions[0].x, compact_positions.size(),
+                                                sizeof(glm::vec3), target, error, 0, &result_error);
+                if (count == 0) {
+                    std::fprintf(stderr, "[Mesh] LOD ratio %.3f simplified to nothing; level skipped\n", ratio);
+                    continue;
+                }
+                simplified.resize(count);
+                for (uint32_t& idx : simplified) idx = canonical_of[idx];   // back to real vertices
+                resolve_corners(simplified);
+                meshopt_optimizeVertexCache(simplified.data(), simplified.data(), count, base_vertices);
+                lod.index_count = static_cast<uint32_t>(count);
+                out.indices.insert(out.indices.end(), simplified.begin(), simplified.end());
+            }
+            out.lods.push_back(lod);
+        }
+    }
+
     Mesh(std::vector<memory::Buffer> vbs, memory::Buffer ib, uint32_t index_count,
          uint32_t vertex_count, const glm::vec3& bounds_min, const glm::vec3& bounds_max)
         : vertex_buffers_(std::move(vbs)),
@@ -532,7 +790,8 @@ private:
           index_count_(index_count),
           vertex_count_(vertex_count),
           bounds_min_(bounds_min),
-          bounds_max_(bounds_max)
+          bounds_max_(bounds_max),
+          lods_{MeshLod{0u, index_count, 0, 0.0f}}
     {}
 
     /** @brief One entry for a static mesh; one per frame-in-flight for a dynamic one. A vector
@@ -545,6 +804,8 @@ private:
     uint32_t       vertex_count_;  /**< Vertices each buffer was allocated for. */
     glm::vec3      bounds_min_;    /**< Object-space AABB minimum corner. */
     glm::vec3      bounds_max_;    /**< Object-space AABB maximum corner. */
+    std::vector<MeshLod> lods_;            /**< [0] = full mesh; see MeshLod. */
+    float                cull_screen_size_ = 0.0f;
 
     /** @brief Which slot bind() uses. Mutable-free: only update_vertices() advances it, and that
      *         runs before the frame is recorded, never during. */

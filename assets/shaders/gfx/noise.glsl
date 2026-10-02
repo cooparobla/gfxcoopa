@@ -2,7 +2,7 @@
 #define GFX_NOISE_GLSL
 
 // gfx/noise.glsl -- procedural 3D value noise + fbm, for volumetric density
-// fields (see gfx/volumetrics.glsl and volumetrics.frag).
+// fields (see gfx/volumetrics.glsl and volumetrics_march.frag).
 //
 // Declares no uniforms, samplers, or blocks -- same rule as gfx/fog.glsl and
 // gfx/ssr_common.glsl: every input is a function parameter, since different
@@ -49,6 +49,36 @@ float gfx_value_noise_3d(vec3 p) {
                        gfx_hash13(i + vec3(1.0, 0.0, 1.0)), f.x),
                    mix(gfx_hash13(i + vec3(0.0, 1.0, 1.0)),
                        gfx_hash13(i + vec3(1.0, 1.0, 1.0)), f.x), f.y), f.z);
+}
+
+/// 3D hash -> three independent values in [0,1)^3 (Dave Hoskins' hash33, the
+/// vector sibling of gfx_hash13 above, with the same sine-free precision argument).
+vec3 gfx_hash33(vec3 p) {
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.xxy + p.yxx) * p.zyx);
+}
+
+/// Three independent value-noise channels in [0,1]^3 from ONE lattice walk.
+///
+/// For a domain warp, which needs a random VECTOR per point: three scalar
+/// gfx_value_noise_3d() calls at offset positions cost 24 hashes and three
+/// cell setups; this shares the cell and draws all three channels from each
+/// corner's single gfx_hash33 -- 8 hashes, about a third of the cost, for a
+/// field with the same per-channel statistics.
+vec3 gfx_value_noise3_3d(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+
+    return mix(mix(mix(gfx_hash33(i + vec3(0.0, 0.0, 0.0)),
+                       gfx_hash33(i + vec3(1.0, 0.0, 0.0)), f.x),
+                   mix(gfx_hash33(i + vec3(0.0, 1.0, 0.0)),
+                       gfx_hash33(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+               mix(mix(gfx_hash33(i + vec3(0.0, 0.0, 1.0)),
+                       gfx_hash33(i + vec3(1.0, 0.0, 1.0)), f.x),
+                   mix(gfx_hash33(i + vec3(0.0, 1.0, 1.0)),
+                       gfx_hash33(i + vec3(1.0, 1.0, 1.0)), f.x), f.y), f.z);
 }
 
 /// Amplitude-NORMALIZED fbm in [0,1].

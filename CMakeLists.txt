@@ -83,6 +83,20 @@ target_include_directories(gfxcoopa_lib INTERFACE
     ${SMAA_TEXTURES_DIR})
 target_link_libraries(gfxcoopa_lib INTERFACE gfxcoopa_impl coopa::lib ${CMAKE_DL_LIBS})
 
+# meshoptimizer (MIT): vertex welding, vertex-cache ordering and LOD simplification for
+# Mesh's load path (gfxcoopa/engine/data/mesh_build.h). A compiled library rather than
+# header-only, so it is fetched and built here and linked through the interface target --
+# consumers include <meshoptimizer.h> only via mesh_build.h. Pinned to a release tag.
+if(NOT TARGET meshoptimizer)
+    include(FetchContent)
+    FetchContent_Declare(meshoptimizer
+        GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
+        GIT_TAG        v0.25
+        GIT_SHALLOW    TRUE)
+    FetchContent_MakeAvailable(meshoptimizer)
+endif()
+target_link_libraries(gfxcoopa_lib INTERFACE meshoptimizer)
+
 # --- coopa::gfx_pure: types/ only, with NO Vulkan/GLFW include path
 # available at all. A stray `#include <gfxcoopa/memory/buffer.h>` in a
 # target linked against this fails to compile -- this is what makes the

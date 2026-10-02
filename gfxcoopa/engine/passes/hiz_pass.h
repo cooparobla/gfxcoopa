@@ -55,13 +55,23 @@ public:
      *                       A consumer whose march never reaches deep mips (SsaoPass caps
      *                       its march at a fixed pixel radius) passes a small cap and skips
      *                       both the memory and the per-frame draws of the unused tail.
+     * @param external_level0 Don't render level 0 of the chain. The pyramid image then holds
+     *                       levels 1..N only (at half the source resolution), and the
+     *                       consumer reads level 0 straight from the source depth it passed
+     *                       in. Exact for a chain whose level 0 is a plain copy of that depth
+     *                       (both shipped downsample shaders), and saves the full-resolution
+     *                       copy pass. Level numbering (max_mip_level(), src_size) stays that
+     *                       of the full chain; a consumer sampling mip k of full_hiz_view()
+     *                       must subtract one.
      */
     HiZPass(coopa::gfx::core::Device& device,
             coopa::gfx::memory::Allocator& allocator,
             const std::string& vert_spv,
             const std::string& frag_spv,
-            uint32_t max_mip_levels = 0)
-        : device_(device), allocator_(allocator), max_mip_levels_(max_mip_levels)
+            uint32_t max_mip_levels = 0,
+            bool external_level0 = false)
+        : device_(device), allocator_(allocator), max_mip_levels_(max_mip_levels),
+          level_base_(external_level0 ? 1u : 0u)
     {
         // 2. Sampler (Nearest filtering for exact depth reads). max_lod is set in recreate()
         // once mip_levels_ is known, so every mip of the Hi-Z pyramid is actually reachable by
@@ -104,6 +114,13 @@ public:
         height_ = height;
         mip_levels_ = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
         if (max_mip_levels_ > 0) mip_levels_ = std::min(mip_levels_, max_mip_levels_);
+        // Levels this pass renders: the full chain, minus level 0 when the consumer reads
+        // that one from its own depth (external_level0). A chain of nothing but level 0
+        // then owns no image at all -- full_hiz_view() stays null and max_mip_level() is 0.
+        rendered_levels_ = mip_levels_ - level_base_;
+        if (rendered_levels_ == 0) { stage_->rebuild_sets(0); bound_source_ = coopa::gfx::TextureView{}; return; }
+        const uint32_t base_w = std::max(1u, width_  >> level_base_);
+        const uint32_t base_h = std::max(1u, height_ >> level_base_);
 
         // Rebuild the sampler with maxLod = mip_levels_ so textureLod() in ssr.frag can
         // actually reach every coarse mip of the pyramid (see constructor comment above).
@@ -117,8 +134,8 @@ public:
         img_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         img_info.imageType     = VK_IMAGE_TYPE_2D;
         img_info.format        = VK_FORMAT_R32_SFLOAT;
-        img_info.extent        = {width_, height_, 1};
-        img_info.mipLevels     = mip_levels_;
+        img_info.extent        = {base_w, base_h, 1};
+        img_info.mipLevels     = rendered_levels_;
         img_info.arrayLayers   = 1;
         img_info.samples       = VK_SAMPLE_COUNT_1_BIT;
         img_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
@@ -138,19 +155,19 @@ public:
         full_view_info.format                          = VK_FORMAT_R32_SFLOAT;
         full_view_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
         full_view_info.subresourceRange.baseMipLevel   = 0;
-        full_view_info.subresourceRange.levelCount     = mip_levels_;
+        full_view_info.subresourceRange.levelCount     = rendered_levels_;
         full_view_info.subresourceRange.baseArrayLayer = 0;
         full_view_info.subresourceRange.layerCount     = 1;
 
         GFX_VK_CHECK(vkCreateImageView(device_.handle(), &full_view_info, nullptr, &full_view_));
 
-        // Create per-mip views & framebuffers
-        mip_views_.resize(mip_levels_);
-        mip_framebuffers_.resize(mip_levels_);
+        // Create per-mip views & framebuffers. Image mip m is full-chain level m + level_base_.
+        mip_views_.resize(rendered_levels_);
+        mip_framebuffers_.resize(rendered_levels_);
 
-        for (uint32_t m = 0; m < mip_levels_; ++m) {
-            uint32_t mw = std::max(1u, width_ >> m);
-            uint32_t mh = std::max(1u, height_ >> m);
+        for (uint32_t m = 0; m < rendered_levels_; ++m) {
+            uint32_t mw = std::max(1u, base_w >> m);
+            uint32_t mh = std::max(1u, base_h >> m);
 
             VkImageViewCreateInfo view_info{};
             view_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -177,19 +194,33 @@ public:
             GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb_info, nullptr, &mip_framebuffers_[m]));
         }
 
-        stage_->rebuild_sets(mip_levels_);
+        stage_->rebuild_sets(rendered_levels_);
+        bound_source_ = coopa::gfx::TextureView{};   // fresh sets: nothing bound yet
+    }
+
+    /// True when execute() with `source` would have to (re)write descriptors -- the first
+    /// call after construction/recreate(), or a different source view than last time.
+    /// vkUpdateDescriptorSets on a set a pending command buffer references is invalid, so
+    /// a caller that overlaps frames in flight must wait for the GPU before such a frame.
+    bool needs_descriptor_update(coopa::gfx::TextureView source) const {
+        return rendered_levels_ != 0 && source != bound_source_;
     }
 
     void update_descriptors(coopa::gfx::TextureView gbuffer_depth_view) {
-        if (mip_levels_ == 0) return;
-        // Level 0 samples G-Buffer depth
+        if (rendered_levels_ == 0) return;
+        // Every view this binds is fixed between recreate()s, so an unchanged source means
+        // the sets already hold exactly this -- skip the write (see needs_descriptor_update).
+        if (gbuffer_depth_view == bound_source_) return;
+        bound_source_ = gbuffer_depth_view;
+        // The first rendered level samples G-Buffer depth (full-chain level 0 copies it;
+        // with external_level0, level 1 reduces it directly).
         stage_->set(0, 0).bind_image(0, gbuffer_depth_view, *sampler_);
 
-        // Level m >= 1 samples mip_views_[m-1] -- mip_views_ itself stays a raw
+        // Rendered level m >= 1 samples mip_views_[m-1] -- mip_views_ itself stays a raw
         // std::vector<VkImageView> (part of the mip-chain machinery with no sealed
         // equivalent; see the class doc), wrapped per-use via detail::wrap() since this
         // is gfxcoopa's own internal code (the leak gate only scopes consumer repos).
-        for (uint32_t m = 1; m < mip_levels_; ++m) {
+        for (uint32_t m = 1; m < rendered_levels_; ++m) {
             stage_->set(0, m).bind_image(0, coopa::gfx::detail::wrap(mip_views_[m - 1]), *sampler_);
         }
     }
@@ -228,16 +259,18 @@ public:
                                  0, 0, nullptr, 0, nullptr, 1, &depth_barrier);
         }
 
+        if (rendered_levels_ == 0) return;
         cmd.bind_pipeline(stage_->pipeline());
 
-        // 2. Loop through all mip levels
-        for (uint32_t m = 0; m < mip_levels_; ++m) {
-            uint32_t mw = std::max(1u, width_ >> m);
-            uint32_t mh = std::max(1u, height_ >> m);
+        // 2. Loop through the rendered mip levels; L is the full-chain level each one is.
+        for (uint32_t m = 0; m < rendered_levels_; ++m) {
+            const uint32_t L  = m + level_base_;
+            uint32_t mw = std::max(1u, width_ >> L);
+            uint32_t mh = std::max(1u, height_ >> L);
 
             PushConstants pc{};
-            pc.src_size      = (m == 0) ? glm::ivec2(width_, height_) : glm::ivec2(std::max(1u, width_ >> (m - 1)), std::max(1u, height_ >> (m - 1)));
-            pc.is_first_pass = (m == 0) ? 1 : 0;
+            pc.src_size      = (L == 0) ? glm::ivec2(width_, height_) : glm::ivec2(std::max(1u, width_ >> (L - 1)), std::max(1u, height_ >> (L - 1)));
+            pc.is_first_pass = (L == 0) ? 1 : 0;
 
             cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
 
@@ -295,10 +328,16 @@ public:
 
     VkImageView full_hiz_view() const { return full_view_; }
     coopa::gfx::TextureView full_hiz_view_typed() const { return coopa::gfx::detail::wrap(full_view_); }
+    /// Deepest level of the FULL chain (level 0 included even when external_level0 leaves
+    /// it to the consumer).
     uint32_t max_mip_level() const { return mip_levels_ > 0 ? mip_levels_ - 1 : 0; }
+    /// 1 when the consumer reads level 0 from its own depth: mip k of full_hiz_view() is
+    /// full-chain level k + this.
+    uint32_t level_base() const { return level_base_; }
     const util::Sampler& sampler() const { return *sampler_; }
 
 private:
+    coopa::gfx::TextureView bound_source_{};   ///< Source view the sets were last bound to.
     void destroy_resources_() {
         if (full_view_ != VK_NULL_HANDLE) {
             vkDestroyImageView(device_.handle(), full_view_, nullptr);
@@ -326,8 +365,10 @@ private:
 
     uint32_t width_          = 0;
     uint32_t height_         = 0;
-    uint32_t mip_levels_     = 0;
+    uint32_t mip_levels_     = 0; ///< Full-chain level count (level 0 included).
     uint32_t max_mip_levels_ = 0; ///< Constructor cap on the chain length; 0 = full chain.
+    uint32_t level_base_     = 0; ///< First level this pass renders (1 with external_level0).
+    uint32_t rendered_levels_ = 0; ///< mip_levels_ - level_base_; the image's mip count.
 
     VkImage       hiz_image_  = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;

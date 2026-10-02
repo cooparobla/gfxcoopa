@@ -216,7 +216,7 @@ vec3 gfx_fog_base_color(vec3 fog_color, vec3 view_dir, vec3 sun_dir, vec3 sun_co
 
 /// The whole GLOBAL fog composite for one pixel: transmittance along the view
 /// ray, blended toward the base colour. Shared by fog.frag (which is nothing but
-/// this call) and volumetrics.frag (which applies fog itself when the two passes
+/// this call) and volumetrics_composite.frag (which applies fog itself when the two passes
 /// are merged into one, so the frame pays for one fullscreen HDR pass instead of
 /// two) -- one definition, so the merged path cannot drift from the separate one.
 ///

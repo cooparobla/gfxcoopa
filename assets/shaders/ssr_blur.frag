@@ -24,7 +24,11 @@ layout(set = 0, binding = 2) uniform sampler2D g_position_roughness;
 
 layout(push_constant) uniform BlurPushConstants {
     float radius;  // ssr_blur_radius -- sigma for the plane-distance weight scales with it
+    int   flags;   // bit 0: 3x3 footprint instead of 5x5; bit 1: write 0 where every tap is 0
 } pc;
+
+#define BLUR_FLAG_LIGHT     1
+#define BLUR_FLAG_ZERO_SKIP 2
 
 void main() {
     // u_ssr is sampled at ITS OWN native resolution (texelFetch, pixel-exact -- this is the
@@ -51,6 +55,33 @@ void main() {
         return;
     }
     Nc = normalize(Nc);
+
+    // Footprint half-width: 5x5 (the original) or, with BLUR_FLAG_LIGHT, 3x3 -- 9 taps with
+    // 3 reads each instead of 25, the same plane-distance sigma, so the denoise just reaches
+    // one texel less. The weight maths below is unchanged either way.
+    int r = (pc.flags & BLUR_FLAG_LIGHT) != 0 ? 1 : 2;
+
+    // Zero skip (SSR only, exact): where the resolved buffer is exactly zero across the whole
+    // footprint -- rough dielectrics the trace skipped, pixels past the fades -- the weighted
+    // sum below is 0 / wsum = 0 whatever the weights, since the centre tap alone contributes
+    // wn * wd = 1 and keeps wsum above the 1e-5 floor. Every channel must be tested: the
+    // temporal resolve clips colour and confidence independently, so alpha alone can be zero
+    // while rgb is not. These fetches hit the same texels the loop would, from one texture,
+    // against 2 scattered G-buffer reads per tap in the loop.
+    if ((pc.flags & BLUR_FLAG_ZERO_SKIP) != 0) {
+        bool all_zero = true;
+        for (int y = -r; y <= r; ++y) {
+            for (int x = -r; x <= r; ++x) {
+                ivec2 tap_px = clamp(center_px + ivec2(x, y), ivec2(0), size - 1);
+                if (any(notEqual(texelFetch(u_ssr, tap_px, 0), vec4(0.0)))) all_zero = false;
+            }
+        }
+        if (all_zero) {
+            out_ssr = vec4(0.0);
+            return;
+        }
+    }
+
     vec3 Pc = texture(g_position_roughness, in_uv).rgb;
 
     // Plane-distance sigma scales with the blur radius -- same scale-relative philosophy as
@@ -58,13 +89,13 @@ void main() {
     // authored at a different scale), rather than a fixed-in-world-units constant.
     float sigma = max(pc.radius * 0.5, 1e-4);
 
-    // Symmetric 5x5 footprint, identical to ssao_blur.frag's own -- see that file's doc for why
+    // Symmetric footprint, identical to ssao_blur.frag's own -- see that file's doc for why
     // symmetric (not the old asymmetric box-blur footprint) is correct once the source is
     // already temporally denoised before this runs.
     vec4  sum  = vec4(0.0);
     float wsum = 0.0;
-    for (int y = -2; y <= 2; ++y) {
-        for (int x = -2; x <= 2; ++x) {
+    for (int y = -r; y <= r; ++y) {
+        for (int x = -r; x <= r; ++x) {
             vec2  tap_uv = clamp(in_uv + vec2(x, y) * texel_uv, vec2(0.0), vec2(1.0));
             ivec2 tap_px = clamp(center_px + ivec2(x, y), ivec2(0), size - 1);
 

@@ -99,7 +99,7 @@ public:
         for (int i = 0; i < 2; ++i) {
             accum_targets_[i] = std::make_unique<targets::OffscreenTarget>(
                 device, allocator, width, height,
-                coopa::gfx::Format::RGBA16_Sfloat, coopa::gfx::SampleCount::X1);
+                coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly);
         }
 
         resolve_stage_ = std::make_unique<FullscreenStage>(

@@ -16,6 +16,7 @@
 // <gfx/indirect_specular.glsl> to have been included first.
 
 #include <gfx/ao_composite.glsl>
+#include <gfx/bilateral_upsample.glsl>
 
 /// Depth/normal-aware upsample of the (possibly half-resolution) resolved
 /// SSR buffer. Degenerates to a single texel fetch when pc.half_res == 0,
@@ -25,44 +26,10 @@ vec4 gfx_ssr_fetch(vec2 uv, vec3 P, vec3 N, float px_world) {
         return texture(u_ssr_map, uv);
     }
 
-    // Each half-res texel hc was traced from full-res G-buffer texel 2*hc + 1: that is what
-    // ssr.frag's origin_px snapping resolves to when the half-res texel centre
-    // (hc + 0.5) / half_size is scaled by the full-res size. So each tap's surface can be
-    // looked up exactly rather than guessed.
-    vec2  hs   = pc.ssr_resolution;
-    vec2  f    = uv * hs - 0.5;
-    ivec2 base = ivec2(floor(f));
-    vec2  frac = f - vec2(base);
-
-    vec4  sum  = vec4(0.0);
-    float wsum = 0.0;
-
-    for (int dy = 0; dy < 2; ++dy) {
-        for (int dx = 0; dx < 2; ++dx) {
-            ivec2 hc = clamp(base + ivec2(dx, dy), ivec2(0), ivec2(hs) - 1);
-            ivec2 fc = clamp(hc * 2 + 1, ivec2(0), ivec2(pc.screen_resolution) - 1);
-
-            vec3 Pt = texelFetch(g_position_roughness, fc, 0).rgb;
-            vec3 Nt = texelFetch(g_normal_metallic,    fc, 0).rgb;
-
-            float bw = (dx == 0 ? 1.0 - frac.x : frac.x) * (dy == 0 ? 1.0 - frac.y : frac.y);
-
-            // Plane distance rather than raw position distance, so a tap sliding along this
-            // pixel's own surface is not penalised. Normalised by a texel's world size, which
-            // makes the falloff scale-free (same reasoning as ssr.frag's depth-scaled bias).
-            float dw = exp(-abs(dot(Pt - P, N)) / max(2.0 * px_world, 1e-6));
-            float nw = pow(max(dot(normalize(Nt + vec3(1e-6)), N), 0.0), 8.0);
-
-            float w = bw * dw * nw;
-            sum  += texelFetch(u_ssr_map, hc, 0) * w;
-            wsum += w;
-        }
-    }
-
-    // Every tap rejected (a lone pixel of thin geometry, where no half-res sample shares this
-    // surface): fall back to plain bilinear rather than to black, which would punch a hole in
-    // the reflection instead of merely softening it.
-    return (wsum > 1e-5) ? sum / wsum : texture(u_ssr_map, uv);
+    // The shared depth/normal-aware 2x2 upsample (gfx/bilateral_upsample.glsl): half-res
+    // texel hc was traced from full-res texel 2*hc + 1, ssr.frag's origin snapping.
+    return gfx_bilateral_upsample(u_ssr_map, g_position_roughness, g_normal_metallic, uv,
+                                  pc.ssr_resolution, pc.screen_resolution, P, N, px_world);
 }
 
 void main() {

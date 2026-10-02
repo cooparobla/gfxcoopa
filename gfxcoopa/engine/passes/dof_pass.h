@@ -145,9 +145,9 @@ public:
             const std::string& composite_frag_spv)
         : full_width_(full_width), full_height_(full_height),
           half_width_(std::max(1u, full_width / 2u)), half_height_(std::max(1u, full_height / 2u)),
-          coc_target_(device, allocator, half_width_, half_height_, coopa::gfx::Format::RGBA16_Sfloat),
-          bokeh_target_(device, allocator, half_width_, half_height_, coopa::gfx::Format::RGBA16_Sfloat),
-          result_target_(device, allocator, full_width, full_height, coopa::gfx::Format::RGBA16_Sfloat)
+          coc_target_(device, allocator, half_width_, half_height_, coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly),
+          bokeh_target_(device, allocator, half_width_, half_height_, coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly),
+          result_target_(device, allocator, full_width, full_height, coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly)
     {
 
         // One FullscreenStage per stage. They differ only in fragment shader and how

@@ -57,8 +57,9 @@ public:
         int   noise_rotation = 0;               // offset 28
         int   max_mip        = 5;               // offset 32
         float max_radius_px  = 80.0f;           // offset 36 -- upper clamp on the march extent
+        int   gbuffer_scale  = 1;               // offset 40 -- 2 under half_res (see ssao.frag)
     };
-    static_assert(sizeof(PushConstants) == 40,
+    static_assert(sizeof(PushConstants) == 44,
                   "ssao.frag's SsaoPushConstants block must match this layout byte-for-byte");
 
     /// Format of the temporal resolve's two ping-pong targets (each frame renders into one and
@@ -95,8 +96,9 @@ public:
         // to top up -- the resolve then holds accepted-history pixels verbatim, which is
         // what keeps a still image byte-static (see ssao_resolve.frag).
         int       frozen            = 0;             // offset 104
+        int       gbuffer_scale     = 1;             // offset 108 -- 2 under half_res
     };
-    static_assert(sizeof(ResolvePushConstants) == 108, "ssao_resolve.frag's PushConstants block must match this layout byte-for-byte");
+    static_assert(sizeof(ResolvePushConstants) == 112, "ssao_resolve.frag's PushConstants block must match this layout byte-for-byte");
 
     /// Blur-pass GPU push constants.
     struct BlurPushConstants {
@@ -105,6 +107,8 @@ public:
                                     // why it is not derived from the gather radius)
         float max_accum   = 32.0f;  // resolve accumulation cap; drives the count-adaptive dilation
         float motion_px   = 0.0f;   // camera sweep speed in pixels/frame; widens the kernel in motion
+        int   gbuffer_scale = 1;    // 2 under half_res: AO texel t reads G-buffer texel 2t + 1
+        int   light       = 0;      // 1 = 4x4 kernel at a doubled step (Params::blur_light)
     };
 
     /// execute() parameters. Mirrors SsrPass::Params' shape: raw-pass tunables plus temporal
@@ -149,6 +153,9 @@ public:
         // blur's velocity widening (0 at rest keeps the kernel bit-identical to the resting
         // one, which the byte-static contracts depend on).
         float     motion_px            = 0.0f;
+        // Lighter blur: 4x4 taps covering the 8x8 kernel's footprint, with the motion dilation
+        // capped at half the default -- a quarter of the fetches. false = the original 8x8.
+        bool      blur_light           = false;
     };
 
     SsaoPass(coopa::gfx::core::Device& device,
@@ -158,8 +165,10 @@ public:
              const std::string& vert_spv,
              const std::string& raw_frag_spv,
              const std::string& resolve_frag_spv,
-             const std::string& blur_frag_spv)
-        : device_(device), allocator_(allocator)
+             const std::string& blur_frag_spv,
+             bool half_res = false,
+             const std::string& upsample_frag_spv = {})
+        : device_(device), allocator_(allocator), half_res_(half_res && !upsample_frag_spv.empty())
     {
         create_neutral_texture_(cmd_pool);
 
@@ -210,13 +219,14 @@ public:
         raw_sd.vert_spv = vert_spv;
         raw_sd.frag_spv = raw_frag_spv;
         raw_sd.leading_layouts = {&camera_layout};
-        raw_sd.owned_sets = {sampled(3)};
+        raw_sd.owned_sets = {sampled(4)};   // + binding 3: the rasterized depth (pyramid level 0)
         raw_sd.push_constants = {{ShaderStage::Fragment, 0, sizeof(PushConstants)}};
         raw_ = std::make_unique<FullscreenStage>(device, *raw_render_pass_, raw_sd);
 
         // Resolve pass. No camera set -- reprojection uses the reproject push constant:
-        // current raw AO, history AO, G2 position, G1 normal, plus the AO depth pyramid
-        // (mip 0 is an exact copy of the rasterized depth, the reprojection's clip-z source).
+        // current raw AO, history AO, G2 position, G1 normal, plus the rasterized depth
+        // (the reprojection's clip-z source; the AO pyramid's level 0, read straight from
+        // the depth buffer since the pyramid image starts at level 1).
         // Two set instances, one per ping-pong parity: instance i reads target 1-i as history
         // while the pass renders into target i, so no descriptor is ever updated per frame.
         FullscreenStageDesc resolve_sd;
@@ -236,6 +246,20 @@ public:
         blur_sd.push_constants = {{ShaderStage::Fragment, 0, sizeof(BlurPushConstants)}};
         blur_sd.instances = 2;
         blur_ = std::make_unique<FullscreenStage>(device, *blur_render_pass_, blur_sd);
+
+        // Half resolution (Unity HDRP / Unreal style): raw, resolve and blur run at half the
+        // G-buffer's size per axis, and this last stage upsamples the blurred AO back to full
+        // resolution with the shared depth/normal-aware filter (gfx/bilateral_upsample.glsl),
+        // so output_view() is a full-resolution R8 image either way. Camera set 0 for the
+        // upsample's texel-size estimate; own set 1: half-res AO, G1 normal, G2 position.
+        if (half_res_) {
+            FullscreenStageDesc up_sd;
+            up_sd.vert_spv = vert_spv;
+            up_sd.frag_spv = upsample_frag_spv;
+            up_sd.leading_layouts = {&camera_layout};
+            up_sd.owned_sets = {sampled(3)};
+            upsample_ = std::make_unique<FullscreenStage>(device, *blur_render_pass_, up_sd);
+        }
     }
 
     ~SsaoPass() {
@@ -248,8 +272,11 @@ public:
 
     void recreate(uint32_t width, uint32_t height) {
         destroy_resources_();
-        width_  = width;
-        height_ = height;
+        full_width_  = width;
+        full_height_ = height;
+        // The AO itself runs at the trace size: half the G-buffer per axis under half_res.
+        width_  = half_res_ ? std::max(1u, width / 2)  : width;
+        height_ = half_res_ ? std::max(1u, height / 2) : height;
 
         create_target_(raw_image_, raw_allocation_, raw_view_, raw_framebuffer_, *raw_render_pass_,
                        VK_FORMAT_R8_UNORM, 0);
@@ -264,6 +291,11 @@ public:
         }
         create_target_(blur_image_, blur_allocation_, blur_view_, blur_framebuffer_, *blur_render_pass_,
                        VK_FORMAT_R8_UNORM, 0);
+        if (half_res_) {
+            create_target_(upsample_image_, upsample_allocation_, upsample_view_, upsample_framebuffer_,
+                           *blur_render_pass_, VK_FORMAT_R8_UNORM, 0, full_width_, full_height_);
+            upsample_->set().bind_image(0, coopa::gfx::detail::wrap(blur_view_), *raw_sampler_);
+        }
         history_initialized_ = false;
         resolve_parity_      = 0;
 
@@ -284,12 +316,17 @@ public:
     /// (HiZPass::full_hiz_view_typed()/sampler()) -- the raw pass marches it.
     /// linear_sampler: used only for the resolve pass's history read, which samples at a
     /// reprojected (non-texel-aligned) UV -- everything else here stays NEAREST.
+    /// @param hiz_view   The prefiltered depth pyramid, levels 1..N only (built with HiZPass's
+    ///                   external_level0): ssao.frag reads mip k-1 of it for level k.
+    /// @param depth_view The rasterized depth -- level 0 of that pyramid, read directly
+    ///                   instead of being copied into it (exact: level 0 was a texelFetch copy).
     void update_descriptors(coopa::gfx::TextureView g1_view, coopa::gfx::TextureView g2_view,
-                            coopa::gfx::TextureView hiz_view, const util::Sampler& hiz_sampler,
-                            const util::Sampler& linear_sampler) {
+                            coopa::gfx::TextureView hiz_view, coopa::gfx::TextureView depth_view,
+                            const util::Sampler& hiz_sampler, const util::Sampler& linear_sampler) {
         raw_->set().bind_image(0, g1_view, linear_sampler);
         raw_->set().bind_image(1, g2_view, linear_sampler);
         raw_->set().bind_image(2, hiz_view, hiz_sampler);
+        raw_->set().bind_image(3, depth_view, hiz_sampler);
 
         // Parity i renders into resolve target i and reads target 1-i as its history.
         for (uint32_t i = 0; i < 2; ++i) {
@@ -297,10 +334,14 @@ public:
                                            linear_sampler);
             resolve_->set(0, i).bind_image(2, g2_view, *raw_sampler_);
             resolve_->set(0, i).bind_image(3, g1_view, *raw_sampler_);
-            resolve_->set(0, i).bind_image(4, hiz_view, hiz_sampler);
+            resolve_->set(0, i).bind_image(4, depth_view, hiz_sampler);   // u_depth: level 0 = the depth buffer
 
             blur_->set(0, i).bind_image(1, g1_view, *raw_sampler_);
             blur_->set(0, i).bind_image(2, g2_view, *raw_sampler_);
+        }
+        if (half_res_) {
+            upsample_->set().bind_image(1, g1_view, *raw_sampler_);
+            upsample_->set().bind_image(2, g2_view, *raw_sampler_);
         }
     }
 
@@ -361,8 +402,11 @@ public:
         raw_pc.power          = params.power;
         raw_pc.slices         = params.slices;
         raw_pc.steps          = params.steps;
-        raw_pc.resolution_x   = static_cast<float>(width_);
-        raw_pc.resolution_y   = static_cast<float>(height_);
+        // The FULL size even under half_res: ssao.frag works in G-buffer pixels throughout, so
+        // the march keeps exactly the full-resolution footprint and only shades fewer pixels.
+        raw_pc.resolution_x   = static_cast<float>(full_width_);
+        raw_pc.resolution_y   = static_cast<float>(full_height_);
+        raw_pc.gbuffer_scale  = half_res_ ? 2 : 1;
         raw_pc.noise_rotation = params.temporal_enabled ? params.noise_rotation : 0;
         raw_pc.max_mip        = params.max_mip;
         raw_pc.max_radius_px  = params.max_radius_px;
@@ -424,6 +468,7 @@ public:
         resolve_pc.prev_camera_pos_y = prev_camera_pos_.y;
         resolve_pc.prev_camera_pos_z = prev_camera_pos_.z;
         resolve_pc.frozen            = params.frozen ? 1 : 0;
+        resolve_pc.gbuffer_scale     = half_res_ ? 2 : 1;
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, resolve_pc);
         resolve_->draw(cmd);
 
@@ -455,10 +500,34 @@ public:
         blur_pc.max_accum = params.temporal_enabled
             ? static_cast<float>(params.temporal_frames) : 0.0f;
         blur_pc.motion_px = params.motion_px;
+        blur_pc.gbuffer_scale = half_res_ ? 2 : 1;
+        blur_pc.light = params.blur_light ? 1 : 0;
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, blur_pc);
         blur_->draw(cmd);
 
         cmd.end_render_pass();
+
+        // --- 3b. Half resolution: upsample the blurred AO to the G-buffer's size ---
+        if (half_res_) {
+            image_barrier_(cmd, blur_image_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            VkClearValue up_clear{};
+            up_clear.color = {{1.0f, 0.0f, 0.0f, 0.0f}};
+            VkRenderPassBeginInfo up_rp_info{};
+            up_rp_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            up_rp_info.renderPass        = blur_render_pass_->handle();
+            up_rp_info.framebuffer       = upsample_framebuffer_;
+            up_rp_info.renderArea.offset = {0, 0};
+            up_rp_info.renderArea.extent = {full_width_, full_height_};
+            up_rp_info.clearValueCount   = 1;
+            up_rp_info.pClearValues      = &up_clear;
+            vkCmdBeginRenderPass(cmd.handle(), &up_rp_info, VK_SUBPASS_CONTENTS_INLINE);
+            upsample_->bind(cmd, full_width_, full_height_);
+            cmd.bind_descriptor_set(camera_set, 0);
+            upsample_->draw(cmd);
+            cmd.end_render_pass();
+        }
 
         // --- 4. This parity's resolve target IS next frame's history: flip the parity so the
         // next execute() reads it through the other descriptor-set instance. No copy runs.
@@ -467,8 +536,9 @@ public:
         prev_camera_pos_ = params.camera_pos;
     }
 
-    VkImageView output_view() const { return blur_view_; }
-    coopa::gfx::TextureView output_view_typed() const { return coopa::gfx::detail::wrap(blur_view_); }
+    /// The final AO: full resolution either way (the upsample target under half_res).
+    VkImageView output_view() const { return half_res_ ? upsample_view_ : blur_view_; }
+    coopa::gfx::TextureView output_view_typed() const { return coopa::gfx::detail::wrap(output_view()); }
     const util::Sampler& sampler() const { return *blur_sampler_; }
 
     /// A permanent 1x1 texel = 255 (fully unoccluded) texture, valid from construction and never
@@ -516,13 +586,16 @@ private:
 
     void create_target_(VkImage& image, VmaAllocation& allocation, VkImageView& view,
                         VkFramebuffer& framebuffer, coopa::gfx::pipeline::RenderPass& render_pass,
-                        VkFormat format, VkImageUsageFlags extra_usage)
+                        VkFormat format, VkImageUsageFlags extra_usage,
+                        uint32_t w = 0, uint32_t h = 0)
     {
+        if (w == 0) w = width_;
+        if (h == 0) h = height_;
         VkImageCreateInfo img_info{};
         img_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         img_info.imageType     = VK_IMAGE_TYPE_2D;
         img_info.format        = format;
-        img_info.extent        = {width_, height_, 1};
+        img_info.extent        = {w, h, 1};
         img_info.mipLevels     = 1;
         img_info.arrayLayers   = 1;
         img_info.samples       = VK_SAMPLE_COUNT_1_BIT;
@@ -553,8 +626,8 @@ private:
         fb_info.renderPass      = render_pass.handle();
         fb_info.attachmentCount = 1;
         fb_info.pAttachments    = &view;
-        fb_info.width           = width_;
-        fb_info.height          = height_;
+        fb_info.width           = w;
+        fb_info.height          = h;
         fb_info.layers          = 1;
 
         GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb_info, nullptr, &framebuffer));
@@ -567,6 +640,7 @@ private:
                             resolved_images_[i], resolved_allocations_[i]);
         }
         destroy_target_(blur_view_, blur_framebuffer_, blur_image_, blur_allocation_);
+        destroy_target_(upsample_view_, upsample_framebuffer_, upsample_image_, upsample_allocation_);
     }
 
     void destroy_target_(VkImageView& view, VkFramebuffer& framebuffer, VkImage& image, VmaAllocation& allocation) {
@@ -588,8 +662,17 @@ private:
     coopa::gfx::core::Device&      device_;
     coopa::gfx::memory::Allocator& allocator_;
 
-    uint32_t width_  = 0;
+    uint32_t width_  = 0;   ///< AO trace size (half the G-buffer under half_res_)
     uint32_t height_ = 0;
+    uint32_t full_width_  = 0;   ///< G-buffer size
+    uint32_t full_height_ = 0;
+    bool     half_res_    = false;
+
+    std::unique_ptr<FullscreenStage> upsample_;
+    VkImage       upsample_image_       = VK_NULL_HANDLE;
+    VmaAllocation upsample_allocation_  = VK_NULL_HANDLE;
+    VkImageView   upsample_view_        = VK_NULL_HANDLE;
+    VkFramebuffer upsample_framebuffer_ = VK_NULL_HANDLE;
 
     VkImage       raw_image_       = VK_NULL_HANDLE;
     VmaAllocation raw_allocation_  = VK_NULL_HANDLE;

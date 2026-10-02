@@ -154,12 +154,14 @@ public:
         // 1. Directional Shadow Pipeline
         dir_vert_ = std::make_unique<pipeline::Shader>(device, dir_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         dir_frag_ = std::make_unique<pipeline::Shader>(device, dir_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-        dir_pipeline_ = create_dir_pipeline_(*dir_vert_, *dir_frag_);
+        dir_pipeline_        = create_dir_pipeline_(*dir_vert_, *dir_frag_, false);
+        dir_pipeline_culled_ = create_dir_pipeline_(*dir_vert_, *dir_frag_, true);
 
         // 2. Cube Shadow Pipeline
         cube_vert_ = std::make_unique<pipeline::Shader>(device, cube_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         cube_frag_ = std::make_unique<pipeline::Shader>(device, cube_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-        cube_pipeline_ = create_cube_pipeline_(*cube_vert_, *cube_frag_);
+        cube_pipeline_        = create_cube_pipeline_(*cube_vert_, *cube_frag_, false);
+        cube_pipeline_culled_ = create_cube_pipeline_(*cube_vert_, *cube_frag_, true);
     }
 
     /**
@@ -179,18 +181,27 @@ public:
      * @param dir_frag_spv   Resolved .spv path for this shader's directional shadow fragment entry point.
      * @param cube_vert_spv  Resolved .spv path for this shader's cube shadow vertex entry point.
      * @param cube_frag_spv  Resolved .spv path for this shader's cube shadow fragment entry point.
+     * @param cull           The shader's own SurfaceShaderDesc::cull. None (a two-sided card,
+     *                       say) means the variant never back-face culls its casters either,
+     *                       whatever the material asks; Back builds a culled pipeline too.
      */
     void add_variant(const std::string& name,
                      const std::string& dir_vert_spv, const std::string& dir_frag_spv,
-                     const std::string& cube_vert_spv, const std::string& cube_frag_spv) {
+                     const std::string& cube_vert_spv, const std::string& cube_frag_spv,
+                     coopa::gfx::CullMode cull = coopa::gfx::CullMode::None) {
         Variant v;
         v.dir_vert  = std::make_unique<pipeline::Shader>(device_, dir_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         v.dir_frag  = std::make_unique<pipeline::Shader>(device_, dir_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-        v.dir_pipeline = create_dir_pipeline_(*v.dir_vert, *v.dir_frag);
+        v.dir_pipeline = create_dir_pipeline_(*v.dir_vert, *v.dir_frag, false);
 
         v.cube_vert = std::make_unique<pipeline::Shader>(device_, cube_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         v.cube_frag = std::make_unique<pipeline::Shader>(device_, cube_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-        v.cube_pipeline = create_cube_pipeline_(*v.cube_vert, *v.cube_frag);
+        v.cube_pipeline = create_cube_pipeline_(*v.cube_vert, *v.cube_frag, false);
+
+        if (cull != coopa::gfx::CullMode::None) {
+            v.dir_pipeline_culled  = create_dir_pipeline_(*v.dir_vert, *v.dir_frag, true);
+            v.cube_pipeline_culled = create_cube_pipeline_(*v.cube_vert, *v.cube_frag, true);
+        }
 
         variants_.emplace(name, std::move(v));
     }
@@ -206,9 +217,21 @@ public:
 
     /// Binds a named variant's directional pipeline, or the stock one if `name` is empty
     /// or unregistered (see PBRMaterial::shader's doc: empty means "stock").
-    void bind_directional(command::CommandBuffer& cmd, const std::string& name) const {
+    ///
+    /// `cull_backfaces` (PBRMaterial::cull_backfaces) selects the back-face-culled pipeline
+    /// -- a closed caster's back faces are hidden behind its front faces from the light
+    /// too, so culling them halves the caster's raster work without changing the map. A
+    /// variant registered with CullMode::None ignores it and always draws both sides.
+    void bind_directional(command::CommandBuffer& cmd, const std::string& name,
+                          bool cull_backfaces = false) const {
         auto it = variants_.find(name);
-        cmd.bind_pipeline(it != variants_.end() ? *it->second.dir_pipeline : *dir_pipeline_);
+        if (it != variants_.end()) {
+            const Variant& v = it->second;
+            cmd.bind_pipeline((cull_backfaces && v.dir_pipeline_culled) ? *v.dir_pipeline_culled
+                                                                         : *v.dir_pipeline);
+            return;
+        }
+        cmd.bind_pipeline(cull_backfaces ? *dir_pipeline_culled_ : *dir_pipeline_);
     }
 
     void push_directional(command::CommandBuffer& cmd, const DirectionalShadowPushConstants& pc) const {
@@ -220,10 +243,17 @@ public:
     }
 
     /// Binds a named variant's cube pipeline, or the stock one if `name` is empty or
-    /// unregistered.
-    void bind_cube(command::CommandBuffer& cmd, const std::string& name) const {
+    /// unregistered. `cull_backfaces` as for bind_directional().
+    void bind_cube(command::CommandBuffer& cmd, const std::string& name,
+                   bool cull_backfaces = false) const {
         auto it = variants_.find(name);
-        cmd.bind_pipeline(it != variants_.end() ? *it->second.cube_pipeline : *cube_pipeline_);
+        if (it != variants_.end()) {
+            const Variant& v = it->second;
+            cmd.bind_pipeline((cull_backfaces && v.cube_pipeline_culled) ? *v.cube_pipeline_culled
+                                                                          : *v.cube_pipeline);
+            return;
+        }
+        cmd.bind_pipeline(cull_backfaces ? *cube_pipeline_culled_ : *cube_pipeline_);
     }
 
     void push_cube(command::CommandBuffer& cmd, const CubeShadowPushConstants& pc) const {
@@ -234,14 +264,28 @@ private:
     struct Variant {
         std::unique_ptr<pipeline::Shader>   dir_vert, dir_frag;
         std::unique_ptr<pipeline::Pipeline> dir_pipeline;
+        std::unique_ptr<pipeline::Pipeline> dir_pipeline_culled;    // null: variant is two-sided
         std::unique_ptr<pipeline::Shader>   cube_vert, cube_frag;
         std::unique_ptr<pipeline::Pipeline> cube_pipeline;
+        std::unique_ptr<pipeline::Pipeline> cube_pipeline_culled;   // null: variant is two-sided
     };
 
-    std::unique_ptr<pipeline::Pipeline> create_dir_pipeline_(pipeline::Shader& vert, pipeline::Shader& frag) {
+    /// Raster state for a shadow pipeline. Shadow targets render with a POSITIVE-height
+    /// viewport and unflipped light matrices (ShadowMapTarget; pixel_math.h's
+    /// compute_dir_shadow_fit_slice explains why), unlike the main passes' negative-height
+    /// viewport -- so a triangle that is counter-clockwise (front-facing) in the main view
+    /// lands CLOCKWISE in a shadow map's framebuffer. The culled variant therefore names
+    /// Clockwise as its front face; with CounterClockwise it would cull the FRONT faces.
+    static void set_shadow_raster_(pipeline::PipelineDesc& desc, bool cull_backfaces) {
+        desc.raster.cull  = cull_backfaces ? coopa::gfx::CullMode::Back : coopa::gfx::CullMode::None;
+        desc.raster.front = coopa::gfx::FrontFace::Clockwise;
+    }
+
+    std::unique_ptr<pipeline::Pipeline> create_dir_pipeline_(pipeline::Shader& vert, pipeline::Shader& frag,
+                                                             bool cull_backfaces) {
         pipeline::PipelineDesc desc;
         desc.vertex       = vertex_layout_;
-        desc.raster.cull  = coopa::gfx::CullMode::None;
+        set_shadow_raster_(desc, cull_backfaces);
         desc.depth.test   = true;
         desc.depth.write  = true;
         if (material_layout_ != nullptr) {
@@ -253,10 +297,11 @@ private:
         return std::make_unique<pipeline::Pipeline>(device_, dir_pass_, desc);
     }
 
-    std::unique_ptr<pipeline::Pipeline> create_cube_pipeline_(pipeline::Shader& vert, pipeline::Shader& frag) {
+    std::unique_ptr<pipeline::Pipeline> create_cube_pipeline_(pipeline::Shader& vert, pipeline::Shader& frag,
+                                                              bool cull_backfaces) {
         pipeline::PipelineDesc desc;
         desc.vertex       = vertex_layout_;
-        desc.raster.cull  = coopa::gfx::CullMode::None;
+        set_shadow_raster_(desc, cull_backfaces);
         desc.depth.test   = true;
         desc.depth.write  = true;
         if (material_layout_ != nullptr) {
@@ -277,10 +322,12 @@ private:
     std::unique_ptr<pipeline::Shader>   dir_vert_;
     std::unique_ptr<pipeline::Shader>   dir_frag_;
     std::unique_ptr<pipeline::Pipeline> dir_pipeline_;
+    std::unique_ptr<pipeline::Pipeline> dir_pipeline_culled_;
 
     std::unique_ptr<pipeline::Shader>   cube_vert_;
     std::unique_ptr<pipeline::Shader>   cube_frag_;
     std::unique_ptr<pipeline::Pipeline> cube_pipeline_;
+    std::unique_ptr<pipeline::Pipeline> cube_pipeline_culled_;
 
     std::map<std::string, Variant> variants_;
 };

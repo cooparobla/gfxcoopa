@@ -267,6 +267,14 @@ public:
     /// dynamic objects rely on SSR alone.
     bool affects_reflection_probes = true;
 
+    /// Multiplies this renderer's projected screen size before LOD selection: > 1 keeps
+    /// detail longer (a hero prop), < 1 drops it sooner. The mesh's own LOD table (its
+    /// `lods` block or `.lod.yaml` sidecar -- see data::Mesh::build_cpu) sets the levels.
+    float lod_bias = 1.0f;
+
+    /// False pins this renderer to LOD 0 and ignores the mesh's cull_screen_size.
+    bool lods_enabled = true;
+
 private:
     std::string mesh_path_; /**< Logical mesh path from YAML. */
     coopa::asset::AssetHandle<coopa::gfx::engine::data::Mesh> mesh_; /**< Refcounted GPU-resident mesh handle. */

@@ -99,7 +99,7 @@ struct alignas(16) VolumeGPU {
  * @struct VolumetricsUBO
  * @brief std140-aligned shared march state plus up to MAX_VOLUMES local volumes.
  *
- * Must match volumetrics.frag's VolumetricsUBO block field for field. Scalars are
+ * Must match gfx/volumetrics_ubo.glsl's VolumetricsUBO block field for field. Scalars are
  * packed into vec4s alongside related fields, matching FogUBO/LightUBO.
  */
 struct alignas(16) VolumetricsUBO {
@@ -147,6 +147,18 @@ struct alignas(16) VolumetricsUBO {
                                                  y = tiles per atlas row, z = selection inset in
                                                  tile uv, w = dither band (unused here -- the
                                                  march has no TAA behind it to resolve a dither). */
+
+    // Froxel mode (FroxelVolumetricsPass), appended last per the matching-prefix rule. The
+    // raymarcher ignores all three.
+    glm::mat4 prev_view_proj = glm::mat4(1.0f); /**< LAST frame's unjittered view-projection, for
+                                                 reprojecting a froxel into the previous grid. */
+    glm::vec4 froxel_grid   = glm::vec4(0.0f); /**< x = W, y = H (froxels per slice), z = D (slices),
+                                                 w = slices per atlas row. */
+    glm::vec4 froxel_params = glm::vec4(0.0f); /**< x = grid near distance, y = grid far distance,
+                                                 z = temporal history weight, w = 1 when last frame's
+                                                 grid is valid history. */
+    glm::vec4 prev_camera_pos = glm::vec4(0.0f); /**< xyz = LAST frame's camera position (a froxel's
+                                                 previous slice is its distance from there). */
 };
 
 /**

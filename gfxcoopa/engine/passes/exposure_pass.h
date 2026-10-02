@@ -69,7 +69,7 @@ public:
         : linear_sampler_(coopa::gfx::engine::util::Sampler::linear(device))
     {
         target_ = std::make_unique<targets::OffscreenTarget>(
-            device, allocator, 1, 1, coopa::gfx::Format::R16_Sfloat, coopa::gfx::SampleCount::X1);
+            device, allocator, 1, 1, coopa::gfx::Format::R16_Sfloat, targets::kColorOnly);
         // Last frame's result, which the shader blends against. TRANSFER_DST so
         // copy_history_() can vkCmdCopyImage target_ into it after each draw.
         history_image_ = std::make_unique<coopa::gfx::memory::Image>(

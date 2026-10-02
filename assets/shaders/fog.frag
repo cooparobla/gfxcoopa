@@ -2,7 +2,7 @@
 
 // Fullscreen GLOBAL fog composite. Fog is global-only and config-driven; local
 // volumes of every kind (including static fog pockets) are raymarched by
-// VolumetricsPass instead -- see volumetrics.frag / VolumeComponent.
+// VolumetricsPass instead -- see volumetrics_march.frag / VolumeComponent.
 //
 // Fullscreen fog composite. Vertex stage is the shared tonemapping.vert
 // fullscreen triangle (see engine/passes/fog_pass.h). Reads the scene colour
@@ -59,7 +59,7 @@ void main() {
     vec4 world    = u_fog.inv_view_proj * vec4(ndc, 1.0);
     vec3 view_dir = normalize(world.xyz / world.w - cam_pos);
 
-    // The composite itself lives in gfx/fog.glsl, shared with volumetrics.frag's
+    // The composite itself lives in gfx/fog.glsl, shared with volumetrics_composite.frag's
     // merged path (see gfx_fog_apply's doc) so the two cannot drift.
     float d_geo = is_sky ? 0.0 : distance(A, texture(g_position_roughness, in_uv).rgb);
 

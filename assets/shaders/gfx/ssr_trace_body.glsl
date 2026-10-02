@@ -72,6 +72,22 @@ struct GfxSsrHit {
 GfxSsrHit gfx_ssr_trace_dir(vec3 P, vec3 N, vec3 R, float roughness, mat4 inv_proj, GfxSsrParams sp) {
     vec3 V = normalize(P - camera.camera_pos);
 
+#ifdef GFX_SSR_SKIP_ZERO_WEIGHT
+    // Exact early-out, opt-in. Three of the confidence fades applied after a hit (dir_fade,
+    // roughness_fade, grazing_fade -- computed identically below) depend only on the origin
+    // and the ray, not on what the ray hits. When their product is 0 the result is
+    // zero-confidence whatever the march finds, so don't march. Returned as a MISS, which is
+    // only equivalent for a caller that uses nothing but colour * confidence (ssr.frag,
+    // ssgi.frag define GFX_SSR_SKIP_ZERO_WEIGHT). A caller that branches on .hit -- the forward
+    // transparent shading's miss fallback -- must not define it, or its grazing band changes.
+    {
+        float pre_dir   = 1.0 - smoothstep(0.25, 0.85, dot(-V, R));
+        float pre_rough = 1.0 - smoothstep(sp.roughness_cutoff - 0.3, sp.roughness_cutoff, roughness);
+        float pre_graze = smoothstep(0.0, 0.05, max(dot(N, -V), 0.0));
+        if (pre_dir * pre_rough * pre_graze <= 0.0) return GfxSsrHit(vec3(0.0), 0.0, 0.0, false);
+    }
+#endif
+
     // Depth-scaled bias. The self-reflection this exists to prevent is a screen-space
     // phenomenon -- the ray must clear roughly one texel's worth of the source surface -- so
     // the correct model is a bias constant in TEXELS, not in metres.

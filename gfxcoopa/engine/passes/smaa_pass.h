@@ -67,11 +67,11 @@ public:
         smaa_textures_ = std::make_unique<util::SmaaTextures>(device, allocator, cmd_pool);
 
         edges_target_ = std::make_unique<targets::OffscreenTarget>(
-            device, allocator, width, height, coopa::gfx::Format::RG8_Unorm, coopa::gfx::SampleCount::X1
+            device, allocator, width, height, coopa::gfx::Format::RG8_Unorm, targets::kColorOnly
         );
 
         blend_target_ = std::make_unique<targets::OffscreenTarget>(
-            device, allocator, width, height, coopa::gfx::Format::RGBA8_Unorm, coopa::gfx::SampleCount::X1
+            device, allocator, width, height, coopa::gfx::Format::RGBA8_Unorm, targets::kColorOnly
         );
 
         // One FullscreenStage per SMAA stage. All three share the same pipeline shape

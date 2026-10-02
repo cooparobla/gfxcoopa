@@ -140,7 +140,8 @@ public:
     bool draw_frame(std::function<void(command::CommandBuffer&)> record_fn,
                     VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}},
                     std::function<void()> on_resize = nullptr,
-                    std::function<void(command::CommandBuffer&)> pre_pass_fn = nullptr)
+                    std::function<void(command::CommandBuffer&)> pre_pass_fn = nullptr,
+                    std::function<void(command::CommandBuffer&)> post_pass_fn = nullptr)
     {
         // Wait for this frame slot to be free.
         in_flight_fences_[current_frame_]->wait();
@@ -191,6 +192,9 @@ public:
         record_fn(cmd);
 
         cmd.end_render_pass();
+        // After the swapchain pass, before the command buffer closes -- outside any render
+        // pass, e.g. for a closing GPU timestamp.
+        if (post_pass_fn) post_pass_fn(cmd);
         cmd.end();
 
         // Submit.
@@ -250,9 +254,11 @@ public:
     bool begin_frame(std::function<void(command::CommandBuffer&)> record_fn,
                      VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}},
                      std::function<void()> on_resize = nullptr,
-                     std::function<void(command::CommandBuffer&)> pre_pass_fn = nullptr)
+                     std::function<void(command::CommandBuffer&)> pre_pass_fn = nullptr,
+                     std::function<void(command::CommandBuffer&)> post_pass_fn = nullptr)
     {
-        return draw_frame(std::move(record_fn), clear_color, std::move(on_resize), std::move(pre_pass_fn));
+        return draw_frame(std::move(record_fn), clear_color, std::move(on_resize), std::move(pre_pass_fn),
+                          std::move(post_pass_fn));
     }
 
     /**
