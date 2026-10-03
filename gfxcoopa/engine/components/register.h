@@ -212,6 +212,13 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
             material.shader_params[static_cast<int>(i)] = p[i].get_value<float>();
         }
     }
+    // A flat list of up to 8 floats: [0,4) -> shader_params_ext[0], [4,8) -> [1].
+    if (mat_node.contains("shader_params_ext")) {
+        const auto& p = mat_node.at("shader_params_ext");
+        for (size_t i = 0; i < 8 && i < p.size(); ++i) {
+            material.shader_params_ext[i / 4][static_cast<int>(i % 4)] = p[i].get_value<float>();
+        }
+    }
 }
 
 /**

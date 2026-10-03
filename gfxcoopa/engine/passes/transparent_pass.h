@@ -255,19 +255,22 @@ public:
     /**
      * @brief Registers a derived shader's own vertex/fragment pair as a named variant,
      *        reusing this pass's descriptor set layouts, render pass, and blend/depth
-     *        state -- only the shader modules differ (see GBufferPipeline::add_variant()
-     *        for the general shape; this pass doesn't offer a cull override since every
-     *        BLEND material already shares CullMode::Back).
+     *        state -- only the shader modules and, optionally, the cull mode differ (see
+     *        GBufferPipeline::add_variant() for the general shape). Back-face culling is the
+     *        default every BLEND material shares; a surface meant to be seen from both sides
+     *        (water, viewed from under its surface) passes CullMode::None.
      *
      * @param name     The SurfaceShaderDesc's name.
      * @param vert_spv Resolved .spv path for this shader's transparent vertex entry point.
      * @param frag_spv Resolved .spv path for this shader's transparent fragment entry point.
+     * @param cull     Face culling for this variant (Back unless the surface is two-sided).
      */
-    void add_variant(const std::string& name, const std::string& vert_spv, const std::string& frag_spv) {
+    void add_variant(const std::string& name, const std::string& vert_spv, const std::string& frag_spv,
+                     coopa::gfx::CullMode cull = coopa::gfx::CullMode::Back) {
         Variant v;
         v.vert_shader = std::make_unique<coopa::gfx::pipeline::Shader>(device_, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         v.frag_shader = std::make_unique<coopa::gfx::pipeline::Shader>(device_, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
-        v.pipeline    = create_pipeline_(*v.vert_shader, *v.frag_shader);
+        v.pipeline    = create_pipeline_(*v.vert_shader, *v.frag_shader, cull);
         variants_.emplace(name, std::move(v));
     }
 
@@ -340,14 +343,15 @@ private:
     /// add_variant() call route through here so the only thing that can differ between
     /// them is the two shader modules.
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> create_pipeline_(
-        coopa::gfx::pipeline::Shader& vert, coopa::gfx::pipeline::Shader& frag) {
+        coopa::gfx::pipeline::Shader& vert, coopa::gfx::pipeline::Shader& frag,
+        coopa::gfx::CullMode cull = coopa::gfx::CullMode::Back) {
         coopa::gfx::pipeline::PipelineDesc desc;
         desc.shaders = {&vert, &frag};
         desc.vertex  = coopa::gfx::engine::data::Vertex::layout().append(coopa::gfx::engine::data::InstanceData::layout());
         desc.descriptor_layouts = layouts_;
         desc.push_constants = {{coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, 0,
                                 static_cast<uint32_t>(sizeof(PushConstants) + extra_pc_bytes_)}};
-        desc.raster.cull  = coopa::gfx::CullMode::Back;
+        desc.raster.cull  = cull;
         desc.raster.front = coopa::gfx::FrontFace::CounterClockwise;
         desc.depth.test    = true;                                    // test against the opaque G-Buffer depth
         desc.depth.write   = false;                                   // never occlude other transparents

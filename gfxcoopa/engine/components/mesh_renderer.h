@@ -123,10 +123,19 @@ struct PBRMaterial {
 
     /// Four author-defined floats reaching the surface shader's gfx_params (see
     /// gfx/surface/gbuffer_vs.glsl) -- e.g. foliage's wind strength/frequency/direction.xy,
-    /// or water's wave amplitude/speed/direction.xy. Meaningless (and unread by every
+    /// or water's base Gerstner wave (amplitude, wavelength, direction, steepness). Meaningless (and unread by every
     /// backbone) when shader is empty. Zero-initialized rather than left uninitialized so a
     /// material that sets `shader` but forgets a param gets 0.0, not garbage.
     glm::vec4 shader_params = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    /// Eight more author-defined floats, as two vec4s, for derived shaders whose hooks need
+    /// more than shader_params' four -- e.g. water's foam/shoreline look (see
+    /// water_surface.glsl). Unlike shader_params, these reach the FRAGMENT stage of the forward
+    /// transparent backbone only (gfx_params_ext0/1 in gfx/surface/transparent_fs.glsl): the
+    /// opaque G-buffer/shadow backbones' push blocks have no room left under Vulkan's
+    /// guaranteed 128 bytes, and nothing opaque needs them yet. Zero-initialized for the same
+    /// reason as shader_params.
+    glm::vec4 shader_params_ext[2] = {glm::vec4(0.0f), glm::vec4(0.0f)};
 
     // Populated by register_render_components()'s "MeshRenderer" parser once the corresponding
     // texture_* path above has been loaded via coopa::asset::AssetManager. All four handles are
