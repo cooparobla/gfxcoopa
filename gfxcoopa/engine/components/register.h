@@ -168,7 +168,7 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
         // asset_manager.h's load_async()) -- resolving here first, the same way, is what makes
         // the two agree on which asset this is, rather than declaring a color space for a
         // virtual-path AssetId the loader's finalize_typed() will never look up.
-        std::string resolved = assets.source().resolve(path, ctx.scene_dir);
+        std::string resolved = assets.source().resolve(path, ctx.base_dir());
         auto it = color_space_overrides.find(path);
         texture_loader->declare_color_space(resolved, it != color_space_overrides.end() ? it->second : slot_default);
     };
@@ -176,22 +176,22 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
     if (mat_node.contains("texture_albedo")) {
         material.texture_albedo = mat_node.at("texture_albedo").get_value<std::string>();
         declare_color_space(material.texture_albedo, ColorSpace::Srgb);
-        material.albedo_handle = assets.load_async<data::Texture>(material.texture_albedo, ctx.scene_dir);
+        material.albedo_handle = assets.load_async<data::Texture>(material.texture_albedo, ctx.base_dir());
     }
     if (mat_node.contains("texture_normal")) {
         material.texture_normal = mat_node.at("texture_normal").get_value<std::string>();
         declare_color_space(material.texture_normal, ColorSpace::Linear);
-        material.normal_handle = assets.load_async<data::Texture>(material.texture_normal, ctx.scene_dir);
+        material.normal_handle = assets.load_async<data::Texture>(material.texture_normal, ctx.base_dir());
     }
     if (mat_node.contains("texture_metallic_roughness")) {
         material.texture_metallic_roughness = mat_node.at("texture_metallic_roughness").get_value<std::string>();
         declare_color_space(material.texture_metallic_roughness, ColorSpace::Linear);
-        material.metallic_roughness_handle = assets.load_async<data::Texture>(material.texture_metallic_roughness, ctx.scene_dir);
+        material.metallic_roughness_handle = assets.load_async<data::Texture>(material.texture_metallic_roughness, ctx.base_dir());
     }
     if (mat_node.contains("texture_alpha_mask")) {
         material.texture_alpha_mask = mat_node.at("texture_alpha_mask").get_value<std::string>();
         declare_color_space(material.texture_alpha_mask, ColorSpace::Linear);
-        material.alpha_mask_handle = assets.load_async<data::Texture>(material.texture_alpha_mask, ctx.scene_dir);
+        material.alpha_mask_handle = assets.load_async<data::Texture>(material.texture_alpha_mask, ctx.base_dir());
     }
 
     // Derived surface shader (see PBRMaterial::shader's doc and the layered-shaders plan's
@@ -223,7 +223,7 @@ inline fkyaml::node load_material_document_(const std::string& ref, coopa::asset
                                             const coopa::scene::SceneLoader::ParseContext& ctx) {
     std::string path = ref;
     if (!coopa::yaml::is_document_ext(path)) path += ".yaml";
-    const std::string resolved = assets.source().resolve(path, ctx.scene_dir);
+    const std::string resolved = assets.source().resolve(path, ctx.base_dir());
     if (!coopa::yaml::document_exists(resolved)) {
         throw std::runtime_error("[gfxcoopa] Material '" + ref + "' not found (looked for '" + path +
                                  "' in the scene directory and asset roots)");
@@ -310,11 +310,30 @@ inline void register_render_components(core::Device& device,
                 // decode hasn't necessarily run yet; the caller must poll AssetManager::update()
                 // (e.g. via a startup drain loop) and check mr->mesh_handle() then.
                 std::string mesh_virtual_path = "meshes/" + mesh_path_key + ".yaml";
-                mr->set_mesh(assets.load_async<data::Mesh>(mesh_virtual_path, ctx.scene_dir));
+                mr->set_mesh(assets.load_async<data::Mesh>(mesh_virtual_path, ctx.base_dir()));
             }
 
             if (node.contains("material")) {
                 parse_material_value_(node.at("material"), mr->material, assets, ctx);
+            }
+            // Per-slot materials (submeshes): a list by slot index, or a map by slot name.
+            if (node.contains("materials")) {
+                const auto& mats = node.at("materials");
+                if (mats.is_sequence()) {
+                    uint32_t slot = 0;
+                    for (const auto& m : mats) {
+                        PBRMaterial pm = slot == 0 ? mr->material : PBRMaterial{};
+                        parse_material_value_(m, pm, assets, ctx);
+                        mr->material_for_mut(slot) = pm;
+                        ++slot;
+                    }
+                } else if (mats.is_mapping()) {
+                    for (const auto& [k, m] : mats.as_map()) {
+                        PBRMaterial pm;
+                        parse_material_value_(m, pm, assets, ctx);
+                        mr->pending_named_materials.push_back({k.get_value<std::string>(), pm});
+                    }
+                }
             }
         });
 

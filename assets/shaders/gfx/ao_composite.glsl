@@ -33,4 +33,30 @@ float gfx_specular_occlusion(float ndotv, float ao, float roughness) {
     return clamp(pow(ndotv + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
 }
 
+/// Every occlusion factor a shaded point needs, computed ONE way -- the deferred lighting
+/// pass, the SSR composite, the debug channels, the forward path and the editor's viewport
+/// shading all call this, so ambient occlusion looks identical wherever it is applied.
+struct GfxAoTerms {
+    float occlusion;   ///< min(material AO, screen-space AO)
+    vec3  diffuse;     ///< multi-bounce factor for indirect diffuse
+    vec3  specular;    ///< specular-occlusion cone, multi-bounce tinted by F0, for indirect specular
+    vec3  direct;      ///< factor for direct light: diffuse faded in by direct_strength
+};
+
+/// @param material_ao      The material's own AO (1 = none).
+/// @param ssao             Screen-space AO visibility, 1.0 when SSAO is off / unavailable
+///                         (forward surfaces, ssao_enabled false, an editor toggle off).
+/// @param direct_strength  How much AO also darkens direct light (ssao_direct_lighting_strength).
+GfxAoTerms gfx_ao_terms(float material_ao, float ssao, vec3 albedo, vec3 F0, float ndotv,
+                        float roughness, float direct_strength) {
+    GfxAoTerms t;
+    // Material AO and screen-space AO estimate the same quantity at different scales, so
+    // they combine by min() -- multiplying would double-darken where both see a crease.
+    t.occlusion = min(material_ao, ssao);
+    t.diffuse   = gfx_gtao_multi_bounce(t.occlusion, albedo);
+    t.specular  = gfx_gtao_multi_bounce(gfx_specular_occlusion(ndotv, t.occlusion, roughness), F0);
+    t.direct    = mix(vec3(1.0), t.diffuse, direct_strength);
+    return t;
+}
+
 #endif // GFX_AO_COMPOSITE_GLSL

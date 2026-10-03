@@ -17,6 +17,8 @@
 #include <coopa/asset/asset_handle.h>
 #include <glm/glm.hpp>
 #include <string>
+#include <utility>
+#include <vector>
 #include <memory>
 
 #include <gfxcoopa/engine/data/mesh.h>
@@ -253,7 +255,46 @@ public:
      */
     bool is_ready() const { return mesh_.is_loaded(); }
 
+    /// Slot 0's material -- the whole mesh for a mesh without material slots.
     PBRMaterial material;
+
+    /**
+     * Materials for the mesh's other slots (submeshes, see data::MeshPart): entry i is slot
+     * i + 1. A slot with no entry here falls back to `material`. Filled from YAML
+     * `materials:` -- a list (by slot index, entry 0 = slot 0) or a map keyed by the mesh's
+     * slot names, which can only be resolved once the mesh has loaded (resolve_slot_names()).
+     */
+    std::vector<PBRMaterial> slot_materials;
+
+    /** @brief The material for slot `slot`. */
+    const PBRMaterial& material_for(uint32_t slot) const {
+        if (slot == 0 || slot > slot_materials.size()) return material;
+        return slot_materials[slot - 1];
+    }
+    /** @brief Writable slot material (grows the table; slot 0 is `material`). */
+    PBRMaterial& material_for_mut(uint32_t slot) {
+        if (slot == 0) return material;
+        while (slot_materials.size() < slot) slot_materials.push_back(material);
+        return slot_materials[slot - 1];
+    }
+
+    /// Materials keyed by slot NAME, waiting for the mesh to load (see resolve_slot_names()).
+    std::vector<std::pair<std::string, PBRMaterial>> pending_named_materials;
+
+    /**
+     * @brief Applies pending name-keyed materials once the mesh (and so its slot names) is
+     *        ready. Cheap no-op otherwise; the render pipeline calls it every frame.
+     */
+    void resolve_slot_names() {
+        if (pending_named_materials.empty() || !is_ready()) return;
+        const auto& mesh = *mesh_.get();
+        for (auto& [name, mat] : pending_named_materials) {
+            const int slot = mesh.slot_index(name);
+            if (slot < 0) continue;   // unknown slot name: ignored, as an unknown key would be
+            material_for_mut(static_cast<uint32_t>(slot)) = mat;
+        }
+        pending_named_materials.clear();
+    }
 
     /// Whether reflection probes may bake this renderer into their captured
     /// cubemaps. Defaults to true (static scenery). Set false on animated /

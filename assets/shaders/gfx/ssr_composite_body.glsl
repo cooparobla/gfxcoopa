@@ -84,9 +84,9 @@ void main() {
     // subtraction, and multi-bounce diffuse occlusion for the SSGI bounce below. The
     // subtraction cancels the ind.value term lighting added, so any drift between the two
     // factors shows up as a halo or double-darkening at reflective pixels.
-    float occlusion = min(ao, ssao);
-    float spec_occ  = gfx_specular_occlusion(max(dot(N, V), 0.0), occlusion, roughness);
-    vec3  ao_spec   = gfx_gtao_multi_bounce(spec_occ, F0);
+    const GfxAoTerms aot = gfx_ao_terms(ao, ssao, albedo, F0, max(dot(N, V), 0.0), roughness, 0.0);
+    const float occlusion = aot.occlusion;
+    const vec3  ao_spec   = aot.specular;
     // Clamp: a false-positive SSR hit against nearby dark geometry can leave ssr_specular
     // near zero, making the unclamped delta go negative -- a visible black speckle rather
     // than "no reflection here".

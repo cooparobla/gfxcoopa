@@ -188,6 +188,20 @@ struct InstanceData {
  * draw's index range (and vertex offset, for a hand-authored level whose vertices are
  * appended after LOD 0's) -- never a buffer bind.
  */
+/**
+ * @struct MeshPart
+ * @brief One material slot's range of a LOD's indices (a "submesh").
+ *
+ * A mesh file may assign each face a material slot (`material_slots` + `face_materials`);
+ * triangles are grouped by slot, so slot i's triangles are one contiguous index range in
+ * every LOD. A renderer draws each part with that slot's material. Ranges are absolute into
+ * the shared index buffer and use the LOD's vertex_offset; a part may be empty in a LOD.
+ */
+struct MeshPart {
+    uint32_t first_index = 0;
+    uint32_t index_count = 0;
+};
+
 struct MeshLod {
     uint32_t first_index   = 0;
     uint32_t index_count   = 0;
@@ -195,6 +209,9 @@ struct MeshLod {
     /// Draw this level while the object's projected height (fraction of the screen, see
     /// toyengine/render/visibility.h's screen_height_fraction) is below this. Unused for LOD 0.
     float    screen_size   = 0.0f;
+    /// Per material slot, contiguous and covering [first_index, first_index + index_count).
+    /// Empty means a single part: the whole level.
+    std::vector<MeshPart> parts;
 };
 
 /**
@@ -205,6 +222,7 @@ struct MeshCpuData {
     std::vector<Vertex>   vertices;
     std::vector<uint32_t> indices;
     std::vector<MeshLod>  lods;              ///< [0] is the full mesh.
+    std::vector<std::string> slot_names;     ///< Material slot names (`material_slots`); empty = one unnamed slot.
     float                 cull_screen_size = 0.0f;
     glm::vec3             bounds_min{0.0f};
     glm::vec3             bounds_max{0.0f};
@@ -274,8 +292,12 @@ public:
                                      load_sibling = {})
     {
         MeshCpuData out;
-        const bool needs_tangents = parse_unwelded_(node, out.vertices, out.indices);
-        weld_and_optimize_(out.vertices, out.indices);
+        out.slot_names = parse_slot_names_(node);
+        std::vector<uint32_t> tri_slots;
+        const bool needs_tangents = parse_unwelded_(node, out.vertices, out.indices, &tri_slots);
+        // Group triangles by material slot (stable), so each slot is one index range.
+        const std::vector<MeshPart> parts = sort_by_slot_(out.indices, tri_slots, slot_count_(out.slot_names, tri_slots));
+        weld_and_optimize_(out.vertices, out.indices, parts);
         if (needs_tangents) compute_tangents_(out.vertices, out.indices);
 
         out.bounds_min = glm::vec3(std::numeric_limits<float>::max());
@@ -286,7 +308,7 @@ public:
         }
 
         // LOD 0 is always the full mesh; its threshold is never consulted.
-        out.lods.push_back({0u, static_cast<uint32_t>(out.indices.size()), 0, 0.0f});
+        out.lods.push_back({0u, static_cast<uint32_t>(out.indices.size()), 0, 0.0f, parts.size() > 1 ? parts : std::vector<MeshPart>{}});
 
         const fkyaml::node* cfg = lod_config ? lod_config : &node;
         if (cfg->contains("cull_screen_size")) {
@@ -322,6 +344,7 @@ public:
                   data.bounds_min, data.bounds_max);
         if (!data.lods.empty()) mesh.lods_ = std::move(data.lods);
         mesh.cull_screen_size_ = data.cull_screen_size;
+        mesh.slot_names_ = std::move(data.slot_names);
         return mesh;
     }
 
@@ -489,6 +512,42 @@ public:
         cmd.draw_indexed(l.index_count, l.first_index, l.vertex_offset, instance_count, first_instance);
     }
 
+    /**
+     * @brief Records an instanced draw of one material slot's part of a LOD level. A level
+     *        without parts draws whole as part 0 (and nothing for other parts); an empty part
+     *        records nothing.
+     */
+    void draw_lod_part(command::CommandBuffer& cmd, uint32_t lod, uint32_t part, uint32_t instance_count,
+                       uint32_t first_instance) const {
+        const MeshLod& l = lods_[std::min<size_t>(lod, lods_.size() - 1)];
+        if (l.parts.empty()) {
+            if (part == 0) cmd.draw_indexed(l.index_count, l.first_index, l.vertex_offset, instance_count, first_instance);
+            return;
+        }
+        if (part >= l.parts.size() || l.parts[part].index_count == 0) return;
+        cmd.draw_indexed(l.parts[part].index_count, l.parts[part].first_index, l.vertex_offset, instance_count, first_instance);
+    }
+
+    /** @brief Number of material slots (parts); at least 1. */
+    uint32_t part_count() const {
+        size_t n = std::max<size_t>(1, slot_names_.size());
+        for (const auto& l : lods_) n = std::max(n, l.parts.size());
+        return static_cast<uint32_t>(n);
+    }
+    /** @brief Material slot names from the file (`material_slots`); empty when unnamed. */
+    const std::vector<std::string>& slot_names() const { return slot_names_; }
+    /** @brief Slot index for a name, or -1. */
+    int slot_index(const std::string& name) const {
+        for (size_t i = 0; i < slot_names_.size(); ++i) if (slot_names_[i] == name) return static_cast<int>(i);
+        return -1;
+    }
+    /** @brief Index count of one part in a LOD (stats). */
+    uint32_t part_index_count(uint32_t lod, uint32_t part) const {
+        const MeshLod& l = lods_[std::min<size_t>(lod, lods_.size() - 1)];
+        if (l.parts.empty()) return part == 0 ? l.index_count : 0;
+        return part < l.parts.size() ? l.parts[part].index_count : 0;
+    }
+
     /** @brief Returns the minimum corner of the object-space bounding box. */
     const glm::vec3& bounds_min() const { return bounds_min_; }
 
@@ -507,7 +566,13 @@ private:
     /// @return True when the file carries no tangents: every corner then holds the same
     ///         placeholder tangent, and the caller must run compute_tangents_() after welding.
     static bool parse_unwelded_(const fkyaml::node& node, std::vector<Vertex>& vertices,
-                                std::vector<uint32_t>& indices) {
+                                std::vector<uint32_t>& indices, std::vector<uint32_t>* tri_slots = nullptr) {
+        // Optional per-face material slot (`face_materials`, parallel to `faces`).
+        std::vector<uint32_t> face_slots;
+        if (tri_slots && node.contains("face_materials")) {
+            for (const auto& fm : node.at("face_materials")) face_slots.push_back(fm.get_value<uint32_t>());
+        }
+        size_t face_index = 0;
         // --- Parse positions ---
         std::vector<glm::vec3> positions;
         if (node.contains("vertices")) {
@@ -569,10 +634,13 @@ private:
                     face_indices.push_back(idx_node.get_value<uint32_t>());
                 }
 
+                const uint32_t slot = face_index < face_slots.size() ? face_slots[face_index] : 0u;
+                ++face_index;
                 if (face_indices.size() < 3) continue;
 
                 // Fan triangulation from the first vertex.
                 for (size_t i = 1; i + 1 < face_indices.size(); ++i) {
+                    if (tri_slots) tri_slots->push_back(slot);
                     uint32_t v_indices[3] = {
                         face_indices[0],
                         face_indices[i],
@@ -639,6 +707,47 @@ private:
         }
     }
 
+    /** @brief `material_slots` names, if the file has them. */
+    static std::vector<std::string> parse_slot_names_(const fkyaml::node& node) {
+        std::vector<std::string> names;
+        if (node.contains("material_slots")) {
+            for (const auto& n : node.at("material_slots")) names.push_back(n.get_value<std::string>());
+        }
+        return names;
+    }
+    static uint32_t slot_count_(const std::vector<std::string>& names, const std::vector<uint32_t>& tri_slots) {
+        uint32_t n = static_cast<uint32_t>(std::max<size_t>(1, names.size()));
+        for (uint32_t s : tri_slots) n = std::max(n, s + 1);
+        return n;
+    }
+
+    /**
+     * @brief Stable-reorders an unwelded triangle list so each slot's triangles are
+     *        contiguous; returns the per-slot ranges (one entry per slot, possibly empty).
+     */
+    static std::vector<MeshPart> sort_by_slot_(std::vector<uint32_t>& indices, const std::vector<uint32_t>& tri_slots,
+                                               uint32_t slot_count) {
+        const size_t tris = indices.size() / 3;
+        std::vector<MeshPart> parts(slot_count);
+        if (slot_count <= 1 || tri_slots.size() != tris) {
+            parts.assign(1, MeshPart{0u, static_cast<uint32_t>(indices.size())});
+            return parts;
+        }
+        std::vector<uint32_t> sorted;
+        sorted.reserve(indices.size());
+        for (uint32_t s = 0; s < slot_count; ++s) {
+            parts[s].first_index = static_cast<uint32_t>(sorted.size());
+            for (size_t t = 0; t < tris; ++t) {
+                if (tri_slots[t] != s) continue;
+                sorted.insert(sorted.end(), indices.begin() + static_cast<std::ptrdiff_t>(t * 3),
+                              indices.begin() + static_cast<std::ptrdiff_t>(t * 3 + 3));
+            }
+            parts[s].index_count = static_cast<uint32_t>(sorted.size()) - parts[s].first_index;
+        }
+        indices = std::move(sorted);
+        return parts;
+    }
+
 public:
     /// Welds byte-identical vertices and reorders for the vertex cache and fetch locality.
     /// Public for CPU-built meshes (e.g. terrain chunks) that go through from_arrays().
@@ -647,7 +756,8 @@ public:
     }
 
 private:
-    static void weld_and_optimize_(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices) {
+    static void weld_and_optimize_(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices,
+                                   const std::vector<MeshPart>& parts = {}) {
         if (vertices.empty() || indices.empty()) return;
         std::vector<unsigned int> remap(vertices.size());
         const size_t unique = meshopt_generateVertexRemap(remap.data(), indices.data(), indices.size(),
@@ -655,7 +765,17 @@ private:
         std::vector<Vertex> welded(unique);
         meshopt_remapVertexBuffer(welded.data(), vertices.data(), vertices.size(), sizeof(Vertex), remap.data());
         meshopt_remapIndexBuffer(indices.data(), indices.data(), indices.size(), remap.data());
-        meshopt_optimizeVertexCache(indices.data(), indices.data(), indices.size(), unique);
+        // Cache-optimize each material part on its own: a global pass would reorder triangles
+        // across parts and break their contiguous ranges. (Fetch optimization below only
+        // renumbers vertices, so it can stay global.)
+        if (parts.size() > 1) {
+            for (const MeshPart& p : parts) {
+                if (p.index_count == 0) continue;
+                meshopt_optimizeVertexCache(indices.data() + p.first_index, indices.data() + p.first_index, p.index_count, unique);
+            }
+        } else {
+            meshopt_optimizeVertexCache(indices.data(), indices.data(), indices.size(), unique);
+        }
         meshopt_optimizeVertexFetch(welded.data(), indices.data(), indices.size(),
                                     welded.data(), unique, sizeof(Vertex));
         vertices = std::move(welded);
@@ -670,6 +790,9 @@ private:
     static void build_lods_(const fkyaml::node& lods, MeshCpuData& out,
                             const std::function<std::shared_ptr<fkyaml::node>(const std::string&)>& load_sibling) {
         const uint32_t base_count = out.lods[0].index_count;
+        const std::vector<MeshPart> base_parts = out.lods[0].parts.empty()
+            ? std::vector<MeshPart>{MeshPart{0u, base_count}} : out.lods[0].parts;
+        const uint32_t base_slot_count = static_cast<uint32_t>(base_parts.size());
         const std::vector<uint32_t> base(out.indices.begin(), out.indices.begin() + base_count);
         const size_t base_vertices = out.vertices.size();
 
@@ -748,36 +871,59 @@ private:
                 }
                 std::vector<Vertex>   v;
                 std::vector<uint32_t> i;
-                const bool sib_needs_tangents = parse_unwelded_(*sib, v, i);
-                weld_and_optimize_(v, i);
+                std::vector<uint32_t> sib_slots;
+                const bool sib_needs_tangents = parse_unwelded_(*sib, v, i, &sib_slots);
+                // The sibling's slots map onto the base mesh's by NAME (a sibling without slot
+                // names is drawn whole as the base's slot 0).
+                const std::vector<std::string> sib_names = parse_slot_names_(*sib);
+                for (uint32_t& sl : sib_slots) {
+                    uint32_t mapped = 0;
+                    if (sl < sib_names.size()) {
+                        for (size_t k = 0; k < out.slot_names.size(); ++k) if (out.slot_names[k] == sib_names[sl]) mapped = static_cast<uint32_t>(k);
+                    }
+                    sl = mapped;
+                }
+                const std::vector<MeshPart> sib_parts = sort_by_slot_(i, sib_slots, base_slot_count);
+                weld_and_optimize_(v, i, sib_parts);
                 if (sib_needs_tangents) compute_tangents_(v, i);
                 lod.vertex_offset = static_cast<int32_t>(out.vertices.size());
                 lod.index_count   = static_cast<uint32_t>(i.size());
+                if (base_slot_count > 1) {
+                    for (const MeshPart& p : sib_parts) lod.parts.push_back({lod.first_index + p.first_index, p.index_count});
+                }
                 out.vertices.insert(out.vertices.end(), v.begin(), v.end());
                 out.indices.insert(out.indices.end(), i.begin(), i.end());
             } else {
                 const float ratio = level.contains("ratio") ? level.at("ratio").get_value<float>() : 0.5f;
-                // `ratio` drives the level; `error` (relative to the mesh extent, as
-                // meshopt_simplify defines it) optionally caps how far it may deviate, and
-                // stops simplification early when hit. Unset = no cap: a low-poly mesh would
-                // otherwise hit a tight default cap long before the requested ratio.
                 const float error = level.contains("error") ? level.at("error").get_value<float>() : 1.0f;
-                const size_t target = std::max<size_t>(3, static_cast<size_t>(base_count * ratio) / 3 * 3);
-                std::vector<uint32_t> simplified(base_count);
-                float result_error = 0.0f;
-                size_t count = meshopt_simplify(simplified.data(), compact_indices.data(), base_count,
-                                                &compact_positions[0].x, compact_positions.size(),
-                                                sizeof(glm::vec3), target, error, 0, &result_error);
-                if (count == 0) {
+                // Simplify each material part separately (its own range of LOD 0), locking the
+                // part's border when there are several so neighbouring parts stay stitched.
+                std::vector<uint32_t> level_indices;
+                std::vector<MeshPart> level_parts;
+                const unsigned int options = base_parts.size() > 1 ? meshopt_SimplifyLockBorder : 0u;
+                for (const MeshPart& bp : base_parts) {
+                    const uint32_t start = static_cast<uint32_t>(level_indices.size());
+                    if (bp.index_count < 3) { level_parts.push_back({lod.first_index + start, 0u}); continue; }
+                    const size_t target = std::max<size_t>(3, static_cast<size_t>(bp.index_count * ratio) / 3 * 3);
+                    std::vector<uint32_t> simplified(bp.index_count);
+                    float result_error = 0.0f;
+                    size_t count = meshopt_simplify(simplified.data(), compact_indices.data() + bp.first_index, bp.index_count,
+                                                    &compact_positions[0].x, compact_positions.size(),
+                                                    sizeof(glm::vec3), target, error, options, &result_error);
+                    simplified.resize(count);
+                    for (uint32_t& idx : simplified) idx = canonical_of[idx];   // back to real vertices
+                    resolve_corners(simplified);
+                    if (count > 0) meshopt_optimizeVertexCache(simplified.data(), simplified.data(), count, base_vertices);
+                    level_indices.insert(level_indices.end(), simplified.begin(), simplified.end());
+                    level_parts.push_back({lod.first_index + start, static_cast<uint32_t>(count)});
+                }
+                if (level_indices.empty()) {
                     std::fprintf(stderr, "[Mesh] LOD ratio %.3f simplified to nothing; level skipped\n", ratio);
                     continue;
                 }
-                simplified.resize(count);
-                for (uint32_t& idx : simplified) idx = canonical_of[idx];   // back to real vertices
-                resolve_corners(simplified);
-                meshopt_optimizeVertexCache(simplified.data(), simplified.data(), count, base_vertices);
-                lod.index_count = static_cast<uint32_t>(count);
-                out.indices.insert(out.indices.end(), simplified.begin(), simplified.end());
+                lod.index_count = static_cast<uint32_t>(level_indices.size());
+                if (base_parts.size() > 1) lod.parts = std::move(level_parts);
+                out.indices.insert(out.indices.end(), level_indices.begin(), level_indices.end());
             }
             out.lods.push_back(lod);
         }
@@ -806,6 +952,7 @@ private:
     glm::vec3      bounds_max_;    /**< Object-space AABB maximum corner. */
     std::vector<MeshLod> lods_;            /**< [0] = full mesh; see MeshLod. */
     float                cull_screen_size_ = 0.0f;
+    std::vector<std::string> slot_names_;  /**< Material slot names (`material_slots`). */
 
     /** @brief Which slot bind() uses. Mutable-free: only update_vertices() advances it, and that
      *         runs before the frame is recorded, never during. */
