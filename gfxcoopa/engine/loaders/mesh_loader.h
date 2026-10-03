@@ -20,6 +20,7 @@
 #include <coopa/asset/asset_id.h>
 
 #include <fkYAML/node.hpp>
+#include <coopa/yaml/document.h>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
@@ -29,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -59,9 +61,9 @@ public:
     std::shared_ptr<data::MeshCpuData> decode_typed(const coopa::asset::AssetId& id,
                                                     const coopa::asset::LoadContext& ctx) override {
         auto read = [](const std::filesystem::path& path) -> std::shared_ptr<fkyaml::node> {
-            std::ifstream ifs(path);
-            if (!ifs) return nullptr;
-            return std::make_shared<fkyaml::node>(fkyaml::node::deserialize(ifs));
+            std::optional<fkyaml::node> node = coopa::yaml::try_load_document(coopa::yaml::resolve_variant(path));
+            if (!node) return nullptr;
+            return std::make_shared<fkyaml::node>(std::move(*node));
         };
         const std::filesystem::path path(ctx.resolved_path);
         std::shared_ptr<fkyaml::node> node = read(path);
@@ -69,10 +71,10 @@ public:
             throw std::runtime_error("[MeshLoader] Failed to open '" + id.path() + "'");
         }
 
+        // "x.yaml" and "x.caml" both look for "x.lod.yaml", which read() also finds as "x.lod.caml".
         std::filesystem::path sidecar = path;
         sidecar.replace_extension(".lod.yaml");
-        std::shared_ptr<fkyaml::node> lod_cfg;
-        if (std::filesystem::exists(sidecar)) lod_cfg = read(sidecar);
+        std::shared_ptr<fkyaml::node> lod_cfg = read(sidecar);
 
         const std::filesystem::path dir = path.parent_path();
         auto load_sibling = [&read, &dir](const std::string& name) { return read(dir / (name + ".yaml")); };

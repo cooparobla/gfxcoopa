@@ -53,9 +53,34 @@ float vol_ray_depth(vec2 uv, vec3 cam_pos) {
 // Integrated grid at fractional depth: atlas entry k holds (scatter, T) from the camera to
 // the FAR edge of slice k, so boundary b (0..D) is (0,1) at b = 0 and entry b-1 otherwise;
 // lerp between the two boundaries around this distance.
+//
+// froxel_params2.y > 0 jitters the lookup per pixel and per frame by up to +-jitter/2 froxel
+// in xy and slice in depth (Unreal's r.VolumetricFog.UpsampleJitterMultiplier). Plain
+// trilinear filtering spreads each froxel's error over a whole 8-px cell, which shows as a
+// grid while the history is still converging; the jitter turns that into per-pixel noise
+// for TAA to resolve. The pipeline sends 0 when TAA is off. The depth jitter is symmetric,
+// so it adds no bias, though it can read up to half a slice past an opaque surface.
+//
+// IGN with the same R2 frame shift as gfx_volume_ign (gfx/volumetrics.glsl), copied rather
+// than included so the composite does not pull in the whole density-field library.
+float vol_lookup_ign(vec2 px, int frame) {
+    px += 5.588238 * float(frame & 63);
+    return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715))));
+}
+
 vec4 vol_froxel_lookup(vec2 uv, float dist) {
     float D  = u_vol.froxel_grid.z;
     float fs = vol_froxel_slice_of(dist);          // 0..D, boundary coordinate
+    float jitter = u_vol.froxel_params2.y;
+    if (jitter > 0.0) {
+        int  frame = int(u_vol.time_params.z);
+        vec2 px    = gl_FragCoord.xy;
+        vec3 n     = vec3(vol_lookup_ign(px, frame),
+                          vol_lookup_ign(px + vec2(47.0, 17.0), frame + 21),
+                          vol_lookup_ign(px + vec2(19.0, 83.0), frame + 42)) - 0.5;
+        uv += n.xy * jitter / u_vol.froxel_grid.xy;
+        fs  = clamp(fs + n.z * jitter, 0.0, D);
+    }
     float b0 = clamp(floor(fs), 0.0, D);
     float b1 = min(b0 + 1.0, D);
     vec4 v0 = (b0 < 0.5) ? vec4(0.0, 0.0, 0.0, 1.0) : vol_froxel_sample(march_result, uv, int(b0) - 1);

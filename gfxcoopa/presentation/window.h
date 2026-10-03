@@ -229,6 +229,27 @@ public:
     }
 
     /**
+     * @brief Returns the window size in screen coordinates -- the space cursor positions are
+     *        reported in. Equal to framebuffer_size() except on HiDPI/Retina displays.
+     */
+    std::pair<uint32_t, uint32_t> window_size() const {
+        int w = 0, h = 0;
+        glfwGetWindowSize(window_, &w, &h);
+        return { static_cast<uint32_t>(w), static_cast<uint32_t>(h) };
+    }
+
+    /**
+     * @brief Framebuffer pixels per screen coordinate (2 on a Retina display, else 1): the
+     *        factor that turns a cursor position into framebuffer pixels.
+     */
+    float content_scale() const {
+        const auto [fw, fh] = framebuffer_size();
+        const auto [ww, wh] = window_size();
+        (void)fh; (void)wh;
+        return ww > 0 && fw > 0 ? static_cast<float>(fw) / static_cast<float>(ww) : 1.0f;
+    }
+
+    /**
      * @brief Returns true if the framebuffer was resized since last checked.
      *
      * Call reset_resized() after handling the resize event (e.g. after

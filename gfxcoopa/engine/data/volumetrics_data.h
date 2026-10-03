@@ -159,6 +159,9 @@ struct alignas(16) VolumetricsUBO {
                                                  grid is valid history. */
     glm::vec4 prev_camera_pos = glm::vec4(0.0f); /**< xyz = LAST frame's camera position (a froxel's
                                                  previous slice is its distance from there). */
+    glm::vec4 froxel_params2 = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f); /**< x = samples per froxel where
+                                                 there is no history, y = composite lookup jitter in
+                                                 froxels / slices (0 = off; only useful under TAA). */
 };
 
 /**

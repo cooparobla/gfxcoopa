@@ -54,6 +54,8 @@ layout(set = 1, binding = 0) uniform VolumetricsUBO {
     vec4 froxel_grid;      // x = W, y = H, z = D (slices), w = slices per atlas row
     vec4 froxel_params;    // x = near, y = far, z = history weight, w = history valid
     vec4 prev_camera_pos;  // xyz = last frame's camera position
+    vec4 froxel_params2;   // x = samples per froxel on a history miss,
+                           // y = composite lookup jitter (froxels / slices; 0 = off)
 } u_vol;
 
 #endif // GFX_VOLUMETRICS_UBO_GLSL

@@ -33,6 +33,7 @@
 #include <coopa/scene/scene_object.h>
 #include <coopa/asset/asset_manager.h>
 #include <fkYAML/node.hpp>
+#include <coopa/yaml/document.h>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
@@ -213,6 +214,47 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
     }
 }
 
+/**
+ * @brief Resolves a material reference ("materials/brick", or with an explicit .yaml/.caml)
+ *        to the parsed material document, through the asset search roots.
+ * @throws std::runtime_error if the reference names no existing file.
+ */
+inline fkyaml::node load_material_document_(const std::string& ref, coopa::asset::AssetManager& assets,
+                                            const coopa::scene::SceneLoader::ParseContext& ctx) {
+    std::string path = ref;
+    if (!coopa::yaml::is_document_ext(path)) path += ".yaml";
+    const std::string resolved = assets.source().resolve(path, ctx.scene_dir);
+    if (!coopa::yaml::document_exists(resolved)) {
+        throw std::runtime_error("[gfxcoopa] Material '" + ref + "' not found (looked for '" + path +
+                                 "' in the scene directory and asset roots)");
+    }
+    return coopa::yaml::load_document(coopa::yaml::resolve_variant(resolved));
+}
+
+/**
+ * @brief Parses a renderer's `material:` value in any of its three forms:
+ *
+ *   material: materials/brick                       # a shared material asset
+ *   material: { base: materials/brick, roughness: 0.3 }   # an asset plus per-object overrides
+ *   material: { albedo: { r: 1, g: 0, b: 0 }, ... }        # fully inline
+ *
+ * A material asset file holds exactly the keys an inline block does. Texture paths inside
+ * it resolve like any other asset path (scene directory first, then the asset roots).
+ */
+inline void parse_material_value_(const fkyaml::node& value, PBRMaterial& material,
+                                  coopa::asset::AssetManager& assets,
+                                  const coopa::scene::SceneLoader::ParseContext& ctx) {
+    if (value.is_string()) {
+        parse_pbr_material_(load_material_document_(value.get_value<std::string>(), assets, ctx), material, assets, ctx);
+        return;
+    }
+    if (value.is_mapping() && value.contains("base") && value.at("base").is_string()) {
+        parse_pbr_material_(load_material_document_(value.at("base").get_value<std::string>(), assets, ctx),
+                            material, assets, ctx);
+    }
+    if (value.is_mapping()) parse_pbr_material_(value, material, assets, ctx);
+}
+
 /// Parses a `{x:, y:, z:}` node into a glm::vec3, leaving components at
 /// `fallback`'s when absent -- the same partial-override convention every
 /// other vec3 field in this file already follows (DirectionalLight's
@@ -272,7 +314,7 @@ inline void register_render_components(core::Device& device,
             }
 
             if (node.contains("material")) {
-                parse_pbr_material_(node.at("material"), mr->material, assets, ctx);
+                parse_material_value_(node.at("material"), mr->material, assets, ctx);
             }
         });
 
@@ -541,7 +583,7 @@ inline void register_render_components(core::Device& device,
                 sr->smoothing = node.at("smoothing").get_value<float>();
 
             if (node.contains("material")) {
-                parse_pbr_material_(node.at("material"), sr->material, assets, ctx);
+                parse_material_value_(node.at("material"), sr->material, assets, ctx);
             }
         });
 

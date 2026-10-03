@@ -17,6 +17,7 @@
 #include <coopa/asset/asset_id.h>
 
 #include <fkYAML/node.hpp>
+#include <coopa/yaml/document.h>
 
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
 
@@ -44,11 +45,7 @@ class SkinnedMeshSourceLoader : public coopa::asset::TypedAssetLoader<data::Skin
 public:
     std::shared_ptr<data::SkinnedMeshSource> decode_typed(const coopa::asset::AssetId& id,
                                                           const coopa::asset::LoadContext& ctx) override {
-        std::ifstream ifs(ctx.resolved_path);
-        if (!ifs) {
-            throw std::runtime_error("[SkinnedMeshSourceLoader] Failed to open '" + id.path() + "'");
-        }
-        fkyaml::node node = fkyaml::node::deserialize(ifs);
+        fkyaml::node node = coopa::yaml::load_document(ctx.resolved_path);
         return std::make_shared<data::SkinnedMeshSource>(data::SkinnedMeshSource::from_node(node));
     }
 
