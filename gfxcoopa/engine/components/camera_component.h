@@ -132,6 +132,7 @@ public:
      */
     void make_main() {
         is_main = true;
+        declared_main_ = false;
         main_camera_() = this;
     }
 
@@ -147,10 +148,14 @@ public:
      */
     void start() override {
         if (is_main) {
-            if (main_camera_() && main_camera_() != this) {
+            // Only two *declared* claims conflict. A camera that took over through make_main()
+            // (a cutscene, an editor viewport camera) is a runtime override, not a second
+            // `main: true`, so being displaced from it is expected and silent.
+            if (main_camera_() && main_camera_() != this && main_camera_()->declared_main_) {
                 std::cerr << "[gfxcoopa] Warning: multiple cameras marked main; "
                              "the most recently started one wins.\n";
             }
+            declared_main_ = true;
             main_camera_() = this;
         } else if (!main_camera_()) {
             main_camera_() = this;
@@ -226,6 +231,8 @@ public:
     }
 
 private:
+    bool declared_main_ = false;   ///< Claimed main in start() from `is_main` (not via make_main()).
+
     /**
      * @brief Function-local static holding the main-camera singleton.
      *

@@ -19,9 +19,12 @@
 
 #define GLFW_INCLUDE_NONE // Prevent GLFW from including its own OpenGL/Vulkan headers
 #include <GLFW/glfw3.h>
+#include <algorithm>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <stdexcept>
+#include <vector>
 
 #include <coopa/input/input.h>
 
@@ -29,6 +32,9 @@
 
 #ifdef __APPLE__
 #include <gfxcoopa/util/volk_init.h>
+#include <objc/message.h>
+#include <objc/runtime.h>
+#include <cstring>
 #endif
 
 namespace coopa {
@@ -70,7 +76,7 @@ public:
      */
     Window(const std::string& title, uint32_t width, uint32_t height,
            bool resizable = false, bool visible = true)
-        : width_(width), height_(height)
+        : width_(width), height_(height), visible_(visible)
     {
         // glfwInit() itself is safe to call repeatedly (GLFW documents it as
         // idempotent), but glfwTerminate() is NOT idempotent-safe when
@@ -214,6 +220,38 @@ public:
      */
     GLFWwindow* handle() const { return window_; }
 
+    /** @brief One size of an application icon: straight-alpha RGBA8, row 0 at the top. */
+    struct IconImage {
+        int width = 0, height = 0;
+        const uint8_t* pixels = nullptr;
+    };
+
+    /**
+     * @brief Sets the application's icon from one or more sizes of the same image.
+     *
+     * Windows / Linux (X11): the window's title-bar and taskbar icon -- the system picks the
+     * closest size (glfwSetWindowIcon). macOS has no per-window icons, so this sets the
+     * running process's Dock / app-switcher icon instead (NSApplication's
+     * applicationIconImage) from every size given; an invisible window leaves the Dock alone.
+     */
+    void set_icon(const std::vector<IconImage>& images) {
+        if (images.empty()) return;
+#ifdef __APPLE__
+        if (!visible_) return;
+        set_dock_icon_(images);
+#else
+        std::vector<GLFWimage> glfw_images;
+        for (const auto& im : images) {
+            GLFWimage g;
+            g.width = im.width;
+            g.height = im.height;
+            g.pixels = const_cast<unsigned char*>(im.pixels);
+            glfw_images.push_back(g);
+        }
+        glfwSetWindowIcon(window_, static_cast<int>(glfw_images.size()), glfw_images.data());
+#endif
+    }
+
     /**
      * @brief Returns the current framebuffer size in pixels.
      *
@@ -319,6 +357,49 @@ private:
      * @param width New framebuffer width.
      * @param height New framebuffer height.
      */
+#ifdef __APPLE__
+    /**
+     * @brief [NSApp setApplicationIconImage:] built from RGBA pixels, through the Objective-C
+     *        runtime so this header stays plain C++ (GLFW has already started NSApplication).
+     */
+    static void set_dock_icon_(const std::vector<IconImage>& images) {
+        using Id = void*;
+        auto cls = [](const char* n) { return reinterpret_cast<Id>(objc_getClass(n)); };
+        auto sel = [](const char* n) { return sel_registerName(n); };
+        auto send = reinterpret_cast<Id (*)(Id, SEL)>(objc_msgSend);
+        Id ns_image_cls = cls("NSImage"), rep_cls = cls("NSBitmapImageRep"), app_cls = cls("NSApplication");
+        if (!ns_image_cls || !rep_cls || !app_cls) return;
+        Id color_space = reinterpret_cast<Id (*)(Id, SEL, const char*)>(objc_msgSend)(
+            cls("NSString"), sel("stringWithUTF8String:"), "NSDeviceRGBColorSpace");
+        struct Size { double w, h; };
+        int largest = 0;
+        for (const auto& im : images) largest = std::max(largest, im.width);
+        Id image = reinterpret_cast<Id (*)(Id, SEL, Size)>(objc_msgSend)(
+            send(ns_image_cls, sel("alloc")), sel("initWithSize:"), Size{double(largest), double(largest)});
+        for (const auto& im : images) {
+            Id rep = reinterpret_cast<Id (*)(Id, SEL, unsigned char**, long, long, long, long, signed char, signed char, Id, long, long)>(
+                objc_msgSend)(send(rep_cls, sel("alloc")),
+                              sel("initWithBitmapDataPlanes:pixelsWide:pixelsHigh:bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:"
+                                  "colorSpaceName:bytesPerRow:bitsPerPixel:"),
+                              nullptr, im.width, im.height, 8, 4, 1, 0, color_space, long(im.width) * 4, 32);
+            if (!rep) continue;
+            // NSBitmapImageRep wants premultiplied alpha by default.
+            auto* dst = reinterpret_cast<unsigned char* (*)(Id, SEL)>(objc_msgSend)(rep, sel("bitmapData"));
+            const size_t n = size_t(im.width) * size_t(im.height);
+            for (size_t i = 0; i < n; ++i) {
+                const unsigned a = im.pixels[i * 4 + 3];
+                for (int c = 0; c < 3; ++c) dst[i * 4 + c] = static_cast<unsigned char>((im.pixels[i * 4 + c] * a + 127) / 255);
+                dst[i * 4 + 3] = static_cast<unsigned char>(a);
+            }
+            reinterpret_cast<void (*)(Id, SEL, Id)>(objc_msgSend)(image, sel("addRepresentation:"), rep);
+            send(rep, sel("release"));
+        }
+        Id app = send(app_cls, sel("sharedApplication"));
+        reinterpret_cast<void (*)(Id, SEL, Id)>(objc_msgSend)(app, sel("setApplicationIconImage:"), image);
+        send(image, sel("release"));
+    }
+#endif
+
     static void framebuffer_resize_callback(GLFWwindow* window, int width, int height) {
         (void)width; (void)height;
         auto* self = reinterpret_cast<Window*>(glfwGetWindowUserPointer(window));
@@ -418,6 +499,7 @@ private:
     GLFWwindow*  window_  = nullptr; /**< The underlying GLFW window handle. */
     GLFWcursor*  cursor_  = nullptr; /**< Current standard cursor, if Input::set_cursor_shape() was called. */
     uint32_t     width_;             /**< Initial window width in pixels. */
+    bool         visible_ = true;    /**< Mapped on screen (false for headless runs). */
     uint32_t     height_;            /**< Initial window height in pixels. */
     bool         resized_ = false;   /**< Set to true when a framebuffer resize event arrives. */
 

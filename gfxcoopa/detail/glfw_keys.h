@@ -259,6 +259,8 @@ inline int to_glfw(coopa::input::CursorShape shape) {
     switch (shape) {
         case CursorShape::IBeam: return GLFW_IBEAM_CURSOR;
         case CursorShape::Hand:  return GLFW_HAND_CURSOR;
+        case CursorShape::ResizeH: return GLFW_HRESIZE_CURSOR;
+        case CursorShape::ResizeV: return GLFW_VRESIZE_CURSOR;
         case CursorShape::Arrow:
         default:                 return GLFW_ARROW_CURSOR;
     }

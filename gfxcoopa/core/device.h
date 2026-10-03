@@ -97,6 +97,21 @@ public:
      */
     VkPhysicalDevice physical() const { return physical_device_; }
 
+    /** @brief The selected GPU's name, as the driver reports it. */
+    std::string gpu_name() const {
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(physical_device_, &props);
+        return props.deviceName;
+    }
+
+    /** @brief The Vulkan version the selected GPU's driver supports ("1.3.290"). */
+    std::string api_version_string() const {
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(physical_device_, &props);
+        return std::to_string(VK_API_VERSION_MAJOR(props.apiVersion)) + "." + std::to_string(VK_API_VERSION_MINOR(props.apiVersion)) + "." +
+               std::to_string(VK_API_VERSION_PATCH(props.apiVersion));
+    }
+
     /**
      * @brief Returns the graphics queue handle.
      * @return Raw VkQueue for graphics submission.

@@ -60,6 +60,10 @@ target_include_directories(gfxcoopa_impl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc
 # a heap allocation and lost inlining, for no seal benefit beyond what the
 # header/type seal and the leak-check script already provide.
 target_link_libraries(gfxcoopa_impl PUBLIC glfw Vulkan::Headers)
+if(APPLE)
+    # Window::set_icon() sets the Dock icon through the Objective-C runtime (AppKit).
+    target_link_libraries(gfxcoopa_impl PUBLIC "-framework AppKit" objc)
+endif()
 
 # --- coopa::gfx: the public, header-only consumable target. ---
 # Named gfxcoopa_lib (not `gfxcoopa`) because `cplay` resolves the run

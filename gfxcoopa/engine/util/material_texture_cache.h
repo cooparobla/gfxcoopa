@@ -132,6 +132,10 @@ public:
      * @param material The renderer's material.
      * @return The DescriptorSet to bind. Owned by this cache; valid as long as it is.
      */
+    /** @brief The all-neutral set (white albedo / mask / metal-rough, flat normal): a material
+     *         drawn as if it had no textures -- e.g. an editor's Solid shading. */
+    const coopa::gfx::pipeline::DescriptorSet& untextured_set() const { return *fallback_set_; }
+
     const coopa::gfx::pipeline::DescriptorSet& set_for(const coopa::gfx::engine::components::PBRMaterial& material) {
         Key key = {
             material.has_alpha_mask() ? material.alpha_mask_handle.get() : nullptr,

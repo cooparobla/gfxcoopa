@@ -7,6 +7,7 @@
 #include <vma/vk_mem_alloc.h>
 
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <stdexcept>
@@ -211,6 +212,37 @@ void test_camera_main_singleton_clears_on_destroy() {
 
     holder.remove_component<CameraComponent>();
     ASSERT_TRUE(CameraComponent::main() == nullptr);
+}
+
+void test_camera_main_warning_only_for_declared_conflicts() {
+    using coopa::gfx::engine::components::CameraComponent;
+    using coopa::scene::SceneObject;
+
+    std::ostringstream captured;
+    std::streambuf* old = std::cerr.rdbuf(captured.rdbuf());
+
+    // A runtime override (an editor viewport camera) holds main; a scene's `main: true` camera
+    // starting afterwards takes over silently.
+    SceneObject viewer("viewer"), game("game"), other("other");
+    auto* cam_viewer = viewer.add_component<CameraComponent>();
+    auto* cam_game = game.add_component<CameraComponent>();
+    auto* cam_other = other.add_component<CameraComponent>();
+    cam_viewer->make_main();
+    cam_game->is_main = true;
+    cam_game->start();
+    const bool quiet = captured.str().empty();
+    const bool game_won = CameraComponent::main() == cam_game;
+
+    // Two declared `main: true` cameras still warn.
+    cam_other->is_main = true;
+    cam_other->start();
+    const bool warned = captured.str().find("multiple cameras marked main") != std::string::npos;
+
+    std::cerr.rdbuf(old);
+    ASSERT_TRUE(quiet);
+    ASSERT_TRUE(game_won);
+    ASSERT_TRUE(warned);
+    ASSERT_TRUE(CameraComponent::main() == cam_other);
 }
 
 void test_camera_projection_runtime_switch() {
@@ -882,6 +914,7 @@ int main() {
     RUN_TEST(test_camera_main_singleton_explicit);
     RUN_TEST(test_camera_main_singleton_defaults_to_first);
     RUN_TEST(test_camera_main_singleton_clears_on_destroy);
+    RUN_TEST(test_camera_main_warning_only_for_declared_conflicts);
     RUN_TEST(test_camera_projection_runtime_switch);
     RUN_TEST(test_parse_alpha_mode);
     RUN_TEST(test_pbr_material_gpu_alpha_cutoff);
