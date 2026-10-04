@@ -1,258 +1,244 @@
 # gfxcoopa
 
-A header-only C++20 Vulkan wrapper designed for OpenGL developers. Provides RAII objects, named methods, and sensible defaults — so you can draw a triangle in ~20 lines instead of 800.
+**A header-only C++20 Vulkan library, from RAII device objects up to a deferred PBR renderer.**
 
-All public API lives in the `coopa::gfx::` namespace. Every module is a header file under `gfxcoopa/`. Build with `cbuild`, run with `cplay`.
+gfxcoopa has two layers. The lower layer wraps Vulkan in small RAII classes with
+OpenGL-style method names and sane defaults, so a window, device, swapchain and frame loop
+take a few lines. The upper layer, `coopa::gfx::engine`, is a set of render passes, targets
+and scene components that you combine into a full-resolution deferred PBR pipeline with
+shadows, screen-space effects, volumetrics and post-processing. It runs on Linux and on
+macOS through MoltenVK. [toyengine](https://github.com/cooparobla/toyengine) is one engine
+built on it.
 
----
+<table>
+  <tr>
+    <td><img src="docs/images/pixel_demo.jpg" alt="PBR materials, glass refraction, SDFs and bloom"></td>
+    <td><img src="docs/images/terrain_test.jpg" alt="Cascaded shadows, SSAO and TAA over a large terrain"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><sub>Scenes from toyengine, which renders through gfxcoopa's deferred pipeline: PBR materials,
+    refraction, SDFs, bloom and SSR (left); cascaded shadows, SSAO and TAA (right).</sub></td>
+  </tr>
+</table>
 
-## High-Level Engine Architecture
+## Features
 
-```text
-┌──────────────────────────────────────────────────────────────────────────────────────────┐
-│                             GFXCOOPA ENGINE & FRAMEWORK MAP                              │
-└──────────────────────────────────────────────────────────────────────────────────────────┘
+### Vulkan core
+- **RAII everywhere.** `Instance`, `Device`, `Swapchain`, `Buffer`, `Image`, `Pipeline`,
+  `CommandPool`, `Fence`, `Semaphore` and friends create in the constructor and destroy in the
+  destructor.
+- **One-call bring-up.** `app::Context` owns the window, instance, surface, device, VMA
+  allocator, swapchain, command pool and present pass. It also handles frame timing, resizes
+  and the main loop.
+- **A sealed public API.** Consumers use gfxcoopa's own types (`Format`, `TextureView`,
+  `SamplerDesc`, `VertexLayout`, `PipelineDesc`, `ClearColor`) instead of `Vk*` and `GLFW*`
+  symbols. `tools/check_no_vulkan.sh` checks a codebase for leaks.
+- **A Vulkan-free core.** Everything under `gfxcoopa/types/` compiles without Vulkan or GLFW.
+  The `coopa::gfx_pure` target has no Vulkan include path, so this is enforced by the compiler.
+- **Builders and helpers.** Descriptor layout and pool builders, one-shot GPU submits, staged
+  image uploads, and GPU-to-PNG readback.
+- **Runtime loading.** volk loads Vulkan at runtime, so nothing links `libvulkan` directly.
+  VMA handles GPU memory.
 
-                                ┌───────────────────────┐
-                                │     Window App        │
-                                └───────────┬───────────┘
-                                            │
-                                            ▼
-                                ┌───────────────────────┐
-                                │      Renderer         │
-                                └───────────┬───────────┘
-                                            │
-           ┌────────────────────────────────┼────────────────────────────────┐
-           ▼                                ▼                                ▼
-┌───────────────────────┐       ┌───────────────────────┐       ┌───────────────────────┐
-│     engine::Mesh      │       │   engine::Offscreen   │       │ engine::ShadowTarget  │
-│  (YAML Geometry Load) │       │ (Toon/Upscale Pass)   │       │ (Dir / Point Shadows) │
-└──────────┬────────────┘       └───────────┬───────────┘       └───────────┬───────────┘
-           │                                │                               │
-           └────────────────────────────────┼───────────────────────────────┘
-                                            │
-                                            ▼
-                                ┌───────────────────────┐
-                                │  pipeline::Pipeline   │
-                                └───────────┬───────────┘
-                                            │
-                                            ▼
-                                ┌───────────────────────┐
-                                │ command::CommandBuffer│
-                                └───────────┬───────────┘
-                                            │
-                                            ▼
-                                ┌───────────────────────┐
-                                │     memory & core     │
-                                └───────────────────────┘
+### Rendering engine
+- **Deferred PBR.** A G-buffer pass and Cook-Torrance lighting with directional, point and spot
+  lights, an environment light and skybox, and albedo, normal, metallic-roughness and
+  alpha-mask texture maps.
+- **Shadows.** Directional shadow cascades (up to 4) and point/spot shadow maps, with PCF and
+  PCSS filtering.
+- **Indirect light.** Spherical-harmonics probe volumes (`GiSystem`, `GiBaker`), reflection
+  probes with GGX-prefiltered cubemaps, and a BRDF lookup table.
+- **Screen-space effects.** SSR with Hi-Z tracing and a screen-space GI bounce, GTAO-style
+  SSAO, and a shared temporal history buffer.
+- **Transparency.** A forward pass for alpha-blended materials, depth-tested against the
+  opaque scene.
+- **SDF shapes.** Raymarched signed-distance shapes that write into the G-buffer, cast
+  shadows and draw forward when transparent.
+- **Volumetrics and fog.** Global height fog, raymarched local volumes and a froxel-grid
+  volumetric fog pass.
+- **Post-processing.** Bloom, auto exposure, ACES tone mapping, colour-grading LUTs,
+  thin-lens depth of field, tilt-shift, and TAA, SMAA or FXAA.
+- **Optional stylisation.** `PixelStylizePass` adds outlines, ordered dithering and palette
+  quantisation for projects that want them.
+
+### Scenes and assets
+- **YAML scene components.** `register_render_components()` adds parsers for `MeshRenderer`,
+  `Camera`, `DirectionalLight`, `PointLight`, `SpotLight`, `EnvironmentLight`,
+  `ReflectionProbe`, `GiProbeVolume`, `Volume`, `SdfRenderer` and `SdfShape` to libcoopa's
+  scene loader.
+- **Asset loaders.** `MeshLoader` and `TextureLoader` plug into libcoopa's `AssetManager`.
+  Meshes are welded, cache-optimised and given LODs with meshoptimizer.
+- **Rendering helpers.** Instanced batching, a material texture cache, samplers and skinned
+  mesh data.
+- **Shader library.** All GLSL lives in `assets/shaders/`. Shared bodies sit under
+  `assets/shaders/gfx/`, so an application can override one entry point and reuse the rest.
+
+## Getting started
+
+### 1. Clone
+
+gfxcoopa builds on [libcoopa](https://github.com/cooparobla/libcoopa) (scene graph, assets,
+input, glm, fkYAML). CMake expects libcoopa in a sibling directory named `libcoopa`. volk is a
+git submodule.
+
+```bash
+mkdir coopa && cd coopa
+git clone --recurse-submodules git@github.com:cooparobla/gfxcoopa.git
+git clone git@github.com:cooparobla/libcoopa.git
 ```
 
----
+If a parent project already defines the `coopa::lib` target, gfxcoopa uses that one instead.
 
-## Quick start
+### 2. Build
+
+You need CMake 3.20 or newer, a C++20 compiler, the Vulkan headers and loader, `glslc`, and
+GLFW. meshoptimizer is fetched by CMake on the first configure.
+
+**Linux.** Install the Vulkan SDK (it includes `glslc`) and GLFW, then:
+
+```bash
+cd gfxcoopa
+cmake -B build && cmake --build build -j
+```
+
+**macOS (Apple Silicon).** Install MoltenVK and the rest through Homebrew:
+
+```bash
+brew install cmake glfw vulkan-loader vulkan-headers molten-vk vulkan-validationlayers shaderc
+cd gfxcoopa
+cmake -B build && cmake --build build -j
+```
+
+The build compiles every `.vert` and `.frag` in `assets/shaders/` to a `.spv` file next to
+its source. Rebuilds are incremental, and editing a shared `gfx/*.glsl` file recompiles every
+shader that includes it.
+
+### 3. Use it in your project
+
+Add gfxcoopa as a subdirectory and link the interface target:
+
+```cmake
+add_subdirectory(path/to/gfxcoopa)
+target_link_libraries(my_app PRIVATE coopa::gfx)
+
+# Compile your own shaders. gfxcoopa's assets/shaders/ is always on the include path.
+gfx_add_shader_target(my_shaders SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+add_dependencies(my_app my_shaders)
+```
+
+| Target | What it is |
+|---|---|
+| `coopa::gfx` | The full library: headers, volk, VMA, stb, GLFW, meshoptimizer, libcoopa |
+| `coopa::gfx_pure` | Only `gfxcoopa/types/`, with no Vulkan or GLFW on the include path. Use it for tests that must not touch the GPU |
+
+### 4. Draw a triangle
 
 ```cpp
-#include <gfxcoopa/core/instance.h>
-#include <gfxcoopa/presentation/window.h>
-#include <gfxcoopa/core/surface.h>
-#include <gfxcoopa/core/device.h>
-#include <gfxcoopa/core/swapchain.h>
-#include <gfxcoopa/pipeline/render_pass.h>
-#include <gfxcoopa/pipeline/shader.h>
+#include <gfxcoopa/app/context.h>
 #include <gfxcoopa/pipeline/pipeline.h>
-#include <gfxcoopa/command/command_pool.h>
-#include <gfxcoopa/presentation/renderer.h>
+#include <gfxcoopa/pipeline/shader.h>
+
+using namespace coopa::gfx;
 
 int main() {
-    coopa::gfx::presentation::Window   window("My App", 1280, 720);
-    coopa::gfx::core::Instance         instance("my_app");
-    coopa::gfx::core::Surface          surface(instance, window.handle());
-    coopa::gfx::core::Device           device(instance, surface);
-    coopa::gfx::core::Swapchain        swapchain(device, surface, 1280, 720);
-    coopa::gfx::pipeline::RenderPass   render_pass(device, swapchain.image_format());
-    coopa::gfx::command::CommandPool   cmd_pool(device, device.graphics_family());
-    coopa::gfx::pipeline::Shader       vert(device, "vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
-    coopa::gfx::pipeline::Shader       frag(device, "frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
-    coopa::gfx::pipeline::Pipeline     pipeline(device, render_pass, {&vert, &frag}, {}, {});
-    coopa::gfx::presentation::Renderer renderer(device, swapchain, render_pass, cmd_pool);
+    app::ContextConfig config;
+    config.title  = "triangle";
+    config.width  = 1280;
+    config.height = 720;
+    app::Context ctx(app::ContextConfig::from_env(config));  // reads ONESHOT / MAX_FRAMES
 
-    while (!window.should_close()) {
-        window.poll_events();
-        renderer.draw_frame([&](coopa::gfx::command::CommandBuffer& cmd) {
-            auto ext = swapchain.extent();
-            cmd.bind_pipeline(pipeline);
-            cmd.set_viewport(0, 0, ext.width, ext.height);
-            cmd.set_scissor(0, 0, ext.width, ext.height);
-            cmd.draw(3);
-        });
-    }
-    device.wait_idle();
+    pipeline::Shader vert(ctx.device(), "assets/shaders/test.vert.spv", ShaderStage::Vertex);
+    pipeline::Shader frag(ctx.device(), "assets/shaders/test.frag.spv", ShaderStage::Fragment);
+
+    pipeline::PipelineDesc desc;
+    desc.shaders     = {&vert, &frag};
+    desc.raster.cull = CullMode::None;
+    desc.depth.test  = false;  // the swapchain pass has no depth attachment
+    desc.depth.write = false;
+    pipeline::Pipeline triangle(ctx.device(), ctx.render_pass(), desc);
+
+    app::FrameCallbacks frame;
+    frame.clear  = ClearColor{0.05f, 0.05f, 0.08f, 1.0f};
+    frame.record = [&](command::CommandBuffer& cmd) {
+        Extent2D ext = ctx.extent();
+        cmd.bind_pipeline(triangle);
+        cmd.set_viewport(0, 0, float(ext.width), float(ext.height));
+        cmd.set_scissor(0, 0, ext.width, ext.height);
+        cmd.draw(3);
+    };
+
+    ctx.run(nullptr, frame);  // poll, update, draw, until the window closes
 }
 ```
 
----
+`test.vert` hard-codes its three vertices, so no vertex buffer is needed. For geometry, set
+`desc.vertex` to a `VertexLayout` and bind a `memory::Buffer`. For a hidden window (for
+example in automated runs), set `config.visible = false`; rendering and presentation still
+work.
 
-## Build
-
-```bash
-# Configure and build
-cbuild
-
-# Run the test suite / demo
-cplay
-```
-
-Or manually:
+## Testing
 
 ```bash
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Debug
-make -j$(nproc)
-./gfxcoopa
+ctest --test-dir build          # or run ./build/gfxcoopa from the repo root
 ```
 
-Shaders must be compiled to SPIR-V before running:
+The `gfxcoopa` executable is the test suite (`test.cpp`). It runs the CPU-only tests first,
+then brings up a Vulkan device and checks every core wrapper: buffers, images, shaders,
+render passes, pipelines, descriptors, sync, readback, `Context` and swapchain resize. It
+loads shaders by relative path, so run it from the repository root. It opens a small window
+while it runs and needs the Khronos validation layer installed.
 
-```bash
-glslc assets/shaders/test.vert -o assets/shaders/test.vert.spv
-glslc assets/shaders/test.frag -o assets/shaders/test.frag.spv
+## Project layout
+
+```
+gfxcoopa/
+├── app/           Context: window-to-swapchain bring-up and the main loop
+├── core/          Instance, Surface, Device, Swapchain
+├── memory/        Allocator (VMA), Buffer, Image, staged image upload
+├── pipeline/      Shader, ShaderLibrary, RenderPass, descriptors, Pipeline
+├── command/       CommandPool, CommandBuffer, Fence, Semaphore
+├── presentation/  Window (GLFW), Renderer (acquire, record, submit, present)
+├── util/          error checks, volk init, debug messenger, format helpers, image readback
+├── types/         Vulkan-free vocabulary: Format, SamplerDesc, VertexLayout, TextureView, ...
+├── detail/        internal Vk/GLFW conversions; not for consumers
+└── engine/
+    ├── components/  scene components and register_render_components()
+    ├── data/        Mesh, Texture, camera/light/fog/volumetrics UBOs, LUTs
+    ├── targets/     G-buffer, offscreen, shadow-map, cubemap targets
+    ├── passes/      every render pass, built on the shared FullscreenStage
+    ├── gi/          SH probe baking, GiSystem, BRDF LUT
+    ├── loaders/     AssetManager loaders for meshes and textures
+    └── util/        samplers, instance batcher, texture cache, SMAA textures, SH math
+assets/shaders/  GLSL entry points; gfx/ holds the shared bodies
+cmake/           GfxShaders.cmake (gfx_add_shader_target)
+includes/        vendored volk (submodule), VMA, stb_image
+src/             gfx_impl.cpp: the single TU that compiles volk/VMA/stb implementations
+tools/           check_no_vulkan.sh
+test.cpp         the test suite
 ```
 
----
+## Platform notes
 
-## Module overview
-
-For detailed documentation, see the submodule README files under [`gfxcoopa/`](gfxcoopa/README.md).
-
-### [`gfxcoopa/util/`](gfxcoopa/util/README.md)
-
-| File | Description |
-|---|---|
-| [error.h](gfxcoopa/util/error.h) | `GFX_VK_CHECK(expr)` macro, `vk_result_string()` |
-| [volk_init.h](gfxcoopa/util/volk_init.h) | One-time `volkInitialize()` guard |
-| [debug_messenger.h](gfxcoopa/util/debug_messenger.h) | RAII `VkDebugUtilsMessengerEXT` with stderr logging |
-| [format.h](gfxcoopa/util/format.h) | `format_from_channels()`, `format_byte_size()`, `format_has_depth()`, `format_has_stencil()` |
-| [image_readback.h](gfxcoopa/util/image_readback.h) | `read_image()`, `save_png()` — GPU image download to host memory or PNG |
-
-### [`gfxcoopa/core/`](gfxcoopa/core/README.md)
-
-| File | Description |
-|---|---|
-| [instance.h](gfxcoopa/core/instance.h) | `class Instance` — volk init, validation layers, VkInstance |
-| [surface.h](gfxcoopa/core/surface.h) | `class Surface` — GLFW → VkSurfaceKHR, `query_support()` |
-| [device.h](gfxcoopa/core/device.h) | `class Device` — GPU selection, queues, `wait_idle()` |
-| [swapchain.h](gfxcoopa/core/swapchain.h) | `class Swapchain` — images, views, `recreate()` |
-
-### [`gfxcoopa/memory/`](gfxcoopa/memory/README.md)
-
-| File | Description |
-|---|---|
-| [allocator.h](gfxcoopa/memory/allocator.h) | `class Allocator` — VMA lifecycle wrapper |
-| [buffer.h](gfxcoopa/memory/buffer.h) | `class Buffer` — vertex/index/uniform/staging/storage factories, `upload()` |
-| [image.h](gfxcoopa/memory/image.h) | `class Image` — 2D image + view wrapper, tracks its own `current_usage()` |
-| [image_upload.h](gfxcoopa/memory/image_upload.h) | `upload_image_2d()` — staged pixel upload, leaves the image in `ShaderRead` |
-
-### [`gfxcoopa/pipeline/`](gfxcoopa/pipeline/README.md)
-
-| File | Description |
-|---|---|
-| [shader.h](gfxcoopa/pipeline/shader.h) | `class Shader` — loads `.spv`, provides `stage_info()` |
-| [render_pass.h](gfxcoopa/pipeline/render_pass.h) | `class RenderPass` — color + optional depth subpass, attachment layouts |
-| [descriptor.h](gfxcoopa/pipeline/descriptor.h) | `DescriptorPool`, `DescriptorSetLayout`, `DescriptorSet` wrappers |
-| [pipeline.h](gfxcoopa/pipeline/pipeline.h) | `class Pipeline` — full graphics pipeline, `PipelineDesc`/`BlendMode`, `set_viewport()` |
-| [shader_library.h](gfxcoopa/pipeline/shader_library.h) | `class ShaderLibrary` — ordered search path from a logical shader name to its `.spv` |
-| [surface_shader.h](gfxcoopa/pipeline/surface_shader.h) | `SurfaceShaderDesc`, `SurfaceShaderLibrary` — named per-material shader variants |
-
-### [`gfxcoopa/command/`](gfxcoopa/command/README.md)
-
-| File | Description |
-|---|---|
-| [command_pool.h](gfxcoopa/command/command_pool.h) | `class CommandPool` — allocation, `submit_once()` for one-shot GPU work |
-| [command_buffer.h](gfxcoopa/command/command_buffer.h) | `class CommandBuffer` — `begin/end`, `bind_pipeline`, `draw`, `set_viewport`, `transition`, `copy_*`, `blit` |
-| [sync.h](gfxcoopa/command/sync.h) | `class Fence` (CPU↔GPU), `class Semaphore` (GPU↔GPU) |
-
-### [`gfxcoopa/presentation/`](gfxcoopa/presentation/README.md)
-
-| File | Description |
-|---|---|
-| [window.h](gfxcoopa/presentation/window.h) | `class Window` — GLFW init, `poll_events()`, `framebuffer_size()`, `was_resized()` |
-| [renderer.h](gfxcoopa/presentation/renderer.h) | `class Renderer` — acquire → record → submit → present frame loop |
-
-### [`gfxcoopa/app/`](gfxcoopa/app/context.h)
-
-| File | Description |
-|---|---|
-| [context.h](gfxcoopa/app/context.h) | `ContextConfig`, `FrameCallbacks`, `class Context` — owns the whole Window → Instance → Surface → Device → Allocator → Swapchain → CommandPool → RenderPass → Renderer bring-up, frame timing, and the main loop |
-
-### [`gfxcoopa/types/`](gfxcoopa/types.h)
-
-Vulkan- and GLFW-free by construction; the `coopa::gfx_pure` CMake target enforces it.
-[types.h](gfxcoopa/types.h) is an umbrella that includes all of them.
-
-| File | Description |
-|---|---|
-| [enums.h](gfxcoopa/types/enums.h) | `Format`, `TextureUsage`, `ImageUsage`, `ShaderStage`, `CullMode`, `MemoryResidency`, … — the sealed vocabulary replacing `Vk*` enums in the public API |
-| [format.h](gfxcoopa/types/format.h) | `Format` helpers — `is_depth()`, `is_stencil()`, `format_byte_size()` |
-| [vertex_layout.h](gfxcoopa/types/vertex_layout.h) | `VertexBinding`, `VertexAttribute`, `VertexLayout` — a vertex type's full input description, built fluently |
-| [sampler_desc.h](gfxcoopa/types/sampler_desc.h) | `SamplerDesc` + presets (`linear_repeat()`, `nearest_clamp()`, …) |
-| [texture_view.h](gfxcoopa/types/texture_view.h) | `TextureView` — opaque, hashable, null-able identity token for a texture view |
-| [clear.h](gfxcoopa/types/clear.h) | `ClearColor`, `Extent2D`, `ImageRegion` |
-
-### [`gfxcoopa/detail/`](gfxcoopa/detail/vk_convert.h)
-
-Internal. Consumers must not include these or name `coopa::gfx::detail::*`.
-
-| File | Description |
-|---|---|
-| [vk_convert.h](gfxcoopa/detail/vk_convert.h) | `to_vk()` / `from_vk()` conversions, barrier masks, `RawRenderPass` |
-| [glfw_keys.h](gfxcoopa/detail/glfw_keys.h) | GLFW key/button code → `coopa::input` vocabulary |
-
-### [`gfxcoopa/engine/`](gfxcoopa/engine/README.md)
-
-The rendering engine built on the layers above. See the
-[engine README](gfxcoopa/engine/README.md) for the full file-by-file breakdown.
-
-| Directory | Contents |
-|---|---|
-| [`components/`](gfxcoopa/engine/components/register.h) | Scene components parsed from YAML — `MeshRenderer`/`PBRMaterial`, `CameraComponent`, `DirectionalLight`, `PointLight`, `SpotLight`, `EnvironmentLight`, `ReflectionProbe`, `GiProbeVolume`, `Volume`, `SdfShape`/`SdfRenderer`, plus `register_render_components()` |
-| [`data/`](gfxcoopa/engine/data/mesh.h) | GPU-side data and UBO layouts — `Vertex`/`Mesh`, `Texture`, `CameraUBO`, `LightUBO`, `ModelPushConstants`, `FogData`, `VolumetricsData`, `SdfData`, `PaletteLut` |
-| [`targets/`](gfxcoopa/engine/targets/offscreen_target.h) | Render targets — `OffscreenTarget`, `GBufferTarget`, `ShadowMapTarget`, `CubemapTarget`, `TransparentCaptureTarget` |
-| [`passes/`](gfxcoopa/engine/passes/fullscreen_stage.h) | The render passes. `FullscreenStage` is the shared scaffold most post-processing passes are built from; `GBufferPipeline`, `ShadowPipeline`, `TransparentPass` and the `sdf_*` passes draw real geometry instead |
-| [`gi/`](gfxcoopa/engine/gi/gi_system.h) | Global illumination — `GiSystem`, `GiBaker` (SH probe baking), `SHProbe`/`GiUniforms`, `BRDFLUT` |
-| [`loaders/`](gfxcoopa/engine/loaders/mesh_loader.h) | `coopa::asset::AssetManager` loaders for meshes and textures |
-| [`util/`](gfxcoopa/engine/util/sampler.h) | `Sampler`, `MaterialTextureCache`, `InstanceBatcher`, `SmaaTextures`, `SsaoKernel`, SH math |
-| [render_features.h](gfxcoopa/engine/render_features.h) | `IndirectParams` — indirect-lighting terms shared by the lighting and SSR passes, plus the runtime-vs-startup feature-flag convention |
-
----
-
-## Vendored dependencies
-
-| Library | Location | Purpose |
-|---|---|---|
-| [volk](https://github.com/zeux/volk) | `includes/volk/` | Dynamic Vulkan function loading (no `libvulkan.so` link) |
-| [VMA](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | `includes/vma/vk_mem_alloc.h` | GPU memory allocation |
-
----
-
-## Conventions
-
-| Convention | Detail |
-|---|---|
-| **Namespace** | `coopa::gfx::core`, `coopa::gfx::pipeline`, `coopa::gfx::memory`, `coopa::gfx::command`, `coopa::gfx::presentation`, `coopa::gfx::engine`, `coopa::gfx::util` |
-| **Include guards** | `#ifndef COOPA_GFX_<SUBSYSTEM>_<FILE>_H` |
-| **Vulkan header** | Always `#include <volk/volk.h>` — never `<vulkan/vulkan.h>` directly |
-| **Documentation** | Doxygen `@brief`, `@param`, `@return`, `/**<` inline member docs |
-| **RAII** | Every Vulkan handle has constructor creation + destructor destruction |
-| **Naming** | snake_case, private members have trailing `_`, OpenGL-named methods where applicable |
-| **Layering** | gfxcoopa is the sole owner of Vulkan and windowing (GLFW). Consumers (blendy, uicoopa, pixengine, toyengine) interact only through gfxcoopa's sealed types (`Format`, `TextureView`, `SamplerDesc`, `VertexLayout`, `gfx::app::Context`, ...) and must never name a `Vk*`/`VK_*`/`vk*`/`Vma*`/`vma*`/`GLFW*`/`glfw*` symbol or `coopa::gfx::detail::*` directly. `types/` stays Vulkan/GLFW-free by design (the `coopa::gfx_pure` CMake target enforces this structurally); `detail/` holds the raw<->sealed conversions and is off-limits to consumers. The keyboard/mouse vocabulary and state model (`Key`, `MouseButton`, `Input`, `InputMap`, ...) live in `coopa::input` in libcoopa, not here — `presentation::Window` is only a *backend* that feeds a `coopa::input::Input` from GLFW callbacks (see `coopa/input/README.md`); a consumer reaches it via `ctx.input()`/`window.input()` and never touches GLFW input calls at all. Enforced per-consumer by `tools/check_no_vulkan.sh` (wired as `GFX_LEAK_CHECK` in each consumer's CMakeLists — ON where the repo is fully clean, OFF with a documented residual count where its own `engine/passes/*`/`engine/targets/*` call sites still force raw types through). |
-
----
+- **macOS.** Instance creation enables portability enumeration and the device enables
+  `VK_KHR_portability_subset` when MoltenVK reports it. volk looks for the loader in
+  `$VULKAN_SDK/lib`, `/opt/homebrew/lib` and `/usr/local/lib`. Window and framebuffer sizes
+  differ on Retina displays, so size render targets from `ctx.extent()` (framebuffer pixels).
+- **Present modes.** `vsync = true` (the default) uses FIFO. With `vsync = false` gfxcoopa
+  prefers MAILBOX and falls back to FIFO. MoltenVK has no MAILBOX, so it is always FIFO there.
+- **Validation.** `ContextConfig::validation` defaults to `true`, and `Instance` throws if the
+  Khronos validation layer is not installed. Set it to `false` to run without the layer.
+- **SMAA.** `engine/util/smaa_textures.h` includes `SearchTex.h` and `AreaTex.h` from the
+  [SMAA reference implementation](https://github.com/iryoku/smaa). They are not vendored.
+  If you use `SmaaPass`, pass `-DSMAA_TEXTURES_DIR=/path/to/smaa/Textures`.
+- **Implementation TU.** `gfxcoopa_impl` compiles the volk, VMA and stb implementations once.
+  Do not define `VOLK_IMPLEMENTATION`, `VMA_IMPLEMENTATION` or `STB_IMAGE_IMPLEMENTATION` in
+  your own code.
 
 ## Documentation
 
-```bash
-coopadocs build
-coopadocs show
-```
-
-Generated HTML covers all public classes, methods, and parameters.
+- Module READMEs: [overview](gfxcoopa/README.md), [core](gfxcoopa/core/README.md),
+  [memory](gfxcoopa/memory/README.md), [pipeline](gfxcoopa/pipeline/README.md),
+  [command](gfxcoopa/command/README.md), [presentation](gfxcoopa/presentation/README.md),
+  [util](gfxcoopa/util/README.md), [engine](gfxcoopa/engine/README.md).
+- Every header carries Doxygen comments. `coopadocs build` generates an HTML API reference
+  into `.docs/`.
