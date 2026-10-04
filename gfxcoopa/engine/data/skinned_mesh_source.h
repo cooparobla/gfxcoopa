@@ -39,6 +39,9 @@
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
+#include <unordered_map>
+#include <algorithm>
+#include <string>
 
 namespace coopa {
 namespace gfx {
@@ -63,6 +66,14 @@ struct SkinnedMeshSource {
     std::vector<glm::ivec4> joints;                /**< Parallel to vertices; palette indices, -1 = unused slot. */
     std::vector<glm::vec4>  weights;               /**< Parallel to vertices; unnormalized as authored. */
     std::vector<glm::mat4>  inverse_bind_matrices; /**< Palette order; see this file's doc for the exact mapping. */
+    /**
+     * When the file has no `joints:` but does have vertex groups (`weights:`, one
+     * {group name: weight} map per raw vertex -- Blender's export, and the toyeditor's Weight
+     * Paint), the palette is built from them instead: `groups` lists the group names in palette
+     * order and `joints`/`weights` index into it (each vertex's four strongest groups). The
+     * renderer then resolves each group name as a bone of its rig. Empty otherwise.
+     */
+    std::vector<std::string> groups;
 
     /**
      * @brief Parses a SkinnedMeshSource from a mesh YAML's root fkYAML node.
@@ -126,6 +137,38 @@ struct SkinnedMeshSource {
         }
 
         SkinnedMeshSource out;
+
+        // No explicit palette: derive one from the vertex groups (see `groups`).
+        if (raw_joints.empty() && node.contains("weights") && node.at("weights").is_sequence()) {
+            std::unordered_map<std::string, int> group_of;
+            for (const auto& wmap : node.at("weights")) {
+                std::vector<std::pair<float, int>> infl;
+                if (wmap.is_mapping()) {
+                    for (auto item : wmap.map_items()) {
+                        const std::string name = item.key().get_value<std::string>();
+                        const fkyaml::node& wn = item.value();
+                        const float w = wn.is_integer() ? static_cast<float>(wn.get_value<int64_t>()) : wn.get_value<float>();
+                        if (w <= 0.0f) continue;
+                        auto it = group_of.find(name);
+                        if (it == group_of.end()) {
+                            it = group_of.emplace(name, static_cast<int>(out.groups.size())).first;
+                            out.groups.push_back(name);
+                        }
+                        infl.push_back({w, it->second});
+                    }
+                }
+                std::sort(infl.begin(), infl.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                glm::ivec4 j(-1);
+                glm::vec4 w(0.0f);
+                for (size_t i = 0; i < 4 && i < infl.size(); ++i) {
+                    j[static_cast<int>(i)] = infl[i].second;
+                    w[static_cast<int>(i)] = infl[i].first;
+                }
+                raw_joints.push_back(j);
+                raw_weights.push_back(w);
+            }
+            if (out.groups.empty()) { raw_joints.clear(); raw_weights.clear(); }
+        }
 
         if (node.contains("faces")) {
             for (const auto& face : node.at("faces")) {
