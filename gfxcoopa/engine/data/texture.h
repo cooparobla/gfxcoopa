@@ -121,6 +121,41 @@ public:
         return Texture(std::move(image), std::move(sampler));
     }
 
+    /**
+     * @brief Replaces a sub-rectangle of the texture's pixels in place (painting, tiled
+     *        canvases), keeping the same image and view -- so descriptor sets that already
+     *        reference it stay valid.
+     *
+     * Records and submits a one-shot command buffer (CommandPool::submit_once()): ShaderRead
+     * -> TransferDst, copy from a staging buffer, -> ShaderRead, and blocks until it is done.
+     * Work submitted earlier that samples the texture (previous frames) is ordered before the
+     * copy by the barrier; call it between frames, not while recording one that samples it.
+     *
+     * @param device    Logical device.
+     * @param allocator VMA allocator (for the staging buffer).
+     * @param cmd_pool  Command pool for the one-shot command buffer.
+     * @param pixels    The region's texels, tightly packed: w * h * bytes per texel.
+     * @param x, y      Region origin in texels.
+     * @param w, h      Region size in texels; the region must lie inside the texture.
+     */
+    void update(core::Device& device,
+                memory::Allocator& allocator,
+                command::CommandPool& cmd_pool,
+                const void* pixels,
+                uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+    {
+        if (w == 0 || h == 0) return;
+        const uint32_t bpp = format_byte_size(image_->format_typed());
+        const VkDeviceSize size = static_cast<VkDeviceSize>(w) * h * bpp;
+        memory::Buffer staging = memory::Buffer::staging(device, allocator, size);
+        staging.upload(pixels, size);
+        cmd_pool.submit_once([&](command::CommandBuffer& cmd) {
+            cmd.transition(*image_, TextureUsage::TransferDst);
+            cmd.copy_buffer_to_image_region(staging, *image_, static_cast<int32_t>(x), static_cast<int32_t>(y), Extent2D{w, h});
+            cmd.transition(*image_, TextureUsage::ShaderRead);
+        });
+    }
+
     /** @brief The image view to bind into a descriptor set. */
     VkImageView view() const { return image_->view(); }
 

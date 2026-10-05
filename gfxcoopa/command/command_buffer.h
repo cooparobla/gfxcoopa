@@ -427,6 +427,32 @@ public:
     }
 
     /**
+     * @brief Copies a buffer into a sub-rectangle of an image (vkCmdCopyBufferToImage with an
+     * offset). The image must already be transition()ed to TextureUsage::TransferDst. The
+     * buffer holds the region's texels tightly packed (extent.width per row).
+     * @param src    Source buffer.
+     * @param dst    Destination image.
+     * @param x, y   Region origin in the image, in texels.
+     * @param extent Region size in texels.
+     */
+    void copy_buffer_to_image_region(const memory::Buffer& src, memory::Image& dst, int32_t x, int32_t y,
+                                     Extent2D extent, uint32_t mip = 0, uint32_t layer = 0, uint64_t buffer_offset = 0)
+    {
+        VkBufferImageCopy region{};
+        region.bufferOffset      = buffer_offset;
+        region.bufferRowLength   = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask     = detail::aspect_mask_for(dst.format_typed());
+        region.imageSubresource.mipLevel       = mip;
+        region.imageSubresource.baseArrayLayer = layer;
+        region.imageSubresource.layerCount     = 1;
+        region.imageOffset = {x, y, 0};
+        region.imageExtent = {extent.width, extent.height, 1};
+        vkCmdCopyBufferToImage(cmd_, src.handle(), dst.handle(),
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
+
+    /**
      * @brief Copies image texels into a buffer (vkCmdCopyImageToBuffer).
      * The image must already be transition()ed to TextureUsage::TransferSrc.
      * See gfxcoopa/util/image_readback.h for the full readback-to-PNG
