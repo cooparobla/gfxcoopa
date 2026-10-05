@@ -103,11 +103,14 @@ public:
         std::vector<const char*> layers;
 
         if (enable_validation) {
-            if (!layer_available(k_validation_layer)) {
-                throw std::runtime_error(
-                    "[gfxcoopa] Requested VK_LAYER_KHRONOS_validation but it is not installed.");
+            // A debug build run on a machine without the Vulkan SDK (e.g. a development package
+            // handed to a tester) must still start: warn and run without the layer.
+            if (layer_available(k_validation_layer)) {
+                layers.push_back(k_validation_layer);
+            } else {
+                std::cerr << "[gfxcoopa] VK_LAYER_KHRONOS_validation requested but not installed; "
+                             "continuing without validation.\n";
             }
-            layers.push_back(k_validation_layer);
         }
 
         // --- Instance create info ---

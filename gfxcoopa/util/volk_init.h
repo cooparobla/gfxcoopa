@@ -40,7 +40,32 @@ inline void ensure_volk_initialized() {
     static bool initialized = false;
     if (initialized) return;
 
-    VkResult result = volkInitialize();
+    VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+#ifdef __APPLE__
+    // A packaged app bundles its own loader in Contents/Frameworks; it must win over any
+    // system/Homebrew loader volkInitialize() would find first, so a shipped build loads the
+    // exact loader (and, through its ICD, the MoltenVK) it was tested with.
+    // COOPA_VULKAN_LOADER names an explicit loader path to try before everything else.
+    {
+        std::string bundled[2];
+        if (const char* env = std::getenv("COOPA_VULKAN_LOADER"); env && *env) bundled[0] = env;
+        bundled[1] = "@executable_path/../Frameworks/libvulkan.1.dylib";
+        for (const std::string& path : bundled) {
+            if (path.empty()) continue;
+            void* module = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+            if (!module) continue;
+            auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+                dlsym(module, "vkGetInstanceProcAddr"));
+            if (!gipa) { dlclose(module); continue; }
+            volkInitializeCustom(gipa);
+            result = VK_SUCCESS;
+            break;
+        }
+    }
+    if (result != VK_SUCCESS) result = volkInitialize();
+#else
+    result = volkInitialize();
+#endif
 #ifdef __APPLE__
     // volk's own dlopen() search (volk.c) only tries bare leaf names plus
     // /usr/local/lib -- it never finds a Homebrew loader in /opt/homebrew/lib
