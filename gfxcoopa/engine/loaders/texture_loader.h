@@ -21,6 +21,7 @@
 #ifndef GFXCOOPA_ENGINE_LOADERS_TEXTURE_LOADER_H
 #define GFXCOOPA_ENGINE_LOADERS_TEXTURE_LOADER_H
 
+#include <optional>
 #include <coopa/asset/asset_loader.h>
 #include <coopa/asset/asset_source.h>
 #include <coopa/asset/asset_id.h>
@@ -139,6 +140,13 @@ public:
             return;
         }
         color_spaces_.emplace(id, color_space);
+    }
+
+    /** @brief The color space declared for `resolved_path` so far, if any (first one wins). */
+    std::optional<ColorSpace> declared_color_space(const std::string& resolved_path) const {
+        auto it = color_spaces_.find(coopa::asset::AssetId::from_path(resolved_path));
+        if (it == color_spaces_.end()) return std::nullopt;
+        return it->second;
     }
 
     std::shared_ptr<DecodedImage> decode_typed(const coopa::asset::AssetId& id,
