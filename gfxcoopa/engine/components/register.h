@@ -173,26 +173,21 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
         texture_loader->declare_color_space(resolved, it != color_space_overrides.end() ? it->second : slot_default);
     };
 
-    if (mat_node.contains("texture_albedo")) {
-        material.texture_albedo = mat_node.at("texture_albedo").get_value<std::string>();
-        declare_color_space(material.texture_albedo, ColorSpace::Srgb);
-        material.albedo_handle = assets.load_async<data::Texture>(material.texture_albedo, ctx.base_dir());
-    }
-    if (mat_node.contains("texture_normal")) {
-        material.texture_normal = mat_node.at("texture_normal").get_value<std::string>();
-        declare_color_space(material.texture_normal, ColorSpace::Linear);
-        material.normal_handle = assets.load_async<data::Texture>(material.texture_normal, ctx.base_dir());
-    }
-    if (mat_node.contains("texture_metallic_roughness")) {
-        material.texture_metallic_roughness = mat_node.at("texture_metallic_roughness").get_value<std::string>();
-        declare_color_space(material.texture_metallic_roughness, ColorSpace::Linear);
-        material.metallic_roughness_handle = assets.load_async<data::Texture>(material.texture_metallic_roughness, ctx.base_dir());
-    }
-    if (mat_node.contains("texture_alpha_mask")) {
-        material.texture_alpha_mask = mat_node.at("texture_alpha_mask").get_value<std::string>();
-        declare_color_space(material.texture_alpha_mask, ColorSpace::Linear);
-        material.alpha_mask_handle = assets.load_async<data::Texture>(material.texture_alpha_mask, ctx.base_dir());
-    }
+    // An empty path means "no map" (the editor's "(none)", or an override clearing an asset's
+    // map): drop the handle rather than asking the AssetManager to load "".
+    auto load_map = [&](const char* key, std::string& path, ColorSpace space,
+                        coopa::asset::AssetHandle<data::Texture>& handle) {
+        if (!mat_node.contains(key)) return;
+        path = mat_node.at(key).get_value<std::string>();
+        if (path.empty()) { handle = {}; return; }
+        declare_color_space(path, space);
+        handle = assets.load_async<data::Texture>(path, ctx.base_dir());
+    };
+    load_map("texture_albedo", material.texture_albedo, ColorSpace::Srgb, material.albedo_handle);
+    load_map("texture_normal", material.texture_normal, ColorSpace::Linear, material.normal_handle);
+    load_map("texture_metallic_roughness", material.texture_metallic_roughness, ColorSpace::Linear,
+             material.metallic_roughness_handle);
+    load_map("texture_alpha_mask", material.texture_alpha_mask, ColorSpace::Linear, material.alpha_mask_handle);
 
     // Derived surface shader (see PBRMaterial::shader's doc and the layered-shaders plan's
     // gfx/surface/*.glsl backbones). Registered-name validation happens later, once a
