@@ -295,6 +295,59 @@ float gfx_shadow_dir_pcf_vogel(sampler2DShadow map, vec3 proj_coords, float bias
     return shadow / float(sample_count);
 }
 
+/// gfx_shadow_dir_pcf_vogel() with a RECEIVER-PLANE depth bias: each tap compares against the
+/// receiver's own depth extrapolated to that tap, `proj_coords.z + dot(depth_gradient, offset)`,
+/// instead of the centre's depth.
+///
+/// A wide kernel on a receiver that is not facing the light straight on otherwise samples
+/// depths its own surface sits above or below, and shadows itself. The usual cure is a normal
+/// offset at least as wide as the kernel, which shrinks every shadow by that much. With the
+/// plane bias the offset only has to cover rasterisation error (about a texel), so a wide,
+/// soft penumbra keeps the shadow's true size. `depth_gradient` is d(depth)/d(uv) of the
+/// receiver plane in this map's space; gfx_shadow_receiver_gradient() computes it.
+float gfx_shadow_dir_pcf_vogel_rpdb(sampler2DShadow map, vec3 proj_coords, float bias,
+                                    vec2 texel_size, float rotation_angle, int sample_count,
+                                    vec2 depth_gradient) {
+    const float GOLDEN_ANGLE = 2.39996323;
+    float shadow = 0.0;
+    for (int i = 0; i < 32; ++i) {
+        if (i >= sample_count) break;
+        float r = sqrt((float(i) + 0.5) / float(sample_count));
+        float a = float(i) * GOLDEN_ANGLE + rotation_angle;
+        vec2 offset = r * vec2(cos(a), sin(a)) * texel_size;
+        float ref = proj_coords.z + dot(depth_gradient, offset) - bias;
+        shadow += texture(map, vec3(proj_coords.xy + offset, ref));
+    }
+    return shadow / float(sample_count);
+}
+
+/// The receiver plane's depth gradient d(depth)/d(uv) in a shadow map's space, for
+/// gfx_shadow_dir_pcf_vogel_rpdb().
+///
+/// Computed analytically from the surface normal: the plane through `p` with normal `n` is
+/// projected through `to_coords` (world -> uv/depth, affine for an orthographic map) along
+/// two tangents. Receivers seen nearly edge-on by the light have an unbounded gradient, so it
+/// is clamped to `max_slope`, a tangent: past that angle the extrapolation is trusted no
+/// further, and the caller's constant bias takes over.
+///
+/// `a`, `b`, `c` are the uv/depth images of `p`, `p + t1 * step` and `p + t2 * step` (t1, t2 any
+/// unit tangents of the plane); `e` is the image of `p + step * w`, w a unit vector
+/// perpendicular to the light, and `z_per_step` the depth change over `step` along the light.
+vec2 gfx_shadow_receiver_gradient(vec3 a, vec3 b, vec3 c, vec3 e, float z_per_step, float max_slope) {
+    vec2 d1 = b.xy - a.xy;
+    vec2 d2 = c.xy - a.xy;
+    float z1 = b.z - a.z;
+    float z2 = c.z - a.z;
+    float det = d1.x * d2.y - d2.x * d1.y;
+    if (abs(det) < 1e-14) return vec2(0.0);
+    vec2 g = vec2(z1 * d2.y - z2 * d1.y, d1.x * z2 - d2.x * z1) / det;
+    // The gradient a receiver tilted `max_slope` away from facing the light would have.
+    float uv_per_step = length(e.xy - a.xy);
+    float g_max = max_slope * z_per_step / max(uv_per_step, 1e-9);
+    float len = length(g);
+    return len > g_max ? g * (g_max / len) : g;
+}
+
 /// PCSS (percentage-closer soft shadows) against a directional 2D depth map:
 /// a Vogel-disk blocker search on `map_raw` (the SAME image as `map`, bound a
 /// second time through a plain non-compare sampler -- hardware compare taps

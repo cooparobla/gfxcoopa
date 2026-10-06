@@ -99,6 +99,9 @@ public:
     VkImageView g3_view() const { return g3_image_->view(); }
     VkImageView depth_view() const { return depth_image_->view(); }
     VkImage depth_image_handle() const { return depth_image_->handle(); }
+    /// @brief G2 (world position + roughness, RGBA16F) as a raw image, for texel copies. Left in
+    ///        SHADER_READ_ONLY_OPTIMAL by the render pass; a copier transitions it and back.
+    VkImage g2_image_handle() const { return g2_image_->handle(); }
 
     // Sealed TextureView siblings of the five accessors above.
     TextureView g0_view_typed() const    { return g0_image_->view_typed(); }
@@ -118,7 +121,10 @@ public:
 
 private:
     void create_resources_() {
-        VkImageUsageFlags color_flags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        // TRANSFER_SRC: a consumer may copy a few texels out (e.g. toyengine's screen-centre
+        // focus probe reads world positions from G2) without a full-screen pass.
+        VkImageUsageFlags color_flags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
         g0_image_ = std::make_unique<coopa::gfx::memory::Image>(
             device_, allocator_, width_, height_,

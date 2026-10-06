@@ -167,6 +167,34 @@ public:
         vmaUnmapMemory(allocator_, allocation_);
     }
 
+    /**
+     * @brief Reads bytes back out of a host-visible buffer (the mirror of upload()).
+     *
+     * Invalidates the range first, so a GpuToCpu (cached, possibly non-coherent) buffer
+     * returns what the GPU wrote rather than a stale cache line. The caller must already have
+     * waited for the GPU work that wrote it (a fence) -- this does not synchronise.
+     *
+     * @param data   Destination.
+     * @param size   Number of bytes to copy.
+     * @param offset Byte offset into this buffer.
+     * @throws std::runtime_error if the mapping fails.
+     */
+    void download(void* data, VkDeviceSize size, VkDeviceSize offset = 0) const {
+        vmaInvalidateAllocation(allocator_, allocation_, offset, size);
+        if (mapped_) {
+            std::memcpy(data, static_cast<const uint8_t*>(mapped_) + offset, static_cast<size_t>(size));
+            return;
+        }
+        void* mapped = nullptr;
+        VkResult result = vmaMapMemory(allocator_, allocation_, &mapped);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("[gfxcoopa] vmaMapMemory failed: " +
+                                     util::vk_result_string(result));
+        }
+        std::memcpy(data, static_cast<const uint8_t*>(mapped) + offset, static_cast<size_t>(size));
+        vmaUnmapMemory(allocator_, allocation_);
+    }
+
     // --- Accessors ---
 
     /**

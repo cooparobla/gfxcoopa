@@ -148,6 +148,12 @@ struct alignas(16) LightUBO {
                                         y = tiles per atlas row (grid_x), z = selection inset in
                                         TILE uv (keeps a PCF disk from reaching out of its tile),
                                         w = dither-transition band width in tile uv. */
+    glm::vec4 dir_shadow_receiver = glm::vec4(0.0f, 4.0f, 0.0f, 0.0f); /**< Receiver-plane depth
+                                        bias for the directional PCF: x = 1 to tilt every tap's
+                                        compare depth along the receiver's own plane (so the
+                                        normal offset no longer has to clear the PCF disk), y =
+                                        steepest receiver slope honoured, as tan(angle to the
+                                        light's perpendicular plane). z/w reserved. */
 };
 
 // Pins the offset of sky_zenith -- the field every pre-spot-light shader's LightUBO
