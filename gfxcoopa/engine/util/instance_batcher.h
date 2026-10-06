@@ -124,7 +124,8 @@ public:
             b.item_index     = item_index;
             batches_.push_back(b);
         }
-        instances_.push_back(data::InstanceData{model});
+        // No previous-frame pose is tracked here: prev_model == model, i.e. zero object motion.
+        instances_.push_back(data::InstanceData{model, model});
     }
 
     /** @brief Number of batches recorded so far — bracket a draw list's add() calls with this to compute its Range. */

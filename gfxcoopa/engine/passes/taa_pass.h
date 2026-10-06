@@ -38,10 +38,12 @@ namespace passes {
  * The ping-pong replaces a copy-based history update entirely; the render passes' own layout
  * transitions do all the synchronisation.
  *
- * Reprojection is camera-only, from the scene depth buffer and the caller-supplied
- * reprojection matrix (see Params::reproject); there are no per-object motion vectors, and
- * dynamic objects rely on the resolve shader's variance clip instead. recreate() drops the
- * accumulation, since it no longer matches a new resolution.
+ * Reprojection uses the caller's velocity image when set_source_images() is given one (the
+ * G-buffer's per-object motion vectors, so moving objects are followed exactly), and
+ * otherwise falls back to camera-only reprojection from the scene depth buffer and the
+ * caller-supplied reprojection matrix (see Params::reproject), where dynamic objects rely on
+ * the resolve shader's variance clip alone. recreate() drops the accumulation, since it no
+ * longer matches a new resolution.
  */
 class TaaPass {
 public:
@@ -56,7 +58,9 @@ public:
         float     sharpness;
         float     variance_gamma;
         int32_t   history_valid;
+        int32_t   use_velocity;   ///< 1 when binding 3 holds a velocity image (set_source_images).
     };
+    static_assert(sizeof(PushConstants) == 108, "taa.frag's PushConstants block must match this layout byte-for-byte");
 
     /// @brief Per-frame resolve inputs, filled by the caller each draw.
     struct Params {
@@ -121,25 +125,35 @@ public:
         // The recreated targets keep their formats, so the resolve pipeline (built against the
         // old render pass) stays render-pass compatible; only the image bindings went stale.
         if (last_scene_view_ != coopa::gfx::TextureView::null()) {
-            set_source_images(last_scene_view_, last_depth_view_);
+            set_source_images(last_scene_view_, last_depth_view_, last_velocity_view_);
         }
     }
 
     /**
      * @brief Binds the resolve inputs for both ping-pong instances.
-     * @param scene_view The post-processed LDR scene (this frame's jittered render).
-     * @param depth_view The scene depth buffer, at the same resolution.
+     * @param scene_view    The post-processed LDR scene (this frame's jittered render).
+     * @param depth_view    The scene depth buffer, at the same resolution.
+     * @param velocity_view The G-buffer's velocity attachment (GBufferTarget::g4_view_typed(),
+     *                      xy = uv motion since last frame, unjittered-to-unjittered), or null
+     *                      for camera-only reprojection through Params::reproject.
      */
     void set_source_images(coopa::gfx::TextureView scene_view,
-                           coopa::gfx::TextureView depth_view) {
-        last_scene_view_ = scene_view;
-        last_depth_view_ = depth_view;
+                           coopa::gfx::TextureView depth_view,
+                           coopa::gfx::TextureView velocity_view = coopa::gfx::TextureView::null()) {
+        last_scene_view_    = scene_view;
+        last_depth_view_    = depth_view;
+        last_velocity_view_ = velocity_view;
+        const bool has_velocity = velocity_view != coopa::gfx::TextureView::null();
         for (uint32_t i = 0; i < 2; ++i) {
             // Instance i renders into accum_targets_[i] and reads the OTHER as history.
             resolve_stage_->set(0, i).bind_image(0, scene_view, linear_sampler_);
             resolve_stage_->set(0, i).bind_image(1, accum_targets_[1 - i]->color_view_typed(),
                                                  linear_sampler_);
             resolve_stage_->set(0, i).bind_image(2, depth_view, nearest_sampler_);
+            // Binding 3 must hold a valid image even when the shader's use_velocity branch is
+            // off; the depth view stands in then.
+            resolve_stage_->set(0, i).bind_image(3, has_velocity ? velocity_view : depth_view,
+                                                 nearest_sampler_);
             present_stage_->set(0, i).bind_image(0, accum_targets_[i]->color_view_typed(),
                                                  linear_sampler_);
         }
@@ -197,6 +211,7 @@ public:
         pc.sharpness       = params.sharpness;
         pc.variance_gamma  = params.variance_gamma;
         pc.history_valid   = (history_initialized_ && params.reproject_valid) ? 1 : 0;
+        pc.use_velocity    = (last_velocity_view_ != coopa::gfx::TextureView::null()) ? 1 : 0;
 
         targets::OffscreenTarget& accum = *accum_targets_[parity_];
         accum.begin(cmd, VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}});
@@ -213,7 +228,7 @@ public:
     }
 
 private:
-    /// @brief Scene + history + depth at bindings 0-2, two instances for the ping-pong.
+    /// @brief Scene + history + depth + velocity at bindings 0-3, two instances for the ping-pong.
     static FullscreenStageDesc describe_resolve(const std::string& vert_spv,
                                                 const std::string& frag_spv) {
         FullscreenStageDesc d;
@@ -224,6 +239,8 @@ private:
                          {1, coopa::gfx::DescriptorType::CombinedImageSampler,
                           coopa::gfx::ShaderStage::Fragment, 1},
                          {2, coopa::gfx::DescriptorType::CombinedImageSampler,
+                          coopa::gfx::ShaderStage::Fragment, 1},
+                         {3, coopa::gfx::DescriptorType::CombinedImageSampler,
                           coopa::gfx::ShaderStage::Fragment, 1}}};
         d.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
         d.instances = 2;
@@ -253,8 +270,9 @@ private:
     /// @brief Which accumulation target this frame renders into; the other is history.
     uint32_t parity_ = 0;
 
-    coopa::gfx::TextureView last_scene_view_ = coopa::gfx::TextureView::null();
-    coopa::gfx::TextureView last_depth_view_ = coopa::gfx::TextureView::null();
+    coopa::gfx::TextureView last_scene_view_    = coopa::gfx::TextureView::null();
+    coopa::gfx::TextureView last_depth_view_    = coopa::gfx::TextureView::null();
+    coopa::gfx::TextureView last_velocity_view_ = coopa::gfx::TextureView::null();
 
     /**
      * The accumulation ping-pong. RGBA16F: rgb needs sub-8-bit increments (late accumulation

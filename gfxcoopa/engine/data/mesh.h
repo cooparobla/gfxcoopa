@@ -123,17 +123,24 @@ struct Vertex {
 
 /**
  * @struct InstanceData
- * @brief Per-instance vertex stream at binding 1: one world matrix per instance.
+ * @brief Per-instance vertex stream at binding 1: this frame's and last frame's world
+ *        matrix per instance (128 bytes).
  *
  * normal_matrix is deliberately NOT streamed — every consuming shader derives
- * it as transpose(inverse(mat3(in_model))) in-shader instead, halving the
- * per-instance payload (64B vs 128B) and removing a glm::inverse() call per
- * object per frame from the CPU side of every geometry pass. Scenes here use
- * non-uniform scale (e.g. Cornell box walls), so the shader must do the full
- * 3x3 inverse-transpose, not just mat3(in_model) directly.
+ * it as transpose(inverse(mat3(in_model))) in-shader instead, keeping a
+ * glm::inverse() call per object per frame off the CPU side of every geometry
+ * pass. Scenes here use non-uniform scale (e.g. Cornell box walls), so the
+ * shader must do the full 3x3 inverse-transpose, not just mat3(in_model) directly.
+ *
+ * prev_model is what the G-buffer backbone (gfx/surface/gbuffer_vs.glsl) projects
+ * through the previous frame's camera to write per-object motion vectors; passes
+ * that only read locations 4-7 (shadows, transparent, probes) simply leave 8-11
+ * unconsumed, which Vulkan permits. A static or newly-seen object streams
+ * prev_model == model.
  */
 struct InstanceData {
-    glm::mat4 model = glm::mat4(1.0f); /**< Object-to-world; consumed as locations 4..7, one vec4 per column. */
+    glm::mat4 model      = glm::mat4(1.0f); /**< Object-to-world; consumed as locations 4..7, one vec4 per column. */
+    glm::mat4 prev_model = glm::mat4(1.0f); /**< Last frame's object-to-world; locations 8..11. */
 
     /** @brief Binding 1, per-instance rate. Binding 0 stays Vertex's per-vertex stream. */
     static VkVertexInputBindingDescription binding_description() {
@@ -145,27 +152,30 @@ struct InstanceData {
     }
 
     /**
-     * @brief Returns the VkVertexInputAttributeDescriptions for locations 4-7 (one mat4).
+     * @brief Returns the VkVertexInputAttributeDescriptions for locations 4-7 (model) and
+     *        8-11 (prev_model), one mat4 each.
      *
      * A mat4 attribute occupies four consecutive vec4 locations. These
      * locations are used uniformly by every pipeline that consumes instance
      * data (including the shadow pipelines, whose binding-0 attributes only
      * use location 0), so this one array serves all of them.
      */
-    static std::array<VkVertexInputAttributeDescription, 4> attribute_descriptions() {
-        std::array<VkVertexInputAttributeDescription, 4> attrs{};
-        for (uint32_t i = 0; i < 4; ++i) {
+    static std::array<VkVertexInputAttributeDescription, 8> attribute_descriptions() {
+        std::array<VkVertexInputAttributeDescription, 8> attrs{};
+        for (uint32_t i = 0; i < 8; ++i) {
+            const size_t base = (i < 4) ? offsetof(InstanceData, model) : offsetof(InstanceData, prev_model);
             attrs[i].binding  = 1;
             attrs[i].location = 4 + i;
             attrs[i].format   = VK_FORMAT_R32G32B32A32_SFLOAT;
-            attrs[i].offset   = static_cast<uint32_t>(offsetof(InstanceData, model) + i * sizeof(glm::vec4));
+            attrs[i].offset   = static_cast<uint32_t>(base + (i % 4) * sizeof(glm::vec4));
         }
         return attrs;
     }
 
     /**
-     * @brief Sealed vertex input layout for binding 1 (per-instance model matrix,
-     * locations 4-7), replacing binding_description()/attribute_descriptions() above.
+     * @brief Sealed vertex input layout for binding 1 (per-instance model matrix at
+     * locations 4-7, previous-frame model matrix at 8-11), replacing
+     * binding_description()/attribute_descriptions() above.
      * Combine with Vertex::layout() via `Vertex::layout().append(InstanceData::layout())`
      * for a pipeline that reads both streams.
      */
@@ -175,6 +185,10 @@ struct InstanceData {
         for (uint32_t i = 0; i < 4; ++i) {
             vl.attribute(4 + i, Format::RGBA32_Sfloat,
                         static_cast<uint32_t>(offsetof(InstanceData, model) + i * sizeof(glm::vec4)));
+        }
+        for (uint32_t i = 0; i < 4; ++i) {
+            vl.attribute(8 + i, Format::RGBA32_Sfloat,
+                        static_cast<uint32_t>(offsetof(InstanceData, prev_model) + i * sizeof(glm::vec4)));
         }
         return vl;
     }

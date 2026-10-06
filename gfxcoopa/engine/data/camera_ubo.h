@@ -29,14 +29,25 @@ namespace data {
  * @struct CameraData
  * @brief std140-aligned camera matrices and view position.
  *
- * Layout: view (64 bytes) + proj (64 bytes) + view_pos (12 bytes) + padding (4 bytes) = 144 bytes.
+ * Layout: view (64 bytes) + proj (64 bytes) + view_pos (12 bytes) + padding (4 bytes) = 144 bytes,
+ * then the reprojection block appended below: prev_view (64) + prev_proj (64) + jitter_ndc (16)
+ * = 288 bytes. A shader declares only the leading members it needs (most keep the original
+ * three-member block; a Vulkan UBO may be larger than the block bound to it), so the
+ * trailing fields cost existing shaders nothing.
  */
 struct alignas(16) CameraData {
     glm::mat4 view     = glm::mat4(1.0f); /**< View matrix (world-to-camera). */
-    glm::mat4 proj     = glm::mat4(1.0f); /**< Projection matrix (camera-to-clip). */
+    glm::mat4 proj     = glm::mat4(1.0f); /**< Projection matrix (camera-to-clip); TAA-jittered when TAA is on. */
     glm::vec3 view_pos = glm::vec3(0.0f); /**< Camera world-space position (for specular). */
     float     _pad0    = 0.0f;            /**< std140 padding. */
+    // --- Reprojection, for the G-buffer's velocity attachment (gfx/surface/gbuffer_fs.glsl).
+    // Set by set_reprojection(); left at identity/zero by callers that never need motion
+    // vectors (GiSystem's probe captures), which makes every velocity read as zero there.
+    glm::mat4 prev_view  = glm::mat4(1.0f); /**< Previous frame's view matrix, exactly as uploaded then (pixel-snapped if snapping was on). */
+    glm::mat4 prev_proj  = glm::mat4(1.0f); /**< Previous frame's UNJITTERED projection. */
+    glm::vec4 jitter_ndc = glm::vec4(0.0f); /**< xy = this frame's TAA jitter as the NDC displacement it applied to `proj`; zw unused. */
 };
+static_assert(sizeof(CameraData) == 288, "CameraData must stay std140-compatible: shaders declare it member-for-member");
 
 /**
  * @class CameraUBO
@@ -93,6 +104,27 @@ public:
 
         buffer_.upload(&data_, sizeof(CameraData));
     }
+
+    /**
+     * @brief Sets the previous-frame matrices and this frame's jitter that the G-buffer's
+     *        velocity attachment reprojects with. Call BEFORE update(), which uploads the
+     *        whole struct; the values persist until the next call.
+     *
+     * @param prev_view  The view matrix the PREVIOUS frame rendered with -- read it back from
+     *                   data().view at the end of that frame so it is the pixel-snapped one
+     *                   the shaders actually saw, never a re-derived copy.
+     * @param prev_proj  The previous frame's projection WITHOUT its TAA jitter.
+     * @param jitter_ndc This frame's jitter as the NDC displacement applied to `proj`
+     *                   (zero when TAA is off); the velocity is measured unjittered-to-unjittered.
+     */
+    void set_reprojection(const glm::mat4& prev_view, const glm::mat4& prev_proj, glm::vec2 jitter_ndc) {
+        data_.prev_view  = prev_view;
+        data_.prev_proj  = prev_proj;
+        data_.jitter_ndc = glm::vec4(jitter_ndc, 0.0f, 0.0f);
+    }
+
+    /** @brief The host-side copy of what update() last uploaded (view is the snapped one). */
+    const CameraData& data() const { return data_; }
 
     /** @brief Returns the underlying uniform buffer for descriptor binding. */
     const memory::Buffer& buffer() const { return buffer_; }

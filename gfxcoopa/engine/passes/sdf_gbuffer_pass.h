@@ -54,7 +54,7 @@ public:
 
     /**
      * @param device        Logical device.
-     * @param gbuffer_render_pass GBufferTarget's raw render pass (4 color + depth).
+     * @param gbuffer_render_pass GBufferTarget's raw render pass (5 color + depth).
      * @param camera_layout Set 0.
      * @param sdf_layout    Set 1 -- SdfData's layout (globals UBO + renderer/shape SSBOs).
      * @param vert_spv      sdf_quad.vert.
@@ -82,8 +82,9 @@ public:
         desc.depth.write  = true;
         desc.depth.compare = coopa::gfx::CompareOp::Less;
         // detail::RawRenderPass's Pipeline ctor can't read color_attachment_count() from a
-        // real RenderPass (see pipeline.h) -- GBufferTarget's render pass has 4 (G0-G3).
-        desc.blend.color_attachment_count = 4;
+        // real RenderPass (see pipeline.h) -- GBufferTarget's render pass has 5 (G0-G3 plus
+        // the G4 velocity attachment).
+        desc.blend.color_attachment_count = 5;
 
         pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
             device, coopa::gfx::detail::RawRenderPass{gbuffer_render_pass}, desc);

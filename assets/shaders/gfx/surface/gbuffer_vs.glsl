@@ -23,13 +23,18 @@ layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_normal;
 layout(location = 2) in vec2 in_uv;
 layout(location = 3) in vec4 in_tangent; // xyz = tangent, w = handedness
-layout(location = 4) in mat4 in_model;   // per-instance (locations 4-7)
+layout(location = 4) in mat4 in_model;       // per-instance (locations 4-7)
+layout(location = 8) in mat4 in_prev_model;  // per-instance (locations 8-11): last frame's model
 
-// Set 0: Camera UBO
+// Set 0: Camera UBO. The trailing reprojection members (data::CameraData) are declared here
+// and in gbuffer_fs.glsl only; every other shader keeps the three-member block.
 layout(set = 0, binding = 0) uniform CameraUBO {
     mat4 view;
     mat4 proj;
     vec3 camera_pos;
+    mat4 prev_view;
+    mat4 prev_proj;
+    vec4 jitter_ndc;
 } camera;
 
 // Shared with gbuffer_fs.glsl -- see that file for the fragment-stage-only
@@ -64,7 +69,13 @@ vec4 gfx_params = material.gfx_params;
 layout(location = 0) out vec3 frag_world_pos;
 layout(location = 1) out vec3 frag_world_normal;
 layout(location = 2) out vec2 frag_uv;
-layout(location = 3) out mat3 frag_TBN;
+layout(location = 3) out mat3 frag_TBN;          // occupies locations 3-5
+// Where this vertex was LAST frame, in world space, for the velocity attachment
+// gbuffer_fs.glsl writes. Location 11: derived shaders own 6-10 for their own varyings
+// (triplanar.vert), and this must be declared by BOTH backbones so every vert/frag pair
+// built on them matches -- an unmatched extra varying is the MoltenVK instability
+// editor_paint.vert records.
+layout(location = 11) out vec3 frag_prev_world_pos;
 
 /// What a vertex-displacement hook receives and may edit. The _os fields are
 /// as-authored (pre-model-matrix); everything else is already in world
@@ -109,6 +120,13 @@ void main() {
     v.tangent_ws  = normalize(v.normal_matrix * in_tangent.xyz);
 
     gfx_surface_vertex(v);
+
+    // Previous-frame position: last frame's model matrix, plus THIS frame's hook displacement
+    // (wind sway etc.) applied to both poses. Rigid object motion is therefore carried exactly;
+    // the hook's own animation is not (it would need the hook re-run at last frame's time),
+    // and reads as sub-pixel noise the consumers' dead-zone and variance clip absorb.
+    vec3 disp = v.position_ws - world_pos.xyz;
+    frag_prev_world_pos = (in_prev_model * vec4(in_position, 1.0)).xyz + disp;
 
     vec3 T = normalize(v.tangent_ws - dot(v.tangent_ws, v.normal_ws) * v.normal_ws);
     vec3 B = cross(v.normal_ws, T) * in_tangent.w;

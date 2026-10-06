@@ -26,12 +26,16 @@ namespace targets {
 
 /**
  * @class GBufferTarget
- * @brief The deferred G-buffer: four colour attachments plus depth, with the
+ * @brief The deferred G-buffer: five colour attachments plus depth, with the
  *        render pass and framebuffer that write them.
  *
- * G0 albedo+AO, G1 normal+metallic, G2 position+roughness, G3 emissive. Cleared
- * every frame. begin()/end() bracket the geometry passes that fill it; the
- * depth attachment is left readable afterwards for passes that test against it.
+ * G0 albedo+AO, G1 normal+metallic, G2 position+roughness, G3 emissive, G4 velocity
+ * (xy = the surface's screen motion since last frame in UV units, unjittered-to-
+ * unjittered; z = its linear view depth last frame, -1 if it was behind the eye;
+ * w = its linear view depth this frame -- see gfx/surface/gbuffer_fs.glsl). Cleared
+ * every frame (G4 to zero: the sky has no motion and no depth). begin()/end() bracket
+ * the geometry passes that fill it; the depth attachment is left readable afterwards
+ * for passes that test against it.
  */
 class GBufferTarget {
 public:
@@ -52,7 +56,7 @@ public:
     GBufferTarget& operator=(const GBufferTarget&) = delete;
 
     void begin(coopa::gfx::command::CommandBuffer& cmd) const {
-        VkClearValue clear_values[5]{};
+        VkClearValue clear_values[6]{};
         clear_values[0].color = {{0.05f, 0.05f, 0.05f, 1.0f}};
         clear_values[1].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
         clear_values[2].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
@@ -60,7 +64,9 @@ public:
         // becomes a constant emissive floor added to every background/non-emissive pixel a
         // lighting shader reads this attachment at.
         clear_values[3].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
-        clear_values[4].depthStencil = {1.0f, 0};
+        // G4 (velocity): zero motion, zero depth -- "no surface here" for every consumer.
+        clear_values[4].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+        clear_values[5].depthStencil = {1.0f, 0};
 
         VkRenderPassBeginInfo rp_info{};
         rp_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -68,7 +74,7 @@ public:
         rp_info.framebuffer       = framebuffer_;
         rp_info.renderArea.offset = {0, 0};
         rp_info.renderArea.extent = {width_, height_};
-        rp_info.clearValueCount   = 5;
+        rp_info.clearValueCount   = 6;
         rp_info.pClearValues      = clear_values;
 
         vkCmdBeginRenderPass(cmd.handle(), &rp_info, VK_SUBPASS_CONTENTS_INLINE);
@@ -97,17 +103,20 @@ public:
     VkImageView g1_view() const { return g1_image_->view(); }
     VkImageView g2_view() const { return g2_image_->view(); }
     VkImageView g3_view() const { return g3_image_->view(); }
+    VkImageView g4_view() const { return g4_image_->view(); }
     VkImageView depth_view() const { return depth_image_->view(); }
     VkImage depth_image_handle() const { return depth_image_->handle(); }
     /// @brief G2 (world position + roughness, RGBA16F) as a raw image, for texel copies. Left in
     ///        SHADER_READ_ONLY_OPTIMAL by the render pass; a copier transitions it and back.
     VkImage g2_image_handle() const { return g2_image_->handle(); }
 
-    // Sealed TextureView siblings of the five accessors above.
+    // Sealed TextureView siblings of the six accessors above.
     TextureView g0_view_typed() const    { return g0_image_->view_typed(); }
     TextureView g1_view_typed() const    { return g1_image_->view_typed(); }
     TextureView g2_view_typed() const    { return g2_image_->view_typed(); }
     TextureView g3_view_typed() const    { return g3_image_->view_typed(); }
+    /// @brief G4, the velocity attachment (see the class doc for its channels).
+    TextureView g4_view_typed() const    { return g4_image_->view_typed(); }
     TextureView depth_view_typed() const { return depth_image_->view_typed(); }
 
     /// @brief The depth memory::Image itself, for command::CommandBuffer::
@@ -150,6 +159,14 @@ private:
             VK_IMAGE_ASPECT_COLOR_BIT, VMA_MEMORY_USAGE_AUTO
         );
 
+        // G4 velocity: fp16 is plenty for a sub-pixel UV delta (relative precision) and for
+        // the two linear view depths a 5% disocclusion test compares.
+        g4_image_ = std::make_unique<coopa::gfx::memory::Image>(
+            device_, allocator_, width_, height_,
+            VK_FORMAT_R16G16B16A16_SFLOAT, color_flags,
+            VK_IMAGE_ASPECT_COLOR_BIT, VMA_MEMORY_USAGE_AUTO
+        );
+
         depth_image_ = std::make_unique<coopa::gfx::memory::Image>(
             device_, allocator_, width_, height_,
             VK_FORMAT_D32_SFLOAT,
@@ -157,8 +174,8 @@ private:
             VK_IMAGE_ASPECT_DEPTH_BIT, VMA_MEMORY_USAGE_AUTO
         );
 
-        // Render pass definition with 4 color attachments + 1 depth attachment
-        VkAttachmentDescription attachments[5]{};
+        // Render pass definition with 5 color attachments + 1 depth attachment
+        VkAttachmentDescription attachments[6]{};
 
         // G0 (Albedo + AO)
         attachments[0].format         = VK_FORMAT_R8G8B8A8_UNORM;
@@ -200,27 +217,38 @@ private:
         attachments[3].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
         attachments[3].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        // Depth
-        attachments[4].format         = VK_FORMAT_D32_SFLOAT;
+        // G4 (Velocity: uv motion xy, previous/current linear view depth zw)
+        attachments[4].format         = VK_FORMAT_R16G16B16A16_SFLOAT;
         attachments[4].samples        = VK_SAMPLE_COUNT_1_BIT;
         attachments[4].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
         attachments[4].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
         attachments[4].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         attachments[4].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         attachments[4].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachments[4].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        attachments[4].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        VkAttachmentReference color_refs[4]{
+        // Depth
+        attachments[5].format         = VK_FORMAT_D32_SFLOAT;
+        attachments[5].samples        = VK_SAMPLE_COUNT_1_BIT;
+        attachments[5].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachments[5].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[5].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[5].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[5].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachments[5].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference color_refs[5]{
             {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
             {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
             {2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-            {3, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}
+            {3, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+            {4, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}
         };
-        VkAttachmentReference depth_ref{4, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+        VkAttachmentReference depth_ref{5, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
 
         VkSubpassDescription subpass{};
         subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount    = 4;
+        subpass.colorAttachmentCount    = 5;
         subpass.pColorAttachments       = color_refs;
         subpass.pDepthStencilAttachment = &depth_ref;
 
@@ -234,7 +262,7 @@ private:
 
         VkRenderPassCreateInfo rp_info{};
         rp_info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        rp_info.attachmentCount = 5;
+        rp_info.attachmentCount = 6;
         rp_info.pAttachments    = attachments;
         rp_info.subpassCount    = 1;
         rp_info.pSubpasses      = &subpass;
@@ -249,6 +277,7 @@ private:
             g1_image_->view(),
             g2_image_->view(),
             g3_image_->view(),
+            g4_image_->view(),
             depth_image_->view()
         };
 
@@ -277,6 +306,7 @@ private:
         g1_image_.reset();
         g2_image_.reset();
         g3_image_.reset();
+        g4_image_.reset();
         depth_image_.reset();
     }
 
@@ -289,6 +319,7 @@ private:
     std::unique_ptr<coopa::gfx::memory::Image> g1_image_;
     std::unique_ptr<coopa::gfx::memory::Image> g2_image_;
     std::unique_ptr<coopa::gfx::memory::Image> g3_image_;
+    std::unique_ptr<coopa::gfx::memory::Image> g4_image_;
     std::unique_ptr<coopa::gfx::memory::Image> depth_image_;
 
     VkRenderPass  render_pass_ = VK_NULL_HANDLE;

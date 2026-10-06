@@ -288,8 +288,9 @@ private:
         depth_stencil.depthCompareOp   = VK_COMPARE_OP_LESS;
         depth_stencil.stencilTestEnable= VK_FALSE;
 
-        VkPipelineColorBlendAttachmentState blend_attachments[4]{};
-        for (int i = 0; i < 4; ++i) {
+        // One per GBufferTarget colour attachment: G0-G3 plus the G4 velocity attachment.
+        VkPipelineColorBlendAttachmentState blend_attachments[5]{};
+        for (int i = 0; i < 5; ++i) {
             blend_attachments[i].blendEnable = VK_FALSE;
             blend_attachments[i].colorWriteMask =
                 VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -299,7 +300,7 @@ private:
         VkPipelineColorBlendStateCreateInfo color_blending{};
         color_blending.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
         color_blending.logicOpEnable   = VK_FALSE;
-        color_blending.attachmentCount = 4;
+        color_blending.attachmentCount = 5;
         color_blending.pAttachments    = blend_attachments;
 
         VkPipelineShaderStageCreateInfo stages[] = {

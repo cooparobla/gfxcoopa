@@ -6,11 +6,13 @@
 //
 // Inputs are the post-processed LDR scene (sRGB-encoded bytes, rasterised with this frame's
 // sub-pixel projection jitter), the accumulation history (rgb = accumulated colour, a = sample
-// age), and the scene depth buffer. The resolve reprojects the history through the camera's
-// frame-to-frame motion (camera-only: there are no per-object motion vectors; dynamic objects
-// are protected from ghosting by the variance clip instead), rejects invalid history with
-// YCoCg variance clipping, and accumulates with a per-pixel age so a still camera converges
-// to a true multi-jitter average rather than orbiting an exponential blend.
+// age), the scene depth buffer and, when the caller has one, a velocity image (the G-buffer's
+// per-object motion vectors). The resolve reprojects the history through that per-pixel
+// motion -- or, without a velocity image, through the camera's frame-to-frame motion alone,
+// where dynamic objects are protected from ghosting only by the variance clip -- rejects
+// invalid history with YCoCg variance clipping, and accumulates with a per-pixel age so a
+// still camera converges to a true multi-jitter average rather than orbiting an exponential
+// blend.
 //
 // The output target is RGBA16F: the age channel needs more than 8 bits of alpha, and the
 // accumulated colour needs sub-LSB precision or the shrinking late-accumulation increments
@@ -21,6 +23,10 @@ layout(location = 0) in vec2 frag_uv;
 layout(set = 0, binding = 0) uniform sampler2D tex_scene;    // LINEAR; this frame, jittered
 layout(set = 0, binding = 1) uniform sampler2D tex_history;  // LINEAR; rgb = colour, a = age
 layout(set = 0, binding = 2) uniform sampler2D tex_depth;    // NEAREST; scene depth, sky = 1
+// NEAREST; the G-buffer's velocity attachment (gfx/surface/gbuffer_fs.glsl): xy = this
+// surface's uv motion since last frame, unjittered-to-unjittered. A placeholder when
+// pc.use_velocity is 0.
+layout(set = 0, binding = 3) uniform sampler2D tex_velocity;
 
 layout(push_constant) uniform PushConstants {
     mat4  reproject;        // prev UNjittered view-proj * inverse(current JITTERED view-proj)
@@ -32,6 +38,7 @@ layout(push_constant) uniform PushConstants {
     float sharpness;        // motion-gated high-frequency restore, 0 disables
     float variance_gamma;   // clip box half-width in standard deviations, under motion
     int   history_valid;    // 0 until both a history image and a previous matrix exist
+    int   use_velocity;     // 1: tex_velocity carries per-object motion vectors (see above)
 } pc;
 
 layout(location = 0) out vec4 out_color;
@@ -177,6 +184,14 @@ void main() {
     // history is fetched at frag_uv verbatim -- the jitter is meant to be INTEGRATED by the
     // accumulation below, not unrolled out of the fetch.
     vec2  velocity    = cur_unjit_uv - prev_uv;
+    // Per-object motion vectors, when the caller provides them: the surface's own motion,
+    // taken at the same closest-depth neighbour the dilation chose, so a moving object's
+    // history is fetched from where that object WAS rather than from where a static point
+    // would have been. The sky (depth 1, nothing written to the velocity attachment) keeps
+    // the camera-only result above.
+    if (pc.use_velocity != 0 && closest < 1.0) {
+        velocity = texture(tex_velocity, motion_uv).xy;
+    }
     float velocity_px = length(velocity * pc.resolution);
 
     // Sub-0.05px velocities are indistinguishable from the fp32 noise of the CPU-side matrix

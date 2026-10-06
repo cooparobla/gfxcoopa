@@ -16,7 +16,19 @@
 layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_world_normal;
 layout(location = 2) in vec2 frag_uv;
-layout(location = 3) in mat3 frag_TBN;
+layout(location = 3) in mat3 frag_TBN;            // locations 3-5
+layout(location = 11) in vec3 frag_prev_world_pos; // see gbuffer_vs.glsl
+
+// Set 0: Camera UBO, with the trailing reprojection members (data::CameraData) the velocity
+// attachment below needs. Same binding every other pass reads its three-member block from.
+layout(set = 0, binding = 0) uniform CameraUBO {
+    mat4 view;
+    mat4 proj;
+    vec3 camera_pos;
+    mat4 prev_view;
+    mat4 prev_proj;
+    vec4 jitter_ndc;
+} camera;
 
 layout(push_constant) uniform PushConstants {
     vec4  albedo;     // xyz = albedo, w = alpha
@@ -51,6 +63,15 @@ layout(location = 0) out vec4 out_albedo_ao;          // RGB = Albedo, A = AO
 layout(location = 1) out vec4 out_normal_metallic;    // RGB = World Normal, A = Metallic
 layout(location = 2) out vec4 out_position_roughness; // RGB = World Pos, A = Roughness
 layout(location = 3) out vec4 out_emissive;           // RGB = emissive radiance (HDR), A = unused
+// G4, per-object motion vectors: XY = this surface's screen motion since last frame in UV
+// units (current unjittered position minus previous), Z = its linear view depth LAST frame
+// (-1 when it was behind the eye: no history exists for it), W = its linear view depth now.
+// The temporal passes (SSAO's resolve, TAA) reproject their history through XY and compare
+// the depth their history stored against Z to detect a different surface.
+layout(location = 4) out vec4 out_velocity;
+
+// NDC xy -> UV, matching gfx/ssr_common.glsl's ssr_ndc_to_uv (Y flips between the spaces).
+vec2 gfx_gbuffer_ndc_to_uv(vec2 ndc) { return vec2(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5); }
 
 /// What a fragment-shading hook receives and may edit, seeded from the
 /// material push block and the interpolated vertex outputs. Editing
@@ -137,6 +158,27 @@ void main() {
     out_normal_metallic    = vec4(s.normal_ws, s.metallic);
     out_position_roughness = vec4(s.position_ws, s.roughness);
     out_emissive            = vec4(s.emissive, 0.0);
+
+    // Velocity. Both positions are re-projected here from the perspective-correct interpolated
+    // world positions (frag_world_pos is the displaced one, so cur_clip reproduces this
+    // fragment's gl_Position to round-off); a static surface under a still camera gets
+    // bit-identical inputs on both sides, hence an exactly zero velocity. The current
+    // position has this frame's TAA jitter removed (the NDC shift the jittered proj applied,
+    // see TaaPass/apply_taa_jitter_), the previous projection never had any, so the motion is
+    // unjittered-to-unjittered: a still camera measures zero rather than the jitter sequence.
+    {
+        vec4  cur_clip   = camera.proj * camera.view * vec4(frag_world_pos, 1.0);
+        vec4  prev_clip  = camera.prev_proj * camera.prev_view * vec4(frag_prev_world_pos, 1.0);
+        vec2  cur_uv     = gfx_gbuffer_ndc_to_uv(cur_clip.xy / cur_clip.w - camera.jitter_ndc.xy);
+        float cur_depth  = -(camera.view      * vec4(frag_world_pos, 1.0)).z;
+        float prev_depth = -(camera.prev_view * vec4(frag_prev_world_pos, 1.0)).z;
+        if (prev_clip.w <= 0.0) {
+            out_velocity = vec4(0.0, 0.0, -1.0, cur_depth);
+        } else {
+            vec2 prev_uv = gfx_gbuffer_ndc_to_uv(prev_clip.xy / prev_clip.w);
+            out_velocity = vec4(cur_uv - prev_uv, prev_depth, cur_depth);
+        }
+    }
 }
 
 #endif // GFX_SURFACE_GBUFFER_FS_GLSL

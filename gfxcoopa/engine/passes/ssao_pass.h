@@ -63,7 +63,7 @@ public:
                   "ssao.frag's SsaoPushConstants block must match this layout byte-for-byte");
 
     /// Format of the temporal resolve's two ping-pong targets (each frame renders into one and
-    /// reads the other as history). The resolve carries an eye distance (world units, see
+    /// reads the other as history). The resolve carries a linear view depth (see
     /// ssao_resolve.frag's disocclusion test) and a per-pixel accumulation count alongside the
     /// occlusion value, so the target needs float range beyond two channels.
     static constexpr VkFormat kResolveFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -72,33 +72,32 @@ public:
     /// vec2 is deliberately flattened to two floats, matching PushConstants' house rule, so nothing
     /// here depends on std430 vec2 base-alignment (8 bytes) lining up with this C++ struct's layout.
     struct ResolvePushConstants {
-        // Current clip space -> previous frame's clip space: prev jittered (proj * view) times
-        // the inverse of the current jittered (proj * view). Callers compose it in DOUBLE
-        // precision (see Params::reproject) so the shader never touches world-scale numbers.
+        // Camera-only fallback reprojection (use_velocity == 0): current clip space -> previous
+        // frame's clip space, prev jittered (proj * view) times the inverse of the current
+        // jittered (proj * view). Callers compose it in DOUBLE precision (see Params::reproject)
+        // so the shader never touches world-scale numbers.
         glm::mat4 reproject      = glm::mat4(1.0f); // offset 0
         float     resolution_x   = 1.0f;            // offset 64
         float     resolution_y   = 1.0f;            // offset 68
         // Accumulation-count cap: each pixel blends the new frame at 1/(count+1) until its
         // count reaches this, then keeps averaging at that fixed rate. 0 degenerates the
         // resolve into a passthrough of the current frame (how temporal_enabled=false works).
-        float     max_accum      = 32.0f;            // offset 72
+        float     max_accum      = 8.0f;             // offset 72
         int       history_valid  = 0;                // offset 76
-        // Flattened vec3s, same house rule as the vec2 above: the eye that produced this
-        // frame's G-buffer, and the eye the history image was resolved from. The resolve
-        // shader needs both to turn its stored distance channel into a surface-identity test.
-        float     camera_pos_x      = 0.0f;          // offset 80
-        float     camera_pos_y      = 0.0f;          // offset 84
-        float     camera_pos_z      = 0.0f;          // offset 88
-        float     prev_camera_pos_x = 0.0f;          // offset 92
-        float     prev_camera_pos_y = 0.0f;          // offset 96
-        float     prev_camera_pos_z = 0.0f;          // offset 100
-        // Nonzero once the camera has been still long enough for the accumulated average
-        // to top up -- the resolve then holds accepted-history pixels verbatim, which is
-        // what keeps a still image byte-static (see ssao_resolve.frag).
-        int       frozen            = 0;             // offset 104
-        int       gbuffer_scale     = 1;             // offset 108 -- 2 under half_res
+        // Nonzero once the camera AND the scene have been still long enough for the
+        // accumulated average to top up -- the resolve then holds accepted-history pixels
+        // verbatim, which is what keeps a still image byte-static (see ssao_resolve.frag).
+        int       frozen            = 0;             // offset 80
+        int       gbuffer_scale     = 1;             // offset 84 -- 2 under half_res
+        // 1 when binding 5 of the resolve set holds the G-buffer's velocity attachment (see
+        // update_descriptors()): history is then reprojected through per-object motion
+        // vectors and disocclusion tested against the exact previous depth they carry.
+        int       use_velocity      = 0;             // offset 88
+        // Variance-clip half-width for accepted history, in standard deviations of the
+        // current 3x3 raw neighbourhood (Params::temporal_gamma).
+        float     variance_gamma    = 1.0f;          // offset 92
     };
-    static_assert(sizeof(ResolvePushConstants) == 112, "ssao_resolve.frag's PushConstants block must match this layout byte-for-byte");
+    static_assert(sizeof(ResolvePushConstants) == 96, "ssao_resolve.frag's PushConstants block must match this layout byte-for-byte");
 
     /// Blur-pass GPU push constants.
     struct BlurPushConstants {
@@ -132,22 +131,26 @@ public:
 
         bool  temporal_enabled = true;
         // Accumulation depth: how many frames a pixel averages before the running mean turns
-        // into a fixed-rate EMA. Mapped straight into ResolvePushConstants::max_accum.
-        int   temporal_frames  = 32;
-        // Reprojection: previous frame's jittered (proj * view) times the inverse of the
+        // into a fixed-rate EMA. Mapped straight into ResolvePushConstants::max_accum. 8 is
+        // Unreal's GTAO temporal filter (a ~0.1 history blend); with velocity reprojection a
+        // short window is both stable and responsive to moving objects.
+        int   temporal_frames  = 8;
+        // History variance-clip half-width (ResolvePushConstants::variance_gamma).
+        float temporal_gamma   = 1.0f;
+        // Camera-only fallback reprojection, used when update_descriptors() was given no
+        // velocity image: previous frame's jittered (proj * view) times the inverse of the
         // current frame's, composed in double precision (glm::dmat4) before truncating to
         // float -- world-scale magnitudes cancel inside the double product, so the resulting
         // matrix reprojects at sub-pixel accuracy where a float composition (or a reprojection
         // routed through the RGBA16F G-buffer position) drifts by whole pixels. Same scheme as
         // TaaPass's reprojection matrix. reproject_valid says whether it (and the history
-        // image) actually exist yet -- see execute()'s history_valid derivation.
+        // image) actually exist yet -- see execute()'s history_valid derivation. Still
+        // required with a velocity image: it gates history_valid the same way.
         glm::mat4 reproject       = glm::mat4(1.0f);
         bool      reproject_valid = false;
-        // This frame's eye position. The pass remembers the previous frame's itself, so callers
-        // only ever supply the current one.
-        glm::vec3 camera_pos           = glm::vec3(0.0f);
-        // True once the camera has been still long enough to freeze the accumulated image
-        // (the caller counts still frames -- see PixelRenderPipeline's ssao_frames_still_).
+        // True once the camera and the scene have been still long enough to freeze the
+        // accumulated image (the caller counts still frames -- see PixelRenderPipeline's
+        // camera_frames_still_ / scene_moved_).
         bool      frozen               = false;
         // Camera rotation between consecutive frames, in screen-centre pixels -- drives the
         // blur's velocity widening (0 at rest keeps the kernel bit-identical to the resting
@@ -189,8 +192,8 @@ public:
         raw_render_pass_ = std::make_unique<coopa::gfx::pipeline::RenderPass>(
             device, VK_FORMAT_R8_UNORM, VK_FORMAT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         );
-        // RG16F, not R8: the resolve carries a per-pixel eye distance in .g alongside the
-        // occlusion in .r (see ssao_resolve.frag), and that distance needs real range and
+        // RGBA16F, not R8: the resolve carries a per-pixel linear view depth in .g alongside
+        // the occlusion in .r (see ssao_resolve.frag), and that depth needs real range and
         // precision rather than a normalized byte. The raw and blur targets below stay R8.
         resolve_render_pass_ = std::make_unique<coopa::gfx::pipeline::RenderPass>(
             device, kResolveFormat, VK_FORMAT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
@@ -223,16 +226,17 @@ public:
         raw_sd.push_constants = {{ShaderStage::Fragment, 0, sizeof(PushConstants)}};
         raw_ = std::make_unique<FullscreenStage>(device, *raw_render_pass_, raw_sd);
 
-        // Resolve pass. No camera set -- reprojection uses the reproject push constant:
-        // current raw AO, history AO, G2 position, G1 normal, plus the rasterized depth
-        // (the reprojection's clip-z source; the AO pyramid's level 0, read straight from
-        // the depth buffer since the pyramid image starts at level 1).
+        // Resolve pass. No camera set -- reprojection uses the G-buffer's velocity attachment
+        // (binding 5) or, without one, the reproject push constant: current raw AO, history
+        // AO, G2 position, G1 normal, the rasterized depth (the fallback reprojection's clip-z
+        // source; the AO pyramid's level 0, read straight from the depth buffer since the
+        // pyramid image starts at level 1), and the velocity image.
         // Two set instances, one per ping-pong parity: instance i reads target 1-i as history
         // while the pass renders into target i, so no descriptor is ever updated per frame.
         FullscreenStageDesc resolve_sd;
         resolve_sd.vert_spv = vert_spv;
         resolve_sd.frag_spv = resolve_frag_spv;
-        resolve_sd.owned_sets = {sampled(5)};
+        resolve_sd.owned_sets = {sampled(6)};
         resolve_sd.push_constants = {{ShaderStage::Fragment, 0, sizeof(ResolvePushConstants)}};
         resolve_sd.instances = 2;
         resolve_ = std::make_unique<FullscreenStage>(device, *resolve_render_pass_, resolve_sd);
@@ -320,13 +324,20 @@ public:
     ///                   external_level0): ssao.frag reads mip k-1 of it for level k.
     /// @param depth_view The rasterized depth -- level 0 of that pyramid, read directly
     ///                   instead of being copied into it (exact: level 0 was a texelFetch copy).
+    /// @param velocity_view The G-buffer's velocity attachment (GBufferTarget::g4_view_typed():
+    ///                   xy = uv motion since last frame, z = previous linear view depth, w =
+    ///                   current), or null: the resolve then falls back to Params::reproject,
+    ///                   a camera-only reprojection that cannot follow moving objects.
     void update_descriptors(coopa::gfx::TextureView g1_view, coopa::gfx::TextureView g2_view,
                             coopa::gfx::TextureView hiz_view, coopa::gfx::TextureView depth_view,
-                            const util::Sampler& hiz_sampler, const util::Sampler& linear_sampler) {
+                            const util::Sampler& hiz_sampler, const util::Sampler& linear_sampler,
+                            coopa::gfx::TextureView velocity_view = coopa::gfx::TextureView::null()) {
         raw_->set().bind_image(0, g1_view, linear_sampler);
         raw_->set().bind_image(1, g2_view, linear_sampler);
         raw_->set().bind_image(2, hiz_view, hiz_sampler);
         raw_->set().bind_image(3, depth_view, hiz_sampler);
+
+        has_velocity_ = !(velocity_view == coopa::gfx::TextureView::null());
 
         // Parity i renders into resolve target i and reads target 1-i as its history.
         for (uint32_t i = 0; i < 2; ++i) {
@@ -335,6 +346,9 @@ public:
             resolve_->set(0, i).bind_image(2, g2_view, *raw_sampler_);
             resolve_->set(0, i).bind_image(3, g1_view, *raw_sampler_);
             resolve_->set(0, i).bind_image(4, depth_view, hiz_sampler);   // u_depth: level 0 = the depth buffer
+            // Binding 5 must hold a valid image whether or not the shader's use_velocity
+            // branch reads it; G2 stands in when there is no velocity attachment.
+            resolve_->set(0, i).bind_image(5, has_velocity_ ? velocity_view : g2_view, *raw_sampler_);
 
             blur_->set(0, i).bind_image(1, g1_view, *raw_sampler_);
             blur_->set(0, i).bind_image(2, g2_view, *raw_sampler_);
@@ -458,17 +472,10 @@ public:
         // (reproject_valid) must exist -- the matrix lags the image by a frame on a
         // fresh-start/resize, so ANDing avoids reprojecting with a stale/identity matrix.
         resolve_pc.history_valid = (history_initialized_ && params.reproject_valid) ? 1 : 0;
-        resolve_pc.camera_pos_x      = params.camera_pos.x;
-        resolve_pc.camera_pos_y      = params.camera_pos.y;
-        resolve_pc.camera_pos_z      = params.camera_pos.z;
-        // prev_camera_pos_ is only read by the shader when history_valid is 1, which already
-        // requires a history image AND a previous view-projection -- the same frame of lag this
-        // eye position has, so it needs no validity flag of its own.
-        resolve_pc.prev_camera_pos_x = prev_camera_pos_.x;
-        resolve_pc.prev_camera_pos_y = prev_camera_pos_.y;
-        resolve_pc.prev_camera_pos_z = prev_camera_pos_.z;
         resolve_pc.frozen            = params.frozen ? 1 : 0;
         resolve_pc.gbuffer_scale     = half_res_ ? 2 : 1;
+        resolve_pc.use_velocity      = has_velocity_ ? 1 : 0;
+        resolve_pc.variance_gamma    = params.temporal_gamma;
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, resolve_pc);
         resolve_->draw(cmd);
 
@@ -533,7 +540,6 @@ public:
         // next execute() reads it through the other descriptor-set instance. No copy runs.
         history_initialized_ = true;
         resolve_parity_ ^= 1u;
-        prev_camera_pos_ = params.camera_pos;
     }
 
     /// The final AO: full resolution either way (the upsample target under half_res).
@@ -693,10 +699,9 @@ private:
     VkFramebuffer blur_framebuffer_ = VK_NULL_HANDLE;
 
     bool history_initialized_ = false;
-    // The eye position the history target was resolved from, i.e. the origin its stored distance
-    // channel is measured against. Written at the end of execute(); read only on the next call,
-    // and only when history_valid says that history exists.
-    glm::vec3 prev_camera_pos_{0.0f};
+    // Whether update_descriptors() bound a velocity attachment at resolve binding 5 (drives
+    // ResolvePushConstants::use_velocity).
+    bool has_velocity_        = false;
 
     std::unique_ptr<coopa::gfx::memory::Image> neutral_image_;
 
