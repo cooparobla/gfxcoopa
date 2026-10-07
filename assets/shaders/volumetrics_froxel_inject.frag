@@ -25,7 +25,10 @@ layout(set = 0, binding = 0) uniform sampler2D history_grid;
 
 // Set 2: shadow maps for the in-scatter terms (compare samplers, as the march).
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
-layout(set = 2, binding = 1) uniform sampler2DShadow spot_shadow_map;
+// The local-light (point/spot) shadow atlas -- see gfx/local_shadow.glsl.
+layout(set = 2, binding = 1) uniform sampler2DShadow local_shadow_atlas;
+#define GFX_LOCAL_SHADOWS u_vol.local_shadows
+#include <gfx/local_shadow.glsl>
 
 #include <gfx/volumetrics.glsl>
 #include <gfx/fog.glsl>        // gfx_fog_hg + the box/sphere containment weights
@@ -110,10 +113,9 @@ vec4 vol_froxel_evaluate(vec3 p, vec3 view_dir, float dt) {
 
         float light_strength = u_vol.counts.z;
         int   light_count    = (light_strength > 0.0) ? min(int(u_vol.counts.y), VOL_MAX_LIGHTS) : 0;
-        vec4  spot_clip      = u_vol.spot_light_space_matrix * vec4(p, 1.0);
         for (int li = 0; li < VOL_MAX_LIGHTS; ++li) {
             if (li >= light_count) break;
-            in_scatter += vol_scatter_light(li, p, view_dir, spot_clip, light_strength);
+            in_scatter += vol_scatter_light(li, p, view_dir, light_strength);
         }
         emit += light_w * in_scatter;
     }

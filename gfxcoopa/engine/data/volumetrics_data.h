@@ -55,8 +55,8 @@ struct alignas(16) ScatterLightGPU {
                                                    Ignored for point lights (params.z = 0). */
     glm::vec4 params          = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f); /**< x = falloff sharpness (same curve as the
                                                    lighting pass's point loop), y = cos(inner half-angle),
-                                                   z = 1 spot / 0 point, w = 1 to shadow this light's
-                                                   samples with the spot shadow map. */
+                                                   z = 1 spot / 0 point, w = the light's shadow slot in
+                                                   local_shadows, 1-based (0 = unshadowed). */
 };
 
 /**
@@ -162,6 +162,9 @@ struct alignas(16) VolumetricsUBO {
     glm::vec4 froxel_params2 = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f); /**< x = samples per froxel where
                                                  there is no history, y = composite lookup jitter in
                                                  froxels / slices (0 = off; only useful under TAA). */
+    /** Point/spot shadows -- LightUBO::local_shadows' copy, so a scatter light whose slot is set
+     *  is shadowed from the same local-light atlas the lighting pass samples. */
+    LocalShadowBlock local_shadows;
 };
 
 /**

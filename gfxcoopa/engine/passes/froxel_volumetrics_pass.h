@@ -135,7 +135,8 @@ public:
         apply_->set(0).bind_image(2, g_position, nearest_sampler_);
     }
 
-    /// Directional + spot shadow maps (compare sampler), for both parities' inject sets.
+    /// Directional map + local-light (point/spot) shadow atlas (compare sampler), for both
+    /// parities' inject sets.
     /// Call ONCE, at construction time.
     void set_shadow_images(TextureView dir_shadow, TextureView spot_shadow, const util::Sampler& shadow_sampler) {
         for (uint32_t p = 0; p < 2; ++p) {

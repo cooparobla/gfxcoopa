@@ -35,7 +35,10 @@ layout(set = 0, binding = 1) uniform sampler2D g_position_roughness;
 // hardware-filtered depth compare returning 1 = in shadow -- the same convention
 // gfx/shadow_sampling.glsl's *Shadow family documents.
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
-layout(set = 2, binding = 1) uniform sampler2DShadow spot_shadow_map;
+// The local-light (point/spot) shadow atlas -- see gfx/local_shadow.glsl.
+layout(set = 2, binding = 1) uniform sampler2DShadow local_shadow_atlas;
+#define GFX_LOCAL_SHADOWS u_vol.local_shadows
+#include <gfx/local_shadow.glsl>
 
 #include <gfx/volumetrics.glsl>
 #include <gfx/fog.glsl>        // gfx_fog_hg + the box/sphere containment weights
@@ -153,9 +156,6 @@ void main() {
         vec3  q   = A + view_dir * tc - c;
         light_live[li] = dot(q, q) < r * r;
     }
-    // The spot shadow map's clip-space ray, for the one shadow-casting spot light.
-    vec4 spo = u_vol.spot_light_space_matrix * vec4(A, 1.0);
-    vec4 spd = u_vol.spot_light_space_matrix * vec4(view_dir, 0.0);
 
     float T        = 1.0;
     vec3  scatter  = vec3(0.0);
@@ -220,7 +220,7 @@ void main() {
             for (int li = 0; li < VOL_MAX_LIGHTS; ++li) {
                 if (li >= light_count) break;
                 if (!light_live[li]) continue;
-                in_scatter += vol_scatter_light(li, p, view_dir, spo + spd * t, light_strength);
+                in_scatter += vol_scatter_light(li, p, view_dir, light_strength);
             }
 
             emit += light_w * in_scatter;

@@ -123,7 +123,8 @@ public:
      *        set_source_images above).
      *
      * @param dir_shadow    The directional shadow depth map.
-     * @param spot_shadow   The spot shadow depth map.
+     * @param spot_shadow   The local-light (point/spot) shadow atlas -- sampled by
+     *                      gfx/local_shadow.glsl through VolumetricsUBO::local_shadows.
      * @param shadow_sampler A compare-enabled sampler (util::Sampler::shadow()) --
      *                      volumetrics_march.frag declares both bindings as
      *                      sampler2DShadow, so each march tap is one hardware
@@ -164,7 +165,7 @@ public:
 
 private:
     /// @brief Set 0: G-buffer normal/position. Set 1: the volumetrics UBO.
-    ///        Set 2: directional + spot shadow maps (see set_shadow_images).
+    ///        Set 2: directional map + local-light shadow atlas (see set_shadow_images).
     static FullscreenStageDesc describe_march(const std::string& vert_spv, const std::string& frag_spv) {
         using coopa::gfx::DescriptorType;
         using coopa::gfx::ShaderStage;

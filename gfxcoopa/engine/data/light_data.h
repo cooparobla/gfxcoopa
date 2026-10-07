@@ -29,6 +29,52 @@ static constexpr uint32_t MAX_SPOT_LIGHTS  = 8;
  *  the limit is the grid, not the UBO -- see LightUBO::dir_cascade_matrix. */
 static constexpr uint32_t MAX_DIR_CASCADES = 4;
 
+/** Point and spot lights that can hold a shadow at once, in the shared local-light shadow
+ *  atlas (see LocalShadowBlock). A point light takes 6 views, a spot 1. */
+static constexpr uint32_t MAX_LOCAL_SHADOWS      = 12;
+/** Views (atlas tiles) across all local shadows: enough for 6 shadowed points plus 12 spots. */
+static constexpr uint32_t MAX_LOCAL_SHADOW_VIEWS = 48;
+
+/**
+ * @struct LocalShadowGPU
+ * @brief One point or spot light's shadow in the local-light shadow atlas.
+ *
+ * A spot owns one square tile; a point light owns a 3x2 block of six tiles, one per cube face
+ * (+X,-X,+Y,-Y,+Z,-Z, face f at column f%3, row f/3), each rendered with a field of view a
+ * little wider than 90 degrees so the outer `pcf.z` texels of every face form a guard band
+ * a PCF kernel can read without crossing into the next face. Depth is ordinary hardware
+ * perspective depth (RH_ZO), so the casters keep early-Z.
+ */
+struct alignas(16) LocalShadowGPU {
+    glm::vec4 tile   = glm::vec4(0.0f); /**< xy = atlas uv of the light's first tile, z = one tile's
+                                             edge in atlas uv, w = kind: 0 none, 1 spot, 2 point. */
+    glm::vec4 light  = glm::vec4(0.0f); /**< xyz = light world position, w = far plane (its range). */
+    glm::vec4 proj   = glm::vec4(0.0f); /**< x = near plane, y = tan(half fov) of every view of this
+                                             light, z = tile edge in texels, w = index of its first
+                                             view in LocalShadowBlock::view_proj. */
+    glm::vec4 pcf    = glm::vec4(0.0f); /**< x = spot penumbra width in WORLD units (0 = hard),
+                                             y = point penumbra radius in texels (0 = hard),
+                                             z = largest PCF radius in texels (the guard band),
+                                             w = shadow darkness 0..1. */
+};
+
+/**
+ * @struct LocalShadowBlock
+ * @brief Every point/spot shadow of the frame: the per-light records and their view matrices.
+ *        Appended to both LightUBO and VolumetricsUBO, and read in GLSL through
+ *        gfx/local_shadow.glsl. A light points at its record with a 1-based slot number
+ *        (PointLightGPU::attenuation.w / SpotLightGPU::params.z; 0 = unshadowed).
+ */
+struct alignas(16) LocalShadowBlock {
+    glm::vec4 info = glm::vec4(0.0f);   /**< x = record count, y = atlas edge in texels,
+                                             z = normal-offset bias in texels, w = reserved. */
+    glm::vec4 bias = glm::vec4(1.0f, 1.0f, 5.0f, 0.0f); /**< x = constant depth bias (texels),
+                                             y = slope depth bias (texels per tan), z = largest
+                                             tan honoured, w = reserved. */
+    LocalShadowGPU shadows[MAX_LOCAL_SHADOWS];
+    glm::mat4      view_proj[MAX_LOCAL_SHADOW_VIEWS] = {}; /**< World -> each view's clip. */
+};
+
 /**
  * @struct PointLightGPU
  * @brief std140-aligned Point Light data uploaded to GPU UBO.
@@ -36,7 +82,8 @@ static constexpr uint32_t MAX_DIR_CASCADES = 4;
 struct alignas(16) PointLightGPU {
     glm::vec4 position_range  = glm::vec4(0.0f);            /**< xyz = position, w = range */
     glm::vec4 color_intensity = glm::vec4(0.0f);            /**< xyz = RGB color, w = intensity */
-    glm::vec4 attenuation     = glm::vec4(1.0f, 0.09f, 0.032f, 0.0f); /**< x=const, y=linear, z=quad, w=cast_shadows (1 or 0) */
+    glm::vec4 attenuation     = glm::vec4(1.0f, 0.09f, 0.032f, 0.0f); /**< x=const, y=linear, z=quad, w=shadow slot in
+                                                                          LocalShadowBlock, 1-based (0 = unshadowed) */
 };
 
 /**
@@ -47,7 +94,8 @@ struct alignas(16) SpotLightGPU {
     glm::vec4 position_range  = glm::vec4(0.0f); /**< xyz = world position, w = range */
     glm::vec4 direction_cone  = glm::vec4(0.0f, 0.0f, -1.0f, 0.7071f); /**< xyz = normalized aim (direction rays travel), w = cos(outer half-angle) */
     glm::vec4 color_intensity = glm::vec4(0.0f); /**< xyz = RGB color, w = intensity */
-    glm::vec4 params          = glm::vec4(1.0f, 0.9f, 0.0f, 0.0f); /**< x=falloff sharpness, y=cos(inner half-angle), z=cast_shadows (1 or 0), w=reserved */
+    glm::vec4 params          = glm::vec4(1.0f, 0.9f, 0.0f, 0.0f); /**< x=falloff sharpness, y=cos(inner half-angle), z=shadow slot in
+                                                                       LocalShadowBlock, 1-based (0 = unshadowed), w=reserved */
 };
 
 /**
@@ -116,7 +164,8 @@ struct alignas(16) LightUBO {
     glm::vec4     contact_soft_params = glm::vec4(0.0f); /**< Soft contact-shadow penumbra
                                         (pixel_lighting.frag): x=cone half-angle tangent (the sun's angular
                                         size, shadow_pcss_light_size, when soft_shadows is on; 0 selects the
-                                        hard single-ray march). y/z/w reserved. */
+                                        hard single-ray march). y = per-frame step-phase rotation (frame
+                                        index while the contact resolve accumulates, else 0). z/w reserved. */
 
     // --- Directional shadow cascades ---
     //
@@ -154,6 +203,29 @@ struct alignas(16) LightUBO {
                                         normal offset no longer has to clear the PCF disk), y =
                                         steepest receiver slope honoured, as tan(angle to the
                                         light's perpendicular plane). z/w reserved. */
+
+    // --- Directional shadow bias and fade (appended per the append-only rule) ---
+    glm::vec4 dir_cascade_depth_bias = glm::vec4(0.0f); /**< Per-cascade size of ONE shadow texel in
+                                        that cascade's [0,1] light-space depth (texel world size /
+                                        depth range). The shader's depth bias is a texel count times
+                                        this, so it scales with each cascade's resolution instead of
+                                        being one normalised constant that means centimetres in one
+                                        cascade and decimetres in the next. */
+    glm::vec4 dir_shadow_bias_texels = glm::vec4(1.0f, 2.0f, 5.0f, 0.0f); /**< x = constant depth
+                                        bias in texels, y = slope depth bias in texels per unit
+                                        tan(angle between N and L), z = largest tan honoured, w
+                                        reserved. Shared by the directional and local-light maps. */
+    glm::vec4 dir_shadow_fade = glm::vec4(0.0f); /**< xyz = camera world position, w = distance at
+                                        which directional shadows have fully faded (0 = no distance
+                                        fade). */
+    glm::vec4 dir_shadow_fade_params = glm::vec4(0.0f, 0.1f, 0.0f, 0.0f); /**< x = distance where
+                                        the fade starts, y = width of the outer band of the LAST
+                                        cascade's tile (tile uv) over which shadows fade out, z = 1
+                                        to blend two cascades across the transition band, 0 to
+                                        dither between them for TAA to resolve, w reserved. */
+
+    // --- Point/spot shadows: the local-light shadow atlas (appended last) ---
+    LocalShadowBlock local_shadows;
 };
 
 // Pins the offset of sky_zenith -- the field every pre-spot-light shader's LightUBO

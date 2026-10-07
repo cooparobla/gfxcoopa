@@ -6,8 +6,9 @@
 // (volumetrics_froxel_inject.frag). One body, so both modes light a volume identically.
 //
 // Requires, declared before inclusion: u_vol (gfx/volumetrics_ubo.glsl), the set-2 shadow
-// samplers dir_shadow_map / spot_shadow_map (sampler2DShadow), gfx_spot_cone
-// (gfx/spot_light.glsl) and gfx_fog_hg (gfx/fog.glsl).
+// sampler dir_shadow_map (sampler2DShadow), gfx/local_shadow.glsl (with GFX_LOCAL_SHADOWS set to
+// u_vol.local_shadows and local_shadow_atlas bound), gfx_spot_cone (gfx/spot_light.glsl) and
+// gfx_fog_hg (gfx/fog.glsl).
 //
 // Every shadow lookup takes the point's LIGHT-SPACE CLIP position from the caller rather than
 // the world point: the march carries those along its ray as origin + t * direction (linear in
@@ -42,9 +43,9 @@ bool vol_sun_cascade_vis(int c, vec4 lsp, out float vis) {
     return true;
 }
 
-// In-scatter from scatter light `li` at point p, seen along view_dir. `spot_clip` is p in
-// the spot shadow map's clip space (only read when this light casts the spot shadow).
-vec3 vol_scatter_light(int li, vec3 p, vec3 view_dir, vec4 spot_clip, float light_strength) {
+// In-scatter from scatter light `li` at point p, seen along view_dir. A light with a shadow slot
+// (params.w, 1-based) is shadowed with one tap of the local-light atlas -- point lights included.
+vec3 vol_scatter_light(int li, vec3 p, vec3 view_dir, float light_strength) {
     vec3  to_light = u_vol.scatter_lights[li].position_range.xyz - p;
     float dist     = length(to_light);
     float range    = u_vol.scatter_lights[li].position_range.w;
@@ -71,10 +72,9 @@ vec3 vol_scatter_light(int li, vec3 p, vec3 view_dir, vec4 spot_clip, float ligh
                   * attenuation * cone;
 
     float vis = 1.0;
-    vec3  spc;
-    if (u_vol.scatter_lights[li].params.w > 0.5 && vol_shadow_proj(spot_clip, 0.0, spc)) {
-        vis = 1.0 - texture(spot_shadow_map, vec3(spc.xy, spc.z - u_vol.shadow_params.w))
-                  * u_vol.shadow_params.y;
+    int slot = int(u_vol.scatter_lights[li].params.w + 0.5) - 1;
+    if (slot >= 0) {
+        vis = 1.0 - gfx_local_shadow_tap(slot, p) * u_vol.shadow_params.y;
     }
 
     // Same HG phase as the sun term: the anisotropy is a property of the medium's phase

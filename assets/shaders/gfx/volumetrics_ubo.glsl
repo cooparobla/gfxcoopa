@@ -5,6 +5,8 @@
 // volumetrics_march.frag and volumetrics_composite.frag. Must match VolumetricsUBO in
 // engine/data/volumetrics_data.h field for field.
 
+#include <gfx/local_shadow_types.glsl>
+
 struct Volume {
     mat4 inv_world;
     vec4 extent_shape;     // xyz = half-extent (sphere uses .x), w = 0 Box / 1 Sphere
@@ -23,7 +25,7 @@ struct ScatterLight {
     vec4 color_intensity;  // rgb = colour, w = intensity
     vec4 direction_cone;   // xyz = spot direction, w = cos(outer); ignored for points
     vec4 params;           // x = falloff sharpness, y = cos(inner), z = 1 spot / 0 point,
-                           // w = 1 -> shadow with the spot map
+                           // w = shadow slot in local_shadows, 1-based (0 = unshadowed)
 };
 
 layout(set = 1, binding = 0) uniform VolumetricsUBO {
@@ -56,6 +58,8 @@ layout(set = 1, binding = 0) uniform VolumetricsUBO {
     vec4 prev_camera_pos;  // xyz = last frame's camera position
     vec4 froxel_params2;   // x = samples per froxel on a history miss,
                            // y = composite lookup jitter (froxels / slices; 0 = off)
+    // Point/spot shadows -- LightUBO::local_shadows' copy (gfx/local_shadow.glsl).
+    GfxLocalShadowBlock local_shadows;
 } u_vol;
 
 #endif // GFX_VOLUMETRICS_UBO_GLSL
