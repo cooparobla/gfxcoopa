@@ -42,8 +42,7 @@ public:
     // pushed once per instanced draw batch, not per object.
     //
     // 80 bytes total. The first 32 bytes (through alpha_cutoff) are byte-identical to
-    // TransparentPass::PushConstants / TransparentCapturePass::PushConstants /
-    // ProbeCapturePass::PushConstants, which stay at 32 bytes -- emissive is deferred
+    // TransparentPass::PushConstants / ProbeCapturePass::PushConstants, which stay at 32 bytes -- emissive is deferred
     // (opaque G-buffer) only, so those forward-path structs deliberately don't grow.
     //
     // gfx_time/gfx_params are the standard trailing "surface" block every surface-shader

@@ -64,16 +64,18 @@ public:
         float jitter_strength = 0.0f; // 0 = old deterministic mirror-ray trace (ssr_jitter)
         int   frame_index     = 0;    // decorrelates the jitter's noise frame to frame
 
-        // Secondary source (see set_secondary_source()): != 0 -> ssr.frag also traces
-        // gfx_ssr_trace_secondary() and keeps whichever hit is nearer. max_hiz_mip_b/
-        // max_color_mip_b are the secondary pyramid's OWN mip counts -- an independent
-        // HiZPass/SceneColorMipPass instance over a differently-sized image chain, so these
-        // can legitimately differ from max_hiz_mip/max_color_mip above even though every
-        // other tuning knob (distance/bias/thickness/roughness_cutoff/iterations/start_mip/
-        // min_mip0_steps) is shared between the two traces.
-        float has_secondary   = 0.0f;
-        int   max_hiz_mip_b   = 0;
-        int   max_color_mip_b = 0;
+        static constexpr int kFlagPrevFrameColor = 1;
+        static constexpr int kFlagSkipBehind     = 2;
+        // kFlag* bits: kFlagPrevFrameColor (u_scene_color holds the PREVIOUS frame's final
+        // HDR, so hit colour is fetched where the hit surface was last frame, via G4) and
+        // kFlagSkipBehind (see Params::skip_behind).
+        int   flags           = 0;
+        // Rays per pixel (GGX VNDF samples averaged); 1 = one stochastic ray (ssr_rays_per_pixel).
+        int   rays_per_pixel  = 1;
+        // Scales the GGX-lobe cone in the hit-colour mip selection (ssr_cone_prefilter):
+        // 1 = prefilter the whole lobe from the colour chain, 0 = only the ray's own pixel
+        // footprint, the lobe then integrated by the sampled rays alone.
+        float cone_prefilter  = 1.0f;
 
         // > 0: ssr.frag skips the trace for a pixel whose best-case reflection weight (split-sum
         // specular scale x the pre-trace fades) is below this -- see Params::skip_threshold.
@@ -90,6 +92,7 @@ public:
     static_assert(sizeof(BlurPushConstants) == 8, "ssr_blur.frag's BlurPushConstants block must match this layout byte-for-byte");
     static constexpr int32_t kBlurLight    = 1;   ///< 3x3 footprint instead of 5x5.
     static constexpr int32_t kBlurZeroSkip = 2;   ///< Write 0 where every tap is 0 (exact; SSR only).
+    static constexpr int32_t kBlurRoughnessAware = 4; ///< Blend by roughness, keep mirrors sharp (SSR only).
 
     struct ResolvePushConstants {
         // Current clip space -> previous frame's clip space. mat4 must be 16-byte aligned, so it
@@ -107,8 +110,12 @@ public:
         float     gamma = 1.0f;     // offset 84 -- variance-clipping width, in std deviations
                                      // (ssr_temporal_gamma); see ssr_resolve.frag's own doc
         int       frozen = 0;       // offset 88 -- hold accepted history verbatim (still camera)
-    };                              // 92 bytes
-    static_assert(sizeof(ResolvePushConstants) == 92, "ssr_resolve.frag's PushConstants block must match this layout byte-for-byte");
+        int       use_velocity = 0; // offset 92 -- reproject the surface by the G-buffer velocity
+        // offset 96 -- 0..1 share of the reflection-parallax ("virtual point") reprojection for
+        // mirror-like surfaces; fades out with roughness in the shader. 0 for the SSGI chain.
+        float     virtual_blend = 0.0f;
+    };                              // 100 bytes
+    static_assert(sizeof(ResolvePushConstants) == 100, "ssr_resolve.frag's PushConstants block must match this layout byte-for-byte");
 
     /// Union layout shared with the composite's GLSL push-constant block, so
     /// every consumer's ssr_composite.frag -- whatever else it does -- reads
@@ -229,16 +236,32 @@ public:
         glm::vec3 sky_zenith   = glm::vec3(0.05f, 0.18f, 0.55f);
         glm::vec3 sky_horizon  = glm::vec3(0.25f, 0.35f, 0.45f);
         glm::vec3 sky_ground   = glm::vec3(0.05f, 0.045f, 0.04f);
-        // Secondary source -- see SsrPushConstants' own doc. max_hiz_mip_b/max_color_mip_b are
-        // meaningless when has_secondary is false and left at their defaults in that case.
-        bool  has_secondary    = false;
         /// Skip the SSR trace where the reflection's best-case weight -- the composite's
         /// split-sum specular scale (Fresnel, roughness) times the direction/roughness/grazing
         /// fades, all known before marching -- is below this. 0 traces every pixel the
         /// roughness cutoff admits. Never applied to the SSGI trace.
         float skip_threshold   = 0.0f;
-        int   max_hiz_mip_b    = 0;
-        int   max_color_mip_b  = 0;
+        /// The scene-colour chain the trace samples holds the PREVIOUS frame's final HDR
+        /// (Unreal's PrevSceneColor) rather than this frame's lit opaques: hit colour is then
+        /// fetched where the hit surface was last frame (G4 motion), and reflections include
+        /// transparents, fog and earlier reflections. False on frames with no history yet.
+        bool  prev_frame_color = false;
+        /// Rays per pixel, GGX VNDF-sampled (see SsrPushConstants::rays_per_pixel).
+        int   rays_per_pixel   = 1;
+        /// See SsrPushConstants::cone_prefilter.
+        float cone_prefilter   = 1.0f;
+        /// At mip 0, a candidate the ray has passed BEHIND by more than the thickness steps to
+        /// the cell exit and climbs a mip instead of crawling one texel per iteration.
+        bool  skip_behind      = false;
+        // Temporal resolve: reproject through the G-buffer velocity (moving objects keep their
+        // history) and, for mirror-like surfaces, through the reflected image's virtual point
+        // (reflections stay attached to what they reflect while the camera moves). Both need
+        // the velocity image passed to update_descriptors().
+        bool  resolve_use_velocity = true;
+        // Spatial denoise of the specular chain scales with surface roughness (mirrors stay
+        // sharp) instead of blurring every reflection alike.
+        bool  ssr_blur_roughness_aware = true;
+        float virtual_blend        = 1.0f;
         // World-space blur radius for the spatial SSR denoise (see the ctor's blur_frag_spv
         // doc) -- meaningless when the blur stage wasn't built (blur_frag_spv empty at
         // construction). Same role as SsaoPass::Params::radius plays for ssao_blur.frag.
@@ -288,7 +311,8 @@ public:
             // normal-offset mip tap. Empty (the default) omits the stage entirely; the
             // composite's u_ssgi_map binding then points at the permanent 1x1 zero
             // fallback and pc.ssgi_traced stays 0.
-            const std::string& ssgi_frag_spv = "")
+            const std::string& ssgi_frag_spv = "",
+            uint32_t ssgi_res_divisor = 1)
         : device_(device), allocator_(allocator), width_(width), height_(height), half_res_(half_res),
           blur_enabled_(!blur_vert_spv.empty() && !blur_frag_spv.empty()),
           ssgi_enabled_(!ssgi_frag_spv.empty()),
@@ -302,6 +326,9 @@ public:
         // at even screen dimensions.
         trace_width_  = half_res_ ? std::max(1u, width_  / 2) : width_;
         trace_height_ = half_res_ ? std::max(1u, height_ / 2) : height_;
+        ssgi_res_divisor_ = std::max(1u, ssgi_res_divisor);
+        ssgi_width_   = std::max(1u, trace_width_  / ssgi_res_divisor_);
+        ssgi_height_  = std::max(1u, trace_height_ / ssgi_res_divisor_);
         // 0. Nearest-filtered sampler for the in-march G-buffer point-lookups in ssr.frag
         // (self-hit rejection, backface test). Those sample at an arbitrary marched UV, not
         // a texel center, so a LINEAR sampler bilinearly blends world positions/normals across
@@ -315,6 +342,14 @@ public:
         target_ = std::make_unique<targets::OffscreenTarget>(
             device, allocator, trace_width_, trace_height_, coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly
         );
+        // The trace's second output: world-space distance to the hit (0 = miss), read by the
+        // resolve's virtual-point reprojection and the roughness-aware blur. Only its image is
+        // used; the trace renders into it and target_ together through trace_render_pass_.
+        hit_target_ = std::make_unique<targets::OffscreenTarget>(
+            device, allocator, trace_width_, trace_height_, coopa::gfx::Format::R16_Sfloat, targets::kColorOnly
+        );
+        create_trace_render_pass_();
+        create_trace_framebuffer_();
         composite_target_ = std::make_unique<targets::OffscreenTarget>(
             device, allocator, width, height, coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly
         );
@@ -339,11 +374,11 @@ public:
         // resolved targets at the same trace resolution.
         if (ssgi_enabled_) {
             ssgi_target_ = std::make_unique<targets::OffscreenTarget>(
-                device, allocator, trace_width_, trace_height_, coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly
+                device, allocator, ssgi_width_, ssgi_height_, coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly
             );
             for (uint32_t i = 0; i < 2; ++i) {
                 ssgi_resolved_targets_[i] = std::make_unique<targets::OffscreenTarget>(
-                    device, allocator, trace_width_, trace_height_, coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly
+                    device, allocator, ssgi_width_, ssgi_height_, coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly
                 );
             }
             // Spatial denoise for the bounce, when the blur stage exists. Not optional
@@ -354,7 +389,7 @@ public:
             // definition, so the bilateral blur costs it no real detail.
             if (blur_enabled_) {
                 ssgi_blurred_target_ = std::make_unique<targets::OffscreenTarget>(
-                    device, allocator, trace_width_, trace_height_, coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly
+                    device, allocator, ssgi_width_, ssgi_height_, coopa::gfx::Format::RGBA16_Sfloat, targets::kColorOnly
                 );
             }
         }
@@ -379,11 +414,16 @@ public:
         // 3. Descriptor Set Layouts
         // G-Buffer layout (3 images: G0, G1, G2) for the SSR raymarch set. G_depth is not
         // bound here -- the Hi-Z pyramid supplies depth for the march.
+        // G0/G1/G2 plus binding 3, the G-buffer's velocity attachment (G4): the trace fetches a
+        // hit's colour where that surface was LAST frame when the colour chain holds the
+        // previous frame (Params::prev_frame_color). Shared by the forward passes that trace
+        // through gfx/ssr_trace_body.glsl (trace_gbuffer_layout()), so they get it too.
         gbuf3_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
                 .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(3, coopa::gfx::ShaderStage::Fragment)
                 .build(device));
 
         // Composite G-buffer layout: same G0-G2 plus an SSAO sampler (binding 3), so the
@@ -405,20 +445,6 @@ public:
         raw_ssr_layout_     = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder().combined_sampler(0, coopa::gfx::ShaderStage::Fragment).build(device));
 
-        // Secondary trace source (see set_secondary_source()) -- normal+position (2 bindings,
-        // no albedo/AO: matches SsrPass::trace_gbuffer_layout()'s own trace-only subset, not
-        // the full 3-binding G-buffer layout used elsewhere in this pass), plus its own Hi-Z
-        // and scene-colour-mip single-image layouts (same shape as hiz_layout_ above, separate
-        // instances since they're bound to a DIFFERENT image at runtime).
-        secondary_gbuf2_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
-                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-        hiz_b_layout_           = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder().combined_sampler(0, coopa::gfx::ShaderStage::Fragment).build(device));
-        scene_color_b_layout_   = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder().combined_sampler(0, coopa::gfx::ShaderStage::Fragment).build(device));
 
         // Blur pass layout: matches ssr_blur.frag's set 0 exactly -- 0 = the buffer being
         // blurred (the resolved target), 1/2 = G-buffer normal/position for the edge-aware weights.
@@ -454,12 +480,19 @@ public:
         // Depth, NOT the G-buffer world position this binding used to hold: G2 is RGBA16F, and at
         // world coordinates of a few hundred units its quantization alone is multiple pixels of
         // reprojection error. See ssr_resolve.frag's file doc.
+        // 4 = the trace's per-pixel hit distance (hit_target_; the zero image for SSGI), 5 = the
+        // G-buffer velocity, 6/7 = G-buffer normal / position-roughness -- the virtual-point
+        // reprojection's inputs (see ssr_resolve.frag).
         resolve_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
                 .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(3, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(4, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(5, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(6, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(7, coopa::gfx::ShaderStage::Fragment)
                 .build(device));
 
         // 4. Descriptor Pool -- sizes derived from the layouts above rather than hand-computed
@@ -469,8 +502,7 @@ public:
         coopa::gfx::pipeline::DescriptorPoolBuilder pool_builder;
         pool_builder.add_sets(*gbuf3_layout_, 1).add_sets(*hiz_layout_, 1).add_sets(*scene_color_layout_, 1)
             .add_sets(*resolve_layout_, 4).add_sets(*comp_gbuf_layout_, 1).add_sets(*raw_ssr_layout_, 2)
-            .add_sets(*comp_scene_color_layout_, 2).add_sets(*secondary_gbuf2_layout_, 1)
-            .add_sets(*hiz_b_layout_, 1).add_sets(*scene_color_b_layout_, 1);
+            .add_sets(*comp_scene_color_layout_, 2);
         if (blur_enabled_) {
             pool_builder.add_sets(*blur_layout_, 2);
         }
@@ -499,9 +531,6 @@ public:
             comp_scene_color_sets_[o] = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *comp_scene_color_layout_);
         }
 
-        secondary_gbuf2_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *secondary_gbuf2_layout_);
-        hiz_b_set_           = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *hiz_b_layout_);
-        scene_color_b_set_   = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *desc_pool_, *scene_color_b_layout_);
 
         for (uint32_t o = 0; o < 2; ++o) {
             if (blur_enabled_) {
@@ -517,37 +546,16 @@ public:
             }
         }
 
-        // Permanent 1x1 neutral fallback for the secondary source, bound by default below and
-        // rebound to a real transparent-capture target only if/when set_secondary_source() is
-        // called -- so the pipeline layout is ALWAYS valid regardless of the runtime
-        // has_secondary push-constant toggle (a shader statically referencing a descriptor
-        // whose backing image was never transitioned out of UNDEFINED is a hard Vulkan
-        // validation error even when a dynamic branch never reaches the sample instruction).
-        // zero_rgba_ (all-zero) backs the normal/position/scene-colour fallbacks -- zero
-        // normal is this codebase's existing "no surface here" sentinel (same one ssr.frag's
-        // own dot(N,N) < 0.001 background check and skybox.frag's discard already rely on),
-        // reused here so gfx_ssr_trace_secondary()'s hit test naturally treats "secondary
-        // disabled" as a clean, immediate miss. one_r32_ (value 1.0 = far/background depth)
-        // backs the Hi-Z fallback for the same reason: a uniformly-far Hi-Z means the ray
-        // never finds a cell to penetrate, so hit_found never becomes true and the neutral
-        // normal/scene-colour images are never even sampled -- the all-zero fallbacks above
-        // are defense in depth, not the primary guarantee.
+        // Permanent 1x1 all-zero image: the "no count buffer" sentinel for the resolves below
+        // (and zero_view_typed() for consumers that bind a never-written SSR output).
         {
             coopa::gfx::command::CommandPool one_shot_pool(device, device.queue_family_indices().graphics.value(), true);
 
             uint16_t zero_half4[4] = {0, 0, 0, 0}; // IEEE-754 half-float zero bit pattern is all-zero bytes
             zero_rgba_ = coopa::gfx::memory::upload_image_2d(
                 device, allocator, one_shot_pool, zero_half4, 1, 1, coopa::gfx::Format::RGBA16_Sfloat, 8);
-
-            float far_depth = 1.0f;
-            one_r32_ = coopa::gfx::memory::upload_image_2d(
-                device, allocator, one_shot_pool, &far_depth, 1, 1, coopa::gfx::Format::R32_Sfloat, 4);
         }
         neutral_sampler_ = std::make_unique<util::Sampler>(device, nearest_clamp_desc());
-        secondary_gbuf2_set_->bind_image(0, zero_rgba_->view_typed(), *neutral_sampler_);
-        secondary_gbuf2_set_->bind_image(1, zero_rgba_->view_typed(), *neutral_sampler_);
-        hiz_b_set_->bind_image(0, one_r32_->view_typed(), *neutral_sampler_);
-        scene_color_b_set_->bind_image(0, zero_rgba_->view_typed(), *neutral_sampler_);
         // Resolve binding 3 (the shared accumulation count) starts on the same all-zero fallback:
         // a zero count is ssr_resolve.frag's "no count buffer" sentinel, which selects the
         // fixed-rate blend_factor path. A consumer that wants the converging average calls
@@ -572,17 +580,14 @@ public:
             &camera_layout,
             gbuf3_layout_.get(),
             hiz_layout_.get(),
-            scene_color_layout_.get(),
-            // Sets 4-6: secondary trace source -- matches ssr.frag's own set declarations.
-            secondary_gbuf2_layout_.get(),
-            hiz_b_layout_.get(),
-            scene_color_b_layout_.get()
+            scene_color_layout_.get()
         };
         ssr_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(SsrPushConstants)}};
-        ssr_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(device, target_->render_pass_object(), ssr_desc);
+        ssr_desc.blend.color_attachment_count = 2;   // colour+confidence, hit distance
+        ssr_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
+            device, coopa::gfx::detail::RawRenderPass{trace_render_pass_}, ssr_desc);
 
-        // 5b. Traced-SSGI pipeline: ssr.frag's own sets 0-3 (ssgi.frag declares no
-        // secondary source) and the same push-constant block, so execute() reuses the
+        // 5b. Traced-SSGI pipeline: ssr.frag's own sets 0-3 and the same push-constant block, so execute() reuses the
         // SsrPushConstants it already built with only the distance field swapped.
         if (ssgi_enabled_) {
             coopa::gfx::pipeline::PipelineDesc ssgi_desc = common_desc;
@@ -618,7 +623,7 @@ public:
         // 7. Temporal Resolve Pipeline Creation
         coopa::gfx::pipeline::PipelineDesc resolve_desc = common_desc;
         resolve_desc.shaders = {resolve_vert_.get(), resolve_frag_.get()};
-        resolve_desc.descriptor_layouts = {resolve_layout_.get()};
+        resolve_desc.descriptor_layouts = {resolve_layout_.get(), &camera_layout};
         resolve_desc.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(ResolvePushConstants)}};
         // Both parities' targets share the format and attachment shape, so one pipeline against
         // either render pass is compatible with both (Vulkan render-pass compatibility).
@@ -634,23 +639,34 @@ public:
         }
     }
 
+    ~SsrPass() {
+        if (trace_framebuffer_ != VK_NULL_HANDLE) vkDestroyFramebuffer(device_.handle(), trace_framebuffer_, nullptr);
+        if (trace_render_pass_ != VK_NULL_HANDLE) vkDestroyRenderPass(device_.handle(), trace_render_pass_, nullptr);
+    }
+    SsrPass(const SsrPass&) = delete;
+    SsrPass& operator=(const SsrPass&) = delete;
+
     void recreate(uint32_t width, uint32_t height) {
         width_ = width;
         height_ = height;
         trace_width_  = half_res_ ? std::max(1u, width_  / 2) : width_;
         trace_height_ = half_res_ ? std::max(1u, height_ / 2) : height_;
+        ssgi_width_   = std::max(1u, trace_width_  / ssgi_res_divisor_);
+        ssgi_height_  = std::max(1u, trace_height_ / ssgi_res_divisor_);
 
         target_->recreate(trace_width_, trace_height_);
+        hit_target_->recreate(trace_width_, trace_height_);
+        create_trace_framebuffer_();
         composite_target_->recreate(width, height);
         for (uint32_t i = 0; i < 2; ++i) resolved_targets_[i]->recreate(trace_width_, trace_height_);
         if (blur_enabled_) {
             blurred_target_->recreate(trace_width_, trace_height_);
         }
         if (ssgi_enabled_) {
-            ssgi_target_->recreate(trace_width_, trace_height_);
-            for (uint32_t i = 0; i < 2; ++i) ssgi_resolved_targets_[i]->recreate(trace_width_, trace_height_);
+            ssgi_target_->recreate(ssgi_width_, ssgi_height_);
+            for (uint32_t i = 0; i < 2; ++i) ssgi_resolved_targets_[i]->recreate(ssgi_width_, ssgi_height_);
             if (blur_enabled_) {
-                ssgi_blurred_target_->recreate(trace_width_, trace_height_);
+                ssgi_blurred_target_->recreate(ssgi_width_, ssgi_height_);
             }
         }
 
@@ -666,7 +682,8 @@ public:
                             coopa::gfx::TextureView scene_color_mip_view,
                             const util::Sampler& scene_color_mip_sampler,
                             coopa::gfx::TextureView scene_color_view,
-                            const util::Sampler& linear_sampler)
+                            const util::Sampler& linear_sampler,
+                            coopa::gfx::TextureView velocity_view = coopa::gfx::TextureView::null())
     {
         // SSR Raymarching descriptors. Nearest sampler: see constructor comment -- these are
         // read both at the texel-centered in_uv (where nearest == linear, no change) and at
@@ -674,6 +691,11 @@ public:
         ssr_gbuf_set_->bind_image(0, gbuffer.g0_view_typed(), *nearest_sampler_);
         ssr_gbuf_set_->bind_image(1, gbuffer.g1_view_typed(), *nearest_sampler_);
         ssr_gbuf_set_->bind_image(2, gbuffer.g2_view_typed(), *nearest_sampler_);
+        // Binding 3: the G-buffer's velocity attachment (G4). Without one the shaders never read
+        // it (Params::prev_frame_color stays false), but the binding still needs a valid image.
+        const coopa::gfx::TextureView velocity = velocity_view != coopa::gfx::TextureView::null()
+                                                     ? velocity_view : gbuffer.g4_view_typed();
+        ssr_gbuf_set_->bind_image(3, velocity, *nearest_sampler_);
 
         hiz_set_->bind_image(0, hiz_view, hiz_sampler);
         // The march samples the PREFILTERED chain (cone footprint -> textureLod), while the
@@ -699,6 +721,10 @@ public:
                 // support linear filtering, and a blended depth would reproject to a point on
                 // no real surface anyway.
                 set.bind_image(2, gbuffer.depth_view_typed(), *nearest_sampler_);
+                set.bind_image(4, hit_target_->color_view_typed(), *nearest_sampler_);
+                set.bind_image(5, velocity, *nearest_sampler_);
+                set.bind_image(6, gbuffer.g1_view_typed(), *nearest_sampler_);
+                set.bind_image(7, gbuffer.g2_view_typed(), *nearest_sampler_);
             }
         }
 
@@ -751,6 +777,11 @@ public:
                     set.bind_image(0, ssgi_target_->color_view_typed(), *nearest_sampler_);
                     set.bind_image(1, ssgi_resolved_targets_[1 - o]->color_view_typed(), linear_sampler);
                     set.bind_image(2, gbuffer.depth_view_typed(), *nearest_sampler_);
+                    // No hit distance for the diffuse bounce (virtual_blend is 0 there).
+                    set.bind_image(4, zero_rgba_->view_typed(), *neutral_sampler_);
+                    set.bind_image(5, velocity, *nearest_sampler_);
+                    set.bind_image(6, gbuffer.g1_view_typed(), *nearest_sampler_);
+                    set.bind_image(7, gbuffer.g2_view_typed(), *nearest_sampler_);
                 }
                 if (blur_enabled_) {
                     ssgi_blur_sets_[o]->bind_image(0, ssgi_resolved_targets_[o]->color_view_typed(), *nearest_sampler_);
@@ -774,7 +805,7 @@ public:
     /// exponential -- incapable of converging on a per-frame-rejittered trace -- into a running
     /// average over `Params::temporal_frames` draws.
     ///
-    /// Optional, like set_secondary_source(): the constructor leaves binding 3 on a permanent
+    /// Optional: the constructor leaves binding 3 on a permanent
     /// all-zero 1x1 texture, and a zero count is ssr_resolve.frag's sentinel for "no count buffer
     /// here", which selects the Params::temporal_blend path instead. A consumer with no
     /// TemporalHistoryPass never needs to call this. Bound once at setup, like
@@ -791,25 +822,6 @@ public:
                 ssgi_resolve_sets_[o][1]->bind_image(3, count_view1, count_sampler);
             }
         }
-    }
-
-    /// Points the raymarch's secondary source (sets 4-6, see gfx/ssr_trace_secondary_body.glsl)
-    /// at real views -- a second reflection source (e.g. a forward capture of transparent
-    /// geometry) beyond this pass's own primary G-buffer/Hi-Z/scene-colour-mip chain. Bound
-    /// once at setup, like update_descriptors(), not per frame: the source images' identity
-    /// doesn't change frame to frame, only their CONTENTS do (re-rendered each frame by
-    /// whatever pass produces them). Callers gate actual USE of this at runtime via
-    /// Params::has_secondary in execute() -- calling this at all is optional; the constructor
-    /// already leaves sets 4-6 bound to a permanent neutral fallback that produces a guaranteed
-    /// miss, so a consumer with no secondary source never needs to call this.
-    void set_secondary_source(coopa::gfx::TextureView normal_metallic_view, coopa::gfx::TextureView position_roughness_view,
-                              coopa::gfx::TextureView hiz_view, const util::Sampler& hiz_sampler,
-                              coopa::gfx::TextureView scene_color_view, const util::Sampler& scene_color_sampler)
-    {
-        secondary_gbuf2_set_->bind_image(0, normal_metallic_view, *nearest_sampler_);
-        secondary_gbuf2_set_->bind_image(1, position_roughness_view, *nearest_sampler_);
-        hiz_b_set_->bind_image(0, hiz_view, hiz_sampler);
-        scene_color_b_set_->bind_image(0, scene_color_view, scene_color_sampler);
     }
 
     /// @name Trace-input accessors
@@ -869,7 +881,18 @@ public:
         }
 
         // 1. Raymarching Pass -- runs at trace resolution (full res, or half under ssr_half_res).
-        target_->begin(cmd);
+        // Two attachments: target_ (colour, confidence) and hit_target_ (hit distance).
+        {
+            VkClearValue clears[2]{};
+            VkRenderPassBeginInfo rp_info{};
+            rp_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            rp_info.renderPass        = trace_render_pass_;
+            rp_info.framebuffer       = trace_framebuffer_;
+            rp_info.renderArea.extent = {trace_width_, trace_height_};
+            rp_info.clearValueCount   = 2;
+            rp_info.pClearValues      = clears;
+            vkCmdBeginRenderPass(cmd.handle(), &rp_info, VK_SUBPASS_CONTENTS_INLINE);
+        }
         cmd.bind_pipeline(*ssr_pipeline_);
         cmd.set_viewport(0.0f, 0.0f, static_cast<float>(trace_width_), static_cast<float>(trace_height_));
         cmd.set_scissor(0, 0, trace_width_, trace_height_);
@@ -895,10 +918,11 @@ public:
         // as passthroughs (an A/B capture) would see an image that never repeats. Same rule
         // SsaoPass applies to its own noise_rotation, for the same reason.
         pc.frame_index      = params.temporal_enabled ? params.frame_index : 0;
-        pc.has_secondary    = params.has_secondary ? 1.0f : 0.0f;
         pc.skip_threshold   = params.skip_threshold;
-        pc.max_hiz_mip_b    = params.max_hiz_mip_b;
-        pc.max_color_mip_b  = params.max_color_mip_b;
+        pc.flags            = (params.prev_frame_color ? SsrPushConstants::kFlagPrevFrameColor : 0) |
+                              (params.skip_behind      ? SsrPushConstants::kFlagSkipBehind     : 0);
+        pc.rays_per_pixel   = std::max(params.rays_per_pixel, 1);
+        pc.cone_prefilter   = params.cone_prefilter;
 
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
 
@@ -906,12 +930,9 @@ public:
         cmd.bind_descriptor_set(*ssr_gbuf_set_, 1);
         cmd.bind_descriptor_set(*hiz_set_, 2);
         cmd.bind_descriptor_set(*scene_color_set_, 3);
-        cmd.bind_descriptor_set(*secondary_gbuf2_set_, 4);
-        cmd.bind_descriptor_set(*hiz_b_set_, 5);
-        cmd.bind_descriptor_set(*scene_color_b_set_, 6);
 
         cmd.draw(3);
-        target_->end(cmd);
+        cmd.end_render_pass();
         if (stage_hook_) stage_hook_(cmd, Stage::Trace);
 
         // 2. Temporal Resolve Pass: blend target_ (this frame's raw trace) with last frame's
@@ -941,9 +962,12 @@ public:
         rpc.history_valid = (history_initialized_ && params.reproject_valid) ? 1 : 0;
         rpc.gamma         = params.temporal_gamma;
         rpc.frozen        = params.temporal_frozen ? 1 : 0;
+        rpc.use_velocity  = params.resolve_use_velocity ? 1 : 0;
+        rpc.virtual_blend = params.resolve_use_velocity ? params.virtual_blend : 0.0f;
 
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, rpc);
         cmd.bind_descriptor_set(*resolve_sets_[o][cp], 0);
+        cmd.bind_descriptor_set(camera_set, 1);
 
         cmd.draw(3);
         resolved_targets_[o]->end(cmd);
@@ -962,7 +986,8 @@ public:
 
             BlurPushConstants bpc{};
             bpc.radius = params.ssr_blur_radius;
-            bpc.flags  = (params.ssr_blur_light ? kBlurLight : 0) | (params.ssr_blur_zero_skip ? kBlurZeroSkip : 0);
+            bpc.flags  = (params.ssr_blur_light ? kBlurLight : 0) | (params.ssr_blur_zero_skip ? kBlurZeroSkip : 0) |
+                         (params.ssr_blur_roughness_aware ? kBlurRoughnessAware : 0);
             cmd.push_constants(coopa::gfx::ShaderStage::Fragment, bpc);
             cmd.bind_descriptor_set(*blur_sets_[o], 0);
 
@@ -980,15 +1005,18 @@ public:
         if (ssgi_enabled_) {
             ssgi_target_->begin(cmd);
             cmd.bind_pipeline(*ssgi_pipeline_);
-            cmd.set_viewport(0.0f, 0.0f, static_cast<float>(trace_width_), static_cast<float>(trace_height_));
-            cmd.set_scissor(0, 0, trace_width_, trace_height_);
+            cmd.set_viewport(0.0f, 0.0f, static_cast<float>(ssgi_width_), static_cast<float>(ssgi_height_));
+            cmd.set_scissor(0, 0, ssgi_width_, ssgi_height_);
 
             SsrPushConstants gi_pc = pc;
             gi_pc.max_distance     = params.ssgi_max_distance;
             gi_pc.max_iterations   = params.ssgi_max_iterations;
             gi_pc.roughness_cutoff = 2.0f;
-            gi_pc.has_secondary    = 0.0f;
             gi_pc.skip_threshold   = 0.0f;   // SSGI's weight is diffuse; never skip it
+            // One cosine ray, colour from the WIDE lobe-cone mip: a diffuse gather wants each
+            // hit's neighbourhood average, whatever the specular chain's settings are.
+            gi_pc.rays_per_pixel   = 1;
+            gi_pc.cone_prefilter   = 1.0f;
             cmd.push_constants(coopa::gfx::ShaderStage::Fragment, gi_pc);
 
             cmd.bind_descriptor_set(camera_set, 0);
@@ -1002,8 +1030,8 @@ public:
 
             ssgi_resolved_targets_[o]->begin(cmd);
             cmd.bind_pipeline(*resolve_pipeline_);
-            cmd.set_viewport(0.0f, 0.0f, static_cast<float>(trace_width_), static_cast<float>(trace_height_));
-            cmd.set_scissor(0, 0, trace_width_, trace_height_);
+            cmd.set_viewport(0.0f, 0.0f, static_cast<float>(ssgi_width_), static_cast<float>(ssgi_height_));
+            cmd.set_scissor(0, 0, ssgi_width_, ssgi_height_);
             // Same push block as the specular resolve above with only the accumulation depth
             // swapped: the bounce averages deeper, since one cosine-hemisphere ray carries far
             // more variance than a near-mirror reflection ray. Both clamp the SAME shared count
@@ -1011,8 +1039,12 @@ public:
             ResolvePushConstants gi_rpc = rpc;
             gi_rpc.max_accum = params.temporal_enabled
                 ? static_cast<float>(params.ssgi_temporal_frames) : 0.0f;
+            gi_rpc.virtual_blend = 0.0f;   // a diffuse bounce has no single reflected image
+            gi_rpc.resolution_x  = static_cast<float>(ssgi_width_);
+            gi_rpc.resolution_y  = static_cast<float>(ssgi_height_);
             cmd.push_constants(coopa::gfx::ShaderStage::Fragment, gi_rpc);
             cmd.bind_descriptor_set(*ssgi_resolve_sets_[o][cp], 0);
+            cmd.bind_descriptor_set(camera_set, 1);
             cmd.draw(3);
             ssgi_resolved_targets_[o]->end(cmd);
             if (stage_hook_) stage_hook_(cmd, Stage::SsgiResolve);
@@ -1022,8 +1054,8 @@ public:
             if (blur_enabled_) {
                 ssgi_blurred_target_->begin(cmd);
                 cmd.bind_pipeline(*blur_pipeline_);
-                cmd.set_viewport(0.0f, 0.0f, static_cast<float>(trace_width_), static_cast<float>(trace_height_));
-                cmd.set_scissor(0, 0, trace_width_, trace_height_);
+                cmd.set_viewport(0.0f, 0.0f, static_cast<float>(ssgi_width_), static_cast<float>(ssgi_height_));
+                cmd.set_scissor(0, 0, ssgi_width_, ssgi_height_);
 
                 BlurPushConstants gi_bpc{};
                 gi_bpc.radius = params.ssgi_blur_radius;
@@ -1130,12 +1162,88 @@ private:
 
     // Trace resolution -- ctor param, not runtime-toggleable (changing it reallocates targets).
     bool     half_res_ = false;
+    /// Two-colour-attachment pass for the trace (RGBA16F colour+confidence, R16F hit distance):
+    /// render_pass.h's RenderPass is single-colour. Same load/store/layout and dependencies as
+    /// an OffscreenTarget's colour-only pass ending in SHADER_READ_ONLY_OPTIMAL.
+    void create_trace_render_pass_() {
+        VkAttachmentDescription att[2]{};
+        const VkFormat formats[2] = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16_SFLOAT};
+        VkAttachmentReference refs[2]{};
+        for (uint32_t i = 0; i < 2; ++i) {
+            att[i].format         = formats[i];
+            att[i].samples        = VK_SAMPLE_COUNT_1_BIT;
+            att[i].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            att[i].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+            att[i].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            att[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            att[i].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+            att[i].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            refs[i] = {i, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        }
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 2;
+        subpass.pColorAttachments    = refs;
+
+        VkSubpassDependency deps[2]{};
+        deps[0].srcSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[0].dstSubpass    = 0;
+        deps[0].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[0].srcAccessMask = 0;
+        deps[0].dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].srcSubpass    = 0;
+        deps[1].dstSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[1].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].dstStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        VkRenderPassCreateInfo ci{};
+        ci.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        ci.attachmentCount = 2;
+        ci.pAttachments    = att;
+        ci.subpassCount    = 1;
+        ci.pSubpasses      = &subpass;
+        ci.dependencyCount = 2;
+        ci.pDependencies   = deps;
+        GFX_VK_CHECK(vkCreateRenderPass(device_.handle(), &ci, nullptr, &trace_render_pass_));
+    }
+
+    /// (Re)builds the trace framebuffer over target_'s and hit_target_'s current images.
+    void create_trace_framebuffer_() {
+        if (trace_framebuffer_ != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device_.handle(), trace_framebuffer_, nullptr);
+            trace_framebuffer_ = VK_NULL_HANDLE;
+        }
+        VkImageView views[2] = {target_->color_view(), hit_target_->color_view()};
+        VkFramebufferCreateInfo fb{};
+        fb.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fb.renderPass      = trace_render_pass_;
+        fb.attachmentCount = 2;
+        fb.pAttachments    = views;
+        fb.width           = trace_width_;
+        fb.height          = trace_height_;
+        fb.layers          = 1;
+        GFX_VK_CHECK(vkCreateFramebuffer(device_.handle(), &fb, nullptr, &trace_framebuffer_));
+    }
+
     uint32_t trace_width_  = 0;
     uint32_t trace_height_ = 0;
+    /// The traced-SSGI chain's resolution: trace resolution / ssgi_res_divisor_. A diffuse
+    /// bounce is low-frequency, so it can trace at a quarter of the specular chain's pixels
+    /// (the composite upsamples it bilinearly) -- the GI resolution tier Unreal's lower
+    /// quality levels use too.
+    uint32_t ssgi_res_divisor_ = 1;
+    uint32_t ssgi_width_  = 0;
+    uint32_t ssgi_height_ = 0;
 
     std::unique_ptr<util::Sampler>          nearest_sampler_;
 
     std::unique_ptr<targets::OffscreenTarget> target_;
+    std::unique_ptr<targets::OffscreenTarget> hit_target_;   ///< R16F trace hit distance (MRT 1).
+    VkRenderPass  trace_render_pass_  = VK_NULL_HANDLE;      ///< target_ + hit_target_, see create_trace_render_pass_().
+    VkFramebuffer trace_framebuffer_  = VK_NULL_HANDLE;
     std::unique_ptr<targets::OffscreenTarget> composite_target_;
     /// Temporal resolve ping-pong pair: parity p is written on one frame and read as the
     /// history on the next (see execute()).
@@ -1175,9 +1283,6 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> comp_scene_color_layout_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> raw_ssr_layout_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> resolve_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> secondary_gbuf2_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> hiz_b_layout_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> scene_color_b_layout_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> blur_layout_;
 
     ExtraSets composite_extra_;
@@ -1194,12 +1299,8 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> comp_raw_ssr_sets_[2];       ///< [resolve parity]
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> comp_scene_color_sets_[2];   ///< [resolve parity]
 
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> secondary_gbuf2_set_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> hiz_b_set_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> scene_color_b_set_;
     std::unique_ptr<util::Sampler>              neutral_sampler_;
     std::unique_ptr<coopa::gfx::memory::Image>  zero_rgba_;
-    std::unique_ptr<coopa::gfx::memory::Image>  one_r32_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> blur_sets_[2];              ///< [resolve parity]
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> ssgi_resolve_sets_[2][2];   ///< [resolve parity][count parity]
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> ssgi_blur_sets_[2];         ///< [resolve parity]

@@ -213,9 +213,8 @@ The `coopa::gfx::engine` module provides high-level rendering engine abstraction
 
 #### Geometry and transparency passes
 - [transparent_pass.h](passes/transparent_pass.h) (`TransparentPass`) — forward BLEND pass, depth-tested against the G-buffer.
-- [transparent_capture_pass.h](passes/transparent_capture_pass.h) (`TransparentCapturePass`) — unblended three-target capture of transparent surfaces.
 - [textured_quad_2d_pass.h](passes/textured_quad_2d_pass.h) (`TexturedQuad2dPass`) — shared 2D textured-quad pass with a per-texture descriptor cache and streaming geometry.
-- [sdf_gbuffer_pass.h](passes/sdf_gbuffer_pass.h), [sdf_forward_pass.h](passes/sdf_forward_pass.h), [sdf_capture_pass.h](passes/sdf_capture_pass.h), [sdf_shadow_pass.h](passes/sdf_shadow_pass.h) — signed-distance-field shapes rendered into the G-buffer, the forward pass, probe capture, and both shadow paths.
+- [sdf_gbuffer_pass.h](passes/sdf_gbuffer_pass.h), [sdf_forward_pass.h](passes/sdf_forward_pass.h), [sdf_shadow_pass.h](passes/sdf_shadow_pass.h) — signed-distance-field shapes rendered into the G-buffer, the forward pass, and both shadow paths.
 
 
 ### Engine Utilities Submodule (`engine/util`)

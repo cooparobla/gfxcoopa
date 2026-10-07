@@ -70,4 +70,24 @@ vec2 ssr_ign2(vec2 px, int frame) {
     return vec2(ssr_ign(shifted), ssr_ign(shifted + vec2(37.0, 17.0)));
 }
 
+/// GGX visible-normal sample (Heitz 2018, "Sampling the GGX Distribution of Visible Normals"),
+/// in the tangent frame where +Z is the surface normal. `Ve` is the unit direction TOWARD the
+/// viewer in that frame, `ax`/`ay` the GGX alphas, `u` two uniform numbers in [0,1). Returns the
+/// sampled microfacet normal; reflecting the view about it gives a ray distributed like the
+/// specular lobe the viewer actually sees (no backfacing or masked microfacets).
+vec3 ssr_sample_ggx_vndf(vec3 Ve, float ax, float ay, vec2 u) {
+    vec3 Vh = normalize(vec3(ax * Ve.x, ay * Ve.y, Ve.z));
+    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    vec3 T1 = lensq > 0.0 ? vec3(-Vh.y, Vh.x, 0.0) * inversesqrt(lensq) : vec3(1.0, 0.0, 0.0);
+    vec3 T2 = cross(Vh, T1);
+    float r   = sqrt(u.x);
+    float phi = 6.28318530718 * u.y;
+    float t1 = r * cos(phi);
+    float t2 = r * sin(phi);
+    float s  = 0.5 * (1.0 + Vh.z);
+    t2 = (1.0 - s) * sqrt(max(1.0 - t1 * t1, 0.0)) + s * t2;
+    vec3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+    return normalize(vec3(ax * Nh.x, ay * Nh.y, max(0.0, Nh.z)));
+}
+
 #endif // GFX_SSR_COMMON_GLSL

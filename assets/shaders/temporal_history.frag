@@ -28,6 +28,11 @@ layout(location = 0) out vec4 out_meta;
 
 layout(set = 0, binding = 0) uniform sampler2D u_depth;    // NEAREST -- rasterized scene depth
 layout(set = 0, binding = 1) uniform sampler2D u_history;  // LINEAR  -- last frame's own output
+// G-buffer velocity (NEAREST), read only when pc.use_velocity != 0: xy = this surface's
+// unjittered screen motion since last frame in uv, z = its previous linear view depth (-1 = it
+// has no previous pose), w = its current linear view depth. Lets a MOVING object keep its
+// history -- the camera-only path below sees its previous-frame pixel as a different surface.
+layout(set = 0, binding = 2) uniform sampler2D u_velocity;
 
 layout(push_constant) uniform PushConstants {
     // Current clip space -> previous frame's clip space: prev jittered (proj * view) times the
@@ -48,6 +53,7 @@ layout(push_constant) uniform PushConstants {
     float far_z;
     float is_perspective;   // 0 = orthographic; matches gfx_linear_depth()'s own convention
     int   history_valid;    // 0 until both a history image and a previous matrix exist
+    int   use_velocity;     // 1: u_velocity is the G-buffer's velocity attachment
 } pc;
 
 /// Depth agreement required to accept history, as a fraction of the point's own distance to the
@@ -71,16 +77,38 @@ void main() {
         return;
     }
 
-    vec2 ndc       = vec2(in_uv.x * 2.0 - 1.0, -(in_uv.y * 2.0 - 1.0));
-    vec4 prev_clip = pc.reproject * vec4(ndc, depth, 1.0);
+    vec2  prev_uv;
+    float prev_view_z;
+    // The far plane (sky) has no rasterized velocity; it takes the camera-only path.
+    if (pc.use_velocity != 0 && depth < 1.0) {
+        vec4 vel = texelFetch(u_velocity, ivec2(gl_FragCoord.xy), 0);
+        // No previous pose (newly spawned, or behind last frame's eye): no history exists.
+        if (vel.z <= 0.0) {
+            out_meta = reset;
+            return;
+        }
+        // Sub-0.05 px motion is the fp32 noise of re-projecting a static surface, not motion:
+        // snapping it to zero keeps a resting pixel's history tap exactly on its own texel.
+        vec2 v = vel.xy;
+        if (length(v * vec2(pc.resolution_x, pc.resolution_y)) < 0.05) v = vec2(0.0);
+        prev_uv     = in_uv - v;
+        prev_view_z = vel.z;
+    } else {
+        vec2 ndc       = vec2(in_uv.x * 2.0 - 1.0, -(in_uv.y * 2.0 - 1.0));
+        vec4 prev_clip = pc.reproject * vec4(ndc, depth, 1.0);
 
-    // Behind the previous frame's eye: no history exists for this point at all.
-    if (prev_clip.w <= 0.0) {
-        out_meta = reset;
-        return;
+        // Behind the previous frame's eye: no history exists for this point at all.
+        if (prev_clip.w <= 0.0) {
+            out_meta = reset;
+            return;
+        }
+        prev_uv = ssr_ndc_to_uv(prev_clip.xy / prev_clip.w);
+        // This point's own linear distance along the PREVIOUS view axis -- the same quantity
+        // the history's R channel stored for whatever surface that pixel was showing. They
+        // match only if that surface was this one.
+        prev_view_z = gfx_linear_depth(prev_clip.z / prev_clip.w, pc.near_z, pc.far_z,
+                                       pc.is_perspective);
     }
-
-    vec2 prev_uv = ssr_ndc_to_uv(prev_clip.xy / prev_clip.w);
 
     // Off-screen last frame -- the cheapest and most common disocclusion case, and the one a
     // CLAMP_TO_EDGE history sampler would otherwise smear inward along every screen edge the
@@ -89,12 +117,6 @@ void main() {
         out_meta = reset;
         return;
     }
-
-    // This point's own linear distance along the PREVIOUS view axis -- the same quantity the
-    // history's R channel stored for whatever surface that pixel was showing. They match only
-    // if that surface was this one.
-    float prev_view_z = gfx_linear_depth(prev_clip.z / prev_clip.w, pc.near_z, pc.far_z,
-                                         pc.is_perspective);
 
     vec2 hist = texture(u_history, prev_uv).rg;
     if (abs(hist.r - prev_view_z) > kDepthTolerance * prev_view_z) {

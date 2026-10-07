@@ -14,8 +14,7 @@
 // directions; the variance-clipped temporal resolve integrates them.
 //
 // Set layout is ssr.frag's own sets 0-3 (bound to the identical descriptor sets by
-// SsrPass::execute()); there is deliberately no secondary source here -- a diffuse
-// bounce off transparent capture data is far below this pass's noise floor.
+// SsrPass::execute()).
 
 #include <gfx/ssr_common.glsl>
 
@@ -32,6 +31,7 @@ layout(set = 0, binding = 0) uniform CameraUBO {
 // Set 1: G-Buffer (binding 0, g_albedo_ao, exists in the layout but is not needed here)
 layout(set = 1, binding = 1) uniform sampler2D g_normal_metallic;
 layout(set = 1, binding = 2) uniform sampler2D g_position_roughness;
+layout(set = 1, binding = 3) uniform sampler2D u_velocity;   // G4 -- see gfx_ssr_hit_color()
 
 // Set 2: Hi-Z map
 layout(set = 2, binding = 0) uniform sampler2D u_hiz_map;
@@ -44,7 +44,7 @@ layout(set = 3, binding = 0) uniform sampler2D u_scene_color;
 #include <gfx/ssr_trace_body.glsl>
 
 // Same block as ssr.frag's (SsrPass pushes one SsrPushConstants struct for both
-// pipelines); the secondary-source fields at the tail are meaningless here.
+// pipelines); the specular-only fields at the tail are meaningless here.
 layout(push_constant) uniform SsrPushConstants {
     mat4  inv_proj;
     float max_distance;      // ssgi_max_distance -- swapped in by SsrPass::execute()
@@ -59,9 +59,10 @@ layout(push_constant) uniform SsrPushConstants {
     int   max_color_mip;
     float jitter_strength;
     int   frame_index;
-    float has_secondary;
-    int   max_hiz_mip_b;
-    int   max_color_mip_b;
+    int   flags;             // bit 0: u_scene_color is the previous frame
+    int   rays_per_pixel;    // unused here (always one cosine ray)
+    float cone_prefilter;    // 1: diffuse hits read the wide lobe-cone mip
+    float skip_threshold;    // unused here
 } u_ssr;
 
 void main() {
@@ -105,6 +106,10 @@ void main() {
     sp.max_color_mip   = u_ssr.max_color_mip;
     sp.jitter_strength = 0.0;   // the hemisphere sample above IS the jitter
     sp.frame_index     = u_ssr.frame_index;
+    sp.prev_frame_color = (u_ssr.flags & 1) != 0;
+    sp.skip_behind      = (u_ssr.flags & 2) != 0;
+    sp.rays_per_pixel   = 1;
+    sp.cone_prefilter   = u_ssr.cone_prefilter;
 
     // Roughness 0.9: the cone-footprint mip selection then reads the coarse end of
     // the prefiltered chain, which is exactly what a diffuse gather wants -- each

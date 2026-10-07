@@ -73,8 +73,9 @@ public:
         float     far_z          = 1000.0f;          // offset 80
         float     is_perspective = 1.0f;             // offset 84
         int       history_valid  = 0;                // offset 88
+        int       use_velocity   = 0;                // offset 92
     };
-    static_assert(sizeof(PushConstants) == 92,
+    static_assert(sizeof(PushConstants) == 96,
                   "temporal_history.frag's PushConstants block must match this layout byte-for-byte");
 
     /// execute() parameters.
@@ -96,6 +97,9 @@ public:
         float     far_z           = 1000.0f;
         /// False for an orthographic projection — depth is already linear in the raw value there.
         bool      perspective     = true;
+        /// Reproject through the velocity image bound by set_velocity_image() instead of the
+        /// camera matrix, so moving objects keep their history. Ignored until one is bound.
+        bool      use_velocity    = false;
     };
 
     /**
@@ -138,10 +142,15 @@ public:
         sd.owned_sets = {{
             {0, coopa::gfx::DescriptorType::CombinedImageSampler, coopa::gfx::ShaderStage::Fragment, 1},
             {1, coopa::gfx::DescriptorType::CombinedImageSampler, coopa::gfx::ShaderStage::Fragment, 1},
+            {2, coopa::gfx::DescriptorType::CombinedImageSampler, coopa::gfx::ShaderStage::Fragment, 1},
         }};
         sd.push_constants = {{coopa::gfx::ShaderStage::Fragment, 0, sizeof(PushConstants)}};
         sd.instances = 2;   // one owned set per ping-pong parity (see recreate())
         stage_ = std::make_unique<FullscreenStage>(device, *render_pass_, sd);
+        // Until set_velocity_image(): a valid image the shader never reads (use_velocity = 0).
+        for (uint32_t i = 0; i < 2; ++i) {
+            stage_->set(0, i).bind_image(2, neutral_image_->view_typed(), *nearest_sampler_);
+        }
     }
 
     ~TemporalHistoryPass() { destroy_resources_(); }
@@ -176,6 +185,13 @@ public:
     /// already be in SHADER_READ_ONLY_OPTIMAL by the time execute() records.
     void set_depth_image(coopa::gfx::TextureView depth_view) {
         for (uint32_t i = 0; i < 2; ++i) stage_->set(0, i).bind_image(0, depth_view, *nearest_sampler_);
+    }
+
+    /// Binds the G-buffer's velocity attachment (GBufferTarget::g4_view_typed()), at the same
+    /// resolution as the depth image. Enables Params::use_velocity. Bind once at setup.
+    void set_velocity_image(coopa::gfx::TextureView velocity_view) {
+        for (uint32_t i = 0; i < 2; ++i) stage_->set(0, i).bind_image(2, velocity_view, *nearest_sampler_);
+        velocity_bound_ = true;
     }
 
     void execute(command::CommandBuffer& cmd, const Params& params) {
@@ -236,6 +252,7 @@ public:
         // Both a history IMAGE and a reprojection MATRIX must exist — the matrix lags the image
         // by a frame on a fresh start, so ANDing them avoids reprojecting with an identity.
         pc.history_valid  = (history_initialized_ && params.reproject_valid) ? 1 : 0;
+        pc.use_velocity   = (params.use_velocity && velocity_bound_) ? 1 : 0;
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
         stage_->draw(cmd);
 
@@ -377,6 +394,7 @@ private:
     bool history_initialized_ = false;
 
     std::unique_ptr<memory::Image>  neutral_image_;
+    bool velocity_bound_ = false;   ///< set_velocity_image() has run.
     std::unique_ptr<util::Sampler>  nearest_sampler_;
     std::unique_ptr<util::Sampler>  linear_sampler_;
 

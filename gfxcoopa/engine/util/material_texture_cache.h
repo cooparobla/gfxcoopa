@@ -2,7 +2,7 @@
  * @file material_texture_cache.h
  * @brief Owns the "material" descriptor set (4 combined-image-sampler bindings: alpha mask,
  * albedo, normal, metallic-roughness) shared by every textured pass -- G-buffer, shadow,
- * forward transparent, transparent capture, probe capture -- and lazily allocates one
+ * forward transparent, probe capture -- and lazily allocates one
  * DescriptorSet per distinct 4-texture combination a material references.
  *
  * One cache serves all four texture slots across every consuming pass, so gfxcoopa's own
@@ -58,7 +58,7 @@ namespace util {
 class MaterialTextureCache {
 public:
     /// Binding indices within the material set's layout, in the order every consuming shader
-    /// (gbuffer_fs.glsl, transparent_fs.glsl, capture_fs.glsl, probe_capture.frag) declares
+    /// (gbuffer_fs.glsl, transparent_fs.glsl, probe_capture.frag) declares
     /// them. alpha_mask is at binding 0 so gfx/surface/shadow_fs.glsl and shadow_cube_fs.glsl,
     /// which sample only the mask, can share this layout: a descriptor set layout may declare
     /// bindings a given shader never samples.

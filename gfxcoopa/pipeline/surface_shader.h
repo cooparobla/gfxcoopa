@@ -56,7 +56,6 @@ struct SurfaceShaderDesc {
     std::string shadow_frag;       ///< Directional shadow fragment entry point (Opaque domain only).
     std::string shadow_cube_vert;  ///< Point-light cube shadow vertex entry point (Opaque domain only).
     std::string shadow_cube_frag;  ///< Point-light cube shadow fragment entry point (Opaque domain only).
-    std::string capture_frag;      ///< Transparent-capture fragment entry point (Transparent domain only).
 
     /// Per-shader rasterization override -- e.g. foliage cards want CullMode::None (drawn
     /// from both sides) where the stock backbone defaults to CullMode::Back.

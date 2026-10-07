@@ -116,7 +116,9 @@ public:
         img_info.arrayLayers   = 1;
         img_info.samples       = VK_SAMPLE_COUNT_1_BIT;
         img_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-        img_info.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        // TRANSFER_DST: copy_level0_from() writes mip 0 directly (the previous frame's final HDR).
+        img_info.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         img_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
         VmaAllocationCreateInfo alloc_info{};
@@ -201,7 +203,15 @@ public:
         }
     }
 
-    void execute(coopa::gfx::command::CommandBuffer& cmd, coopa::gfx::TextureView scene_color_view) {
+    /**
+     * @brief Builds the chain. `skip_level0` keeps mip 0 as it is -- what copy_level0_from()
+     *        put there at the end of the previous frame -- and only rebuilds mips 1+ from it.
+     *        `scene_color_view` stays bound as level 0's source either way (and is drawn on
+     *        frames with no copied level 0), so switching between the two never rewrites a
+     *        descriptor a frame in flight still references.
+     */
+    void execute(coopa::gfx::command::CommandBuffer& cmd, coopa::gfx::TextureView scene_color_view,
+                 bool skip_level0 = false) {
         update_descriptors(scene_color_view);
 
         // No pre-loop barrier for the source: the offscreen render pass's finalLayout is
@@ -210,7 +220,7 @@ public:
 
         cmd.bind_pipeline(stage_->pipeline());
 
-        for (uint32_t m = 0; m < mip_levels_; ++m) {
+        for (uint32_t m = skip_level0 ? 1u : 0u; m < mip_levels_; ++m) {
             uint32_t mw = std::max(1u, width_ >> m);
             uint32_t mh = std::max(1u, height_ >> m);
 
@@ -268,6 +278,58 @@ public:
                                  0, 0, nullptr, 0, nullptr, 1, &mip_barrier);
         }
     }
+
+    /**
+     * @brief Copies `src` (same size, RGBA16F, in SHADER_READ_ONLY_OPTIMAL) into mip 0, leaving
+     *        both images shader-readable again. Call at the END of a frame with the frame's final
+     *        HDR image; the next frame's execute(..., skip_level0 = true) then mips it, which is
+     *        how SSR samples the previous frame's final colour (Unreal's PrevSceneColor).
+     *
+     * One image is enough even with frames in flight: every reader of mip 0 in a frame records
+     * before this copy, the pre-barrier orders the copy after them, and the post-barrier orders
+     * the next frame's reads after the copy (barriers act across submissions on one queue).
+     * Mip 0 must already be shader-readable (execute() has run at least once since recreate()).
+     */
+    void copy_level0_from(coopa::gfx::command::CommandBuffer& cmd, VkImage src) {
+        if (mip_levels_ == 0) return;
+        auto barrier = [&](VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags sa,
+                           VkAccessFlags da, VkPipelineStageFlags ss, VkPipelineStageFlags ds) {
+            VkImageMemoryBarrier b{};
+            b.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b.oldLayout           = from;
+            b.newLayout           = to;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image               = img;
+            b.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            b.srcAccessMask       = sa;
+            b.dstAccessMask       = da;
+            vkCmdPipelineBarrier(cmd.handle(), ss, ds, 0, 0, nullptr, 0, nullptr, 1, &b);
+        };
+        const VkPipelineStageFlags producers = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        barrier(src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                producers, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        barrier(color_image_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                producers, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkImageCopy region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.extent         = {width_, height_, 1};
+        vkCmdCopyImage(cmd.handle(), src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       color_image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        barrier(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        barrier(color_image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    }
+
+    uint32_t width() const  { return width_; }
+    uint32_t height() const { return height_; }
 
     VkImageView full_view() const { return full_view_; }
     coopa::gfx::TextureView full_view_typed() const { return coopa::gfx::detail::wrap(full_view_); }

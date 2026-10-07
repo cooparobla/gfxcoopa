@@ -15,8 +15,11 @@
 // choice, but every name below must resolve to exactly this type):
 //   uniform CameraUBO { mat4 view; mat4 proj; vec3 camera_pos; } camera;
 //   sampler2D g_normal_metallic, g_position_roughness;
+//   sampler2D u_velocity;        -- the G-buffer's velocity attachment (G4); only read when
+//                                   GfxSsrParams::prev_frame_color is set
 //   sampler2D u_hiz_map;
-//   sampler2D u_scene_color;
+//   sampler2D u_scene_color;     -- prefiltered colour chain: the PREVIOUS frame's final HDR when
+//                                   prev_frame_color is set, else this frame's lit colour
 //
 // Also requires <gfx/ssr_common.glsl> to have been included first.
 
@@ -35,10 +38,28 @@ struct GfxSsrParams {
     int   start_mip;         // Hi-Z mip the march starts at (ssr_start_mip)
     int   min_mip0_steps;    // self-reflection gate (ssr_min_mip0_steps)
     int   max_color_mip;     // top mip of the prefiltered scene-colour chain
-    float jitter_strength;   // 0 = old deterministic mirror-ray trace, exactly (ssr_jitter)
+    float jitter_strength;   // GGX lobe scale for the VNDF ray sampling, 1 = the full lobe;
+                              // 0 = the deterministic mirror ray, exactly (ssr_jitter)
     int   frame_index;       // decorrelates ssr_ign2() noise frame to frame; meaningless at
                               // jitter_strength == 0
+    bool  prev_frame_color;  // u_scene_color is LAST frame's final HDR: fetch hits where they were
+    int   rays_per_pixel;    // VNDF rays averaged per pixel (gfx_ssr_trace only)
+    float cone_prefilter;    // lobe-cone share of the hit-colour mip footprint, 0..1
+    bool  skip_behind;       // stride-doubling while the ray runs behind thin geometry
 };
+
+/// A hit's reflected colour from u_scene_color. When that chain holds the PREVIOUS frame's final
+/// HDR (Unreal's PrevSceneColor), the hit surface is looked up where it WAS last frame -- G4.xy
+/// is its unjittered screen motion since then -- so reflections of moving objects stay put on
+/// them. `color_uv` returns the uv actually sampled, for the screen-edge fade.
+vec3 gfx_ssr_hit_color(vec2 hit_uv, ivec2 hit_px, float lod, bool prev_frame, out vec2 color_uv) {
+    color_uv = hit_uv;
+    if (prev_frame) {
+        vec4 vel = texelFetch(u_velocity, hit_px, 0);
+        color_uv = hit_uv - vel.xy;
+    }
+    return textureLod(u_scene_color, clamp(color_uv, vec2(0.0), vec2(1.0)), lod).rgb;
+}
 
 float gfx_ssr_get_view_z(float depth_ndc, mat4 inv_proj) {
     vec4 clip = inv_proj * vec4(0.0, 0.0, depth_ndc, 1.0);
@@ -49,10 +70,8 @@ float gfx_ssr_get_view_z(float depth_ndc, mat4 inv_proj) {
 /// convention ssr.frag's out_ssr_color always used, still true here (vec4(color, confidence)
 /// reconstructs exactly what that used to be directly). `travel` (world-space distance from
 /// the ray's origin P to the hit point) and `hit` are new: a caller juggling more than one
-/// independent trace against different geometry sources (e.g. an opaque reflector also
-/// checking a second, transparent-only Hi-Z -- see gfx_ssr_trace_secondary() in
-/// gfx/ssr_trace_secondary_body.glsl) needs a way to pick whichever hit is physically NEARER
-/// along the shared ray, and `confidence` alone can't answer that: it encodes screen-edge/
+/// independent trace (or several rays) needs a way to pick whichever hit is physically NEARER
+/// along the ray, and `confidence` alone can't answer that: it encodes screen-edge/
 /// roughness/grazing/distance FADES, not proximity. `hit` makes "no hit" unambiguous rather
 /// than inferred from `confidence <= 0.0` (a found-but-fully-faded hit is a real distinction
 /// from no hit at all, even though both currently zero out `color`).
@@ -144,7 +163,9 @@ GfxSsrHit gfx_ssr_trace_dir(vec3 P, vec3 N, vec3 R, float roughness, mat4 inv_pr
     vec2 hit_uv = vec2(0.0);
     vec3 hit_P = vec3(0.0);
     float hit_view_z = -1.0;
+    ivec2 hit_px_final = ivec2(0);
     int mip0_steps = 0;
+    int behind_run = 0;   // consecutive mip-0 texels the ray has run BEHIND the depth buffer
 
     for (int i = 0; i < sp.max_iterations; ++i) {
         if (current_pos.x < 0.0 || current_pos.x > 1.0 ||
@@ -181,10 +202,33 @@ GfxSsrHit gfx_ssr_trace_dir(vec3 P, vec3 N, vec3 R, float roughness, mat4 inv_pr
             // 1% of the ray) in that regime instead, while leaving normal-length rays (where the
             // quotient is already far below the cap) unaffected.
             float min_t_step = min(0.0001 / max(length(ray_dir.xy), 1e-5), 0.01);
-            float t_step = max(min(t_planes.x, t_planes.y), min_t_step) + min_t_step;
-            current_pos += ray_dir * t_step;
+            float t_cell = max(min(t_planes.x, t_planes.y), min_t_step) + min_t_step;
 
-            current_mip = min(current_mip + 1, sp.max_hiz_mip);
+            // Where the ray reaches this cell's min-depth plane (Uludag's Hi-Z traversal). NDC
+            // depth is affine in screen space, so the crossing is a plain linear solve along the
+            // ray. If it comes before the cell's exit, the ray may intersect geometry INSIDE this
+            // cell: advance only onto the plane and refine one mip down. Always running to the
+            // cell exit instead overshoots the surface by up to a whole coarse cell, so the ray
+            // reaches mip 0 already behind the geometry, fails the thickness test, and only
+            // registers a hit where the overshoot happens to fall within it -- a pattern keyed
+            // to the Hi-Z cell grid, which reads as stair-stepped edges and horizontal streaks
+            // in every sharp reflection.
+            float t_depth = (ray_dir.z > 0.0) ? (cell_min_depth - current_pos.z) / ray_dir.z : 1e30;
+            if (t_depth < t_cell) {
+                current_pos += ray_dir * max(t_depth, 0.0);
+                if (current_mip == 0) {
+                    // On the mip-0 depth plane: the next iteration tests this texel exactly at
+                    // its surface (depth_diff ~ 0). Snap z onto the plane so float round-off in
+                    // the solve cannot leave the ray a hair in front and bounce it back up.
+                    current_pos.z = max(current_pos.z, cell_min_depth);
+                } else {
+                    current_mip -= 1;
+                }
+            } else {
+                current_pos += ray_dir * t_cell;
+                current_mip = min(current_mip + 1, sp.max_hiz_mip);
+            }
+            behind_run = 0;
         } else {
             // Ray penetrated cell surface
             if (current_mip == 0) {
@@ -195,6 +239,7 @@ GfxSsrHit gfx_ssr_trace_dir(vec3 P, vec3 N, vec3 R, float roughness, mat4 inv_pr
                 // -- a false self-reflection ring traced right along every silhouette edge.
                 ivec2 hit_px = clamp(ivec2(current_pos.xy * vec2(gsize)), ivec2(0), gsize - 1);
                 vec3 hit_world_pos = texelFetch(g_position_roughness, hit_px, 0).rgb;
+                bool behind_thick = false;
                 if (mip0_steps >= sp.min_mip0_steps && length(hit_world_pos - P) >= self_hit_r) {
                     float ray_z  = gfx_ssr_get_view_z(current_pos.z, inv_proj);
                     float surf_z = gfx_ssr_get_view_z(cell_min_depth, inv_proj);
@@ -204,6 +249,7 @@ GfxSsrHit gfx_ssr_trace_dir(vec3 P, vec3 N, vec3 R, float roughness, mat4 inv_pr
                     // 0.1 m tolerance is far too tight for distant geometry (one Hi-Z texel
                     // already spans more than that in depth) and needlessly loose up close.
                     float thickness = max(sp.thickness_min, sp.thickness_scale * abs(ray_z));
+                    behind_thick = depth_diff_m > thickness;
 
                     if (depth_diff_m >= 0.0 && depth_diff_m <= thickness) {
                         vec3 hit_normal = texelFetch(g_normal_metallic, hit_px, 0).rgb;
@@ -212,6 +258,7 @@ GfxSsrHit gfx_ssr_trace_dir(vec3 P, vec3 N, vec3 R, float roughness, mat4 inv_pr
                             hit_uv     = current_pos.xy;
                             hit_P      = hit_world_pos;
                             hit_view_z = ray_z;
+                            hit_px_final = hit_px;
                             break;
                         }
                     }
@@ -224,7 +271,14 @@ GfxSsrHit gfx_ssr_trace_dir(vec3 P, vec3 N, vec3 R, float roughness, mat4 inv_pr
                 // far too large for long ones (skipping over thin geometry).
                 vec2 mip0_size = vec2(textureSize(u_hiz_map, 0));
                 float texel_size = 1.0 / max(mip0_size.x, mip0_size.y);
-                current_pos += (ray_dir / max(length(ray_dir.xy), 1e-5)) * texel_size;
+                // Behind thin geometry (sp.skip_behind): the ray is occluded until it re-emerges,
+                // and a min-only Hi-Z cannot tell how far that is -- climbing a mip just lands back
+                // at mip 0 next iteration. Doubling the stride on each consecutive behind-texel
+                // (1, 2, 4 .. 16) crosses such a region in a few iterations instead of one per
+                // texel; the first in-front step resets it.
+                behind_run = (sp.skip_behind && behind_thick) ? behind_run + 1 : 0;
+                float stride = float(1 << min(max(behind_run - 1, 0), 4));
+                current_pos += (ray_dir / max(length(ray_dir.xy), 1e-5)) * (texel_size * stride);
                 mip0_steps++;
             } else {
                 current_mip = current_mip - 1;
@@ -234,7 +288,9 @@ GfxSsrHit gfx_ssr_trace_dir(vec3 P, vec3 N, vec3 R, float roughness, mat4 inv_pr
 
     if (!hit_found) return GfxSsrHit(vec3(0.0), 0.0, 0.0, false);
 
-    // Confidence / Fading factors
+    // Confidence / Fading factors. The screen-edge fade is evaluated where the colour is
+    // FETCHED (below) as well as where the ray hit: with the previous-frame source a hit whose
+    // surface was off-screen last frame has no colour to give.
     vec2 edge = smoothstep(vec2(0.0), vec2(0.08), hit_uv) * smoothstep(vec2(1.0), vec2(0.92), hit_uv);
     float screen_fade = edge.x * edge.y;
 
@@ -263,19 +319,24 @@ GfxSsrHit gfx_ssr_trace_dir(vec3 P, vec3 N, vec3 R, float roughness, mat4 inv_pr
     float travel    = length(hit_P - P);
     float dist_fade = 1.0 - smoothstep(sp.max_distance * 0.7, sp.max_distance, travel);
 
-    float confidence = screen_fade * dir_fade * roughness_fade * grazing_fade * dist_fade;
-
-    // Roughness-aware cone footprint -> mip level. The specular cone has half-angle theta at
-    // the origin, so at the hit it has spread to a world-space radius of tan(theta) * travel.
-    // Project that to full-res texels at the HIT's depth (not the origin's -- the footprint is
-    // a feature of the reflected image, which lives at the hit); a footprint N texels across is
-    // exactly mip log2(N).
+    // Hit-colour footprint -> mip level, in full-res texels at the HIT's depth (the reflected
+    // image lives there). Two parts: the pixel's own ray cone continued past the bounce -- a
+    // pixel spanning px_world at the reflector spans px_world * (d_cam + travel) / d_cam by the
+    // time it reaches the hit -- and the GGX lobe's cone, scaled by cone_prefilter. With the
+    // lobe importance-sampled by the rays themselves (jitter_strength 1), a partial prefilter
+    // smooths the noise those rays leave without blurring a glossy reflection twice; 1 is the
+    // old behaviour (the whole lobe from one prefiltered tap).
     float px_world_hit  = ssr_texel_world_size(hit_view_z, p11, float(gsize.y));
-    float cone_diameter = 2.0 * ssr_ggx_cone_tan(roughness) * travel;
+    float dist_cam      = max(length(P - camera.camera_pos), 1e-4);
+    float ray_footprint = px_world * (dist_cam + travel) / dist_cam;
+    float cone_diameter = ray_footprint + 2.0 * ssr_ggx_cone_tan(roughness) * travel * sp.cone_prefilter;
     float lod = clamp(log2(max(cone_diameter / max(px_world_hit, 1e-6), 1.0)),
                       0.0, float(sp.max_color_mip));
 
-    vec3 hit_color = textureLod(u_scene_color, hit_uv, lod).rgb;
+    vec2 color_uv;
+    vec3 hit_color = gfx_ssr_hit_color(hit_uv, hit_px_final, lod, sp.prev_frame_color, color_uv);
+    vec2 cedge = smoothstep(vec2(0.0), vec2(0.08), color_uv) * smoothstep(vec2(1.0), vec2(0.92), color_uv);
+    float confidence = screen_fade * cedge.x * cedge.y * dir_fade * roughness_fade * grazing_fade * dist_fade;
 
     // Premultiplied by confidence -- see GfxSsrHit's own doc above for why.
     return GfxSsrHit(hit_color * confidence, confidence, travel, true);
@@ -291,32 +352,40 @@ GfxSsrHit gfx_ssr_trace(vec3 P, vec3 N, float roughness, mat4 inv_proj, GfxSsrPa
     vec3 V = normalize(P - camera.camera_pos);
     vec3 R = reflect(V, N);
 
-    // Stochastic ray jitter. The far end of a reflection -- where the ray either clears the
-    // reflected object's silhouette or doesn't -- is a hard binary hit/miss decision on a
-    // perfectly deterministic ray; as the camera moves that decision flips in lockstep across
-    // the whole boundary, which is what reads as shimmer no amount of temporal/spatial
-    // filtering downstream can fully absorb. Sampling a fresh point inside the GGX lobe every
-    // pixel, every frame turns that hard edge into per-pixel noise instead, which the
-    // resolve/blur stages already exist to integrate into a soft edge. jitter_strength == 0
-    // skips this entirely and reproduces the old single deterministic ray exactly.
-    if (sp.jitter_strength > 0.0) {
-        vec3 up = (abs(R.z) < 0.999) ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
-        vec3 tangent   = normalize(cross(up, R));
-        vec3 bitangent = cross(R, tangent);
+    // jitter_strength == 0: the single deterministic mirror ray, exactly.
+    if (sp.jitter_strength <= 0.0) return gfx_ssr_trace_dir(P, N, R, roughness, inv_proj, sp);
 
-        vec2 xi = ssr_ign2(gl_FragCoord.xy, sp.frame_index);
-        float lobe_radius = sqrt(xi.x) * sp.jitter_strength * ssr_ggx_cone_tan(roughness);
-        float phi = 6.28318530718 * xi.y;
+    // GGX importance sampling of the visible normals (Heitz 2018 VNDF), Unreal's SSR ray
+    // generation: each ray reflects the view about a microfacet normal drawn in proportion to the
+    // BRDF's own visible-normal density, so the rays already carry the lobe's shape (no PDF
+    // weighting needed for a split-sum composite). jitter_strength scales the lobe (1 = true
+    // GGX). Fresh IGN draws per ray and per frame; the temporal resolve and the roughness-aware
+    // blur integrate the noise. A ray that would leave below the surface falls back to the mirror.
+    vec3 up = (abs(N.z) < 0.999) ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 T  = normalize(cross(up, N));
+    vec3 B  = cross(N, T);
+    vec3 Ve = normalize(vec3(dot(-V, T), dot(-V, B), dot(-V, N)));
+    float a = max(roughness * roughness * sp.jitter_strength, 1e-4);
 
-        vec3 candidate = normalize(R + tangent * (lobe_radius * cos(phi))
-                                      + bitangent * (lobe_radius * sin(phi)));
-        // The caller already gated on dot(R, N) <= 0 using this SAME unjittered R (computed
-        // identically, before this branch runs) -- a jittered ray that dips below the origin
-        // surface must fall back to the mirror ray rather than silently trace garbage.
-        if (dot(candidate, N) > 0.0) R = candidate;
+    int   n = max(sp.rays_per_pixel, 1);
+    vec3  color = vec3(0.0);
+    float conf  = 0.0;
+    float travel = 1e30;
+    bool  any_hit = false;
+    for (int k = 0; k < 8; ++k) {
+        if (k >= n) break;
+        vec2 xi = ssr_ign2(gl_FragCoord.xy + float(k) * vec2(53.0, 97.0), sp.frame_index);
+        vec3 h  = ssr_sample_ggx_vndf(Ve, a, a, xi);
+        vec3 H  = T * h.x + B * h.y + N * h.z;
+        vec3 Rk = reflect(V, H);
+        if (dot(Rk, N) <= 0.0) Rk = R;
+        GfxSsrHit hk = gfx_ssr_trace_dir(P, N, Rk, roughness, inv_proj, sp);
+        color += hk.color;
+        conf  += hk.confidence;
+        if (hk.hit) { any_hit = true; travel = min(travel, hk.travel); }
     }
-
-    return gfx_ssr_trace_dir(P, N, R, roughness, inv_proj, sp);
+    float inv_n = 1.0 / float(n);
+    return GfxSsrHit(color * inv_n, conf * inv_n, any_hit ? travel : 0.0, any_hit);
 }
 
 #endif // GFX_SSR_TRACE_BODY_GLSL

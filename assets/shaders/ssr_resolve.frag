@@ -37,6 +37,20 @@ layout(set = 0, binding = 2) uniform sampler2D u_depth;       // NEAREST -- rast
 // Shared accumulation count (TemporalHistoryPass::kFormat, .g = count), or that pass's 1x1
 // neutral texture when it never ran -- see the fallback branch in main().
 layout(set = 0, binding = 3) uniform sampler2D u_count;
+// Trace hit distance (world units, 0 = miss; R16F at trace resolution -- the 1x1 zero image for
+// the SSGI chain), the G-buffer velocity (G4), and G-buffer normal / position-roughness. All
+// NEAREST; the G-buffer ones are full resolution and tapped at in_uv.
+layout(set = 0, binding = 4) uniform sampler2D u_hit_dist;
+layout(set = 0, binding = 5) uniform sampler2D u_velocity;
+layout(set = 0, binding = 6) uniform sampler2D g_normal_metallic;
+layout(set = 0, binding = 7) uniform sampler2D g_position_roughness;
+
+// Set 1: camera, for the virtual-point reprojection's view direction and its projection.
+layout(set = 1, binding = 0) uniform CameraUBO {
+    mat4 view;
+    mat4 proj;
+    vec3 camera_pos;
+} camera;
 
 layout(push_constant) uniform PushConstants {
     // Current clip space -> previous frame's clip space, composed in double precision on the CPU.
@@ -59,6 +73,13 @@ layout(push_constant) uniform PushConstants {
     // history is then held verbatim, which is what makes a resting image byte-static without
     // ever converging onto a single noisy draw.
     int   frozen;
+    // 1: reproject the surface through u_velocity, so a MOVING reflector keeps its history
+    // (the camera matrix alone only knows where static geometry went).
+    int   use_velocity;
+    // Share of the virtual-point reprojection for mirror-like surfaces (scaled down by roughness
+    // below). 0 = reproject by the reflecting surface only, the right answer for a diffuse
+    // bounce but not for a sharp reflection, which moves with the reflected object's parallax.
+    float virtual_blend;
 } pc;
 
 /// Slack added to the variance band before clipping. The band is `mean +/- gamma*sigma`, and on a
@@ -141,6 +162,51 @@ void main() {
     }
 
     vec2 prev_uv = ssr_ndc_to_uv(prev_clip.xy / prev_clip.w);
+
+    if (pc.use_velocity != 0 && depth < 1.0) {
+        vec4 vel = texture(u_velocity, in_uv);
+        // No previous pose (newly spawned, or behind last frame's eye): no history at all.
+        if (vel.z <= 0.0) {
+            out_color = spatial_fallback;
+            return;
+        }
+        // Sub-0.05 px motion is fp32 re-projection noise, not motion (as ssao_resolve.frag).
+        vec2 gsize = vec2(textureSize(u_velocity, 0));
+        vec2 v = vel.xy;
+        if (length(v * gsize) < 0.05) v = vec2(0.0);
+        vec2 surface_prev_uv = in_uv - v;
+        // The surface moved only with the camera when both reprojections agree.
+        bool surface_static = length((surface_prev_uv - prev_uv) * gsize) < 0.5;
+        prev_uv = surface_prev_uv;
+
+        // Reflection parallax (Unreal's SSR temporal reprojection by the reflected point): a
+        // mirror's reflection is an image `travel` BEHIND the surface along the view ray, and
+        // under camera motion it moves like that virtual point, not like the mirror. Reprojecting
+        // by the surface smears a sharp reflection along the motion; by the virtual point it stays
+        // attached to what it reflects. Rough reflections are a blur with no single image, so
+        // they keep the surface reprojection. Only for a static reflector -- a moving one's
+        // virtual point would need the reflected object's own motion too.
+        if (pc.virtual_blend > 0.0 && surface_static) {
+            float travel = texture(u_hit_dist, in_uv).r;
+            vec4  pr     = texture(g_position_roughness, in_uv);
+            float wv     = pc.virtual_blend * (1.0 - smoothstep(0.1, 0.4, pr.a));
+            if (travel > 0.0 && wv > 0.0) {
+                // Clip-space arithmetic relative to the surface, so no world-scale position ever
+                // enters a projection: clip_surf rebuilt from NDC and the surface's own clip w
+                // (its linear depth under perspective, 1 under orthographic), plus the projected
+                // view-ray offset, which carries only the view's rotation.
+                vec3  Vdir      = normalize(pr.xyz - camera.camera_pos);
+                float w_surf    = (camera.proj[3][3] > 0.5) ? 1.0 : vel.w;
+                vec4  clip_surf = vec4(ndc, depth, 1.0) * w_surf;
+                vec4  clip_virt = clip_surf + camera.proj * (camera.view * vec4(Vdir * travel, 0.0));
+                vec4  prev_virt = pc.reproject * clip_virt;
+                if (prev_virt.w > 0.0) {
+                    vec2 virt_uv = ssr_ndc_to_uv(prev_virt.xy / prev_virt.w);
+                    prev_uv = mix(prev_uv, virt_uv, wv);
+                }
+            }
+        }
+    }
 
     if (any(lessThan(prev_uv, vec2(0.0))) || any(greaterThan(prev_uv, vec2(1.0)))) {
         out_color = spatial_fallback;

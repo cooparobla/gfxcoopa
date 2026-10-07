@@ -24,11 +24,19 @@ layout(set = 0, binding = 2) uniform sampler2D g_position_roughness;
 
 layout(push_constant) uniform BlurPushConstants {
     float radius;  // ssr_blur_radius -- sigma for the plane-distance weight scales with it
-    int   flags;   // bit 0: 3x3 footprint instead of 5x5; bit 1: write 0 where every tap is 0
+    int   flags;   // bit 0: 3x3 footprint instead of 5x5; bit 1: write 0 where every tap is 0;
+                   // bit 2: roughness-aware (specular chain)
 } pc;
 
-#define BLUR_FLAG_LIGHT     1
-#define BLUR_FLAG_ZERO_SKIP 2
+#define BLUR_FLAG_LIGHT           1
+#define BLUR_FLAG_ZERO_SKIP       2
+// Specular reflections are only as blurry as the surface is rough: a mirror's reflection must
+// stay pixel-sharp, and a box blur there is pure loss. With this flag the blurred result is
+// blended in by the centre's roughness (none below 0.05, full from 0.4), taps of a different
+// roughness are down-weighted, and a tap whose hit/miss state differs from the centre's is
+// skipped so a sharp reflection's edge is not smeared into a neighbouring miss.
+#define BLUR_FLAG_ROUGHNESS_AWARE 4
+const float kRoughnessSigma = 0.1;
 
 void main() {
     // u_ssr is sampled at ITS OWN native resolution (texelFetch, pixel-exact -- this is the
@@ -82,7 +90,15 @@ void main() {
         }
     }
 
-    vec3 Pc = texture(g_position_roughness, in_uv).rgb;
+    vec4 pr_c = texture(g_position_roughness, in_uv);
+    vec3 Pc   = pr_c.rgb;
+    bool rough_aware = (pc.flags & BLUR_FLAG_ROUGHNESS_AWARE) != 0;
+    float blur_amount = rough_aware ? smoothstep(0.05, 0.4, pr_c.a) : 1.0;
+    if (blur_amount <= 0.0) {
+        out_ssr = center;
+        return;
+    }
+    bool center_hit = center.a > 0.0;
 
     // Plane-distance sigma scales with the blur radius -- same scale-relative philosophy as
     // ssao_blur.frag / ssr_common.glsl (world-space tuning survives the scene/camera being
@@ -112,18 +128,25 @@ void main() {
             // the only thing that varies continuously across a moving silhouette is each real
             // tap's own Pt (via wd), which is already smooth.
             vec3 Nt = tap_is_background ? Nc : normalize(Nt_raw);
-            vec3 Pt = tap_is_background ? Pc : texture(g_position_roughness, tap_uv).rgb;
+            vec4 pr_t = tap_is_background ? pr_c : texture(g_position_roughness, tap_uv);
+            vec3 Pt = pr_t.rgb;
             vec4 tap_val = tap_is_background ? center : texelFetch(u_ssr, tap_px, 0);
 
             float wn = pow(max(dot(Nc, Nt), 0.0), 16.0);
             float d  = dot(Nc, Pt - Pc);
             float wd = exp(-(d * d) / (2.0 * sigma * sigma));
             float w  = wn * wd;
+            if (rough_aware) {
+                float dr = pr_t.a - pr_c.a;
+                w *= exp(-(dr * dr) / (2.0 * kRoughnessSigma * kRoughnessSigma));
+                if ((tap_val.a > 0.0) != center_hit) w = 0.0;
+            }
 
             sum  += tap_val * w;
             wsum += w;
         }
     }
 
-    out_ssr = (wsum > 1e-5) ? (sum / wsum) : center;
+    vec4 blurred = (wsum > 1e-5) ? (sum / wsum) : center;
+    out_ssr = mix(center, blurred, blur_amount);
 }
