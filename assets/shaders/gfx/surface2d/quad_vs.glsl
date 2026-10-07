@@ -2,8 +2,7 @@
 #define GFX_SURFACE2D_QUAD_VS_GLSL
 
 // gfx/surface2d/quad_vs.glsl -- the one piece of math every 2D textured-quad vertex shader
-// shares: an affine transform (scale + offset) into NDC, plus the Vulkan Y-flip every
-// consumer was already doing by hand.
+// shares: an affine transform (scale + offset) into NDC, plus the Vulkan Y-flip.
 //
 // Not a backbone in the gfx/surface/*.glsl sense (no #include-and-inherit-a-main(), no
 // hook/struct-mutation machinery) -- a push_constant block can only be declared ONCE per
@@ -18,7 +17,8 @@
 //
 // Each consumer computes its own scale/offset at the C++ push-constant-fill call site (one
 // multiply-add) and declares a push_constant block starting with `vec2 scale; vec2 offset;`
-// before calling gfx_quad_2d_transform() -- see ui.vert/sprite.vert for the two examples.
+// before calling gfx_quad_2d_transform() -- see uicoopa's ui.vert and pixengine's sprite.vert
+// for the two examples.
 vec4 gfx_quad_2d_transform(vec2 pos, vec2 scale, vec2 offset) {
     vec2 ndc = pos * scale + offset;
     return vec4(ndc.x, -ndc.y, 0.0, 1.0);

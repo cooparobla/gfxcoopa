@@ -13,8 +13,8 @@
 
 /// Parallax-corrects a reflection vector against the probe's world-space AABB.
 vec3 ibl_parallax_correct(vec3 P, vec3 R, vec3 box_min, vec3 box_max, vec3 probe_pos) {
-    // Sign-PRESERVING guard against division by zero. A previous
-    // `max(R, vec3(0.0001))` collapsed every negative component of R to
+    // Sign-PRESERVING guard against division by zero. A plain
+    // `max(R, vec3(0.0001))` would collapse every negative component of R to
     // +1e-4, flipping that slab's near/far distances and producing a wildly
     // wrong t for any ray pointing down a negative axis -- i.e. for most of
     // the hemisphere. sign() is avoided because sign(0.0) == 0.0 would
@@ -36,8 +36,9 @@ vec3 ibl_parallax_correct(vec3 P, vec3 R, vec3 box_min, vec3 box_max, vec3 probe
 
 /// Split-sum indirect specular from a parallax-corrected, prefiltered probe.
 /// F is passed in (rather than derived from albedo/metallic) so every call
-/// site can agree bit-for-bit on the Fresnel term -- which is what
-/// ssr_composite.frag's env_specular subtraction depends on.
+/// site can agree bit-for-bit on the Fresnel term -- which is what an SSR
+/// composite's env_specular subtraction (e.g. toyengine's ssr_composite.frag)
+/// depends on.
 vec3 ibl_specular_probe(samplerCube refl_map, sampler2D brdf_lut,
                         vec3 P, vec3 N, vec3 V, float roughness, vec3 F,
                         vec3 box_min, vec3 box_max, vec3 probe_pos,
@@ -54,7 +55,7 @@ vec3 ibl_specular_probe(samplerCube refl_map, sampler2D brdf_lut,
     return prefiltered * (F * brdf.x + brdf.y);
 }
 
-// Must match coopa::gfx::engine::MAX_REFLECTION_PROBES (gfxcoopa/engine/gi_data.h).
+// Must match coopa::gfx::engine::MAX_REFLECTION_PROBES (gfxcoopa/engine/gi/gi_data.h).
 #define MAX_REFLECTION_PROBES 4
 
 /// Plain (non-opaque) per-probe data, mirroring ReflectionProbeUniforms
@@ -94,8 +95,8 @@ float ibl_probe_weight(vec3 P, ReflectionProbeData pr) {
 /// refl_map0..3 are separately-named bindings, not a sampler array: this
 /// device does not enable shaderSampledImageArrayDynamicIndexing, so a
 /// dynamically-indexed samplerCube[] would be illegal here. Each is sampled
-/// with a compile-time-constant index, matching how point_shadow_map_0..3
-/// are already handled in deferred_lighting.frag/pbr.frag.
+/// with a compile-time-constant index, the same way point-shadow cubemaps
+/// are bound as separately-named samplers.
 vec3 ibl_specular_probes_blended(
     samplerCube refl_map0, samplerCube refl_map1, samplerCube refl_map2, samplerCube refl_map3,
     sampler2D brdf_lut,

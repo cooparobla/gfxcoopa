@@ -1,6 +1,7 @@
 /**
  * @file fog_pass.h
- * @brief Fullscreen Unity-style fog composite (see assets/shaders/fog.frag).
+ * @brief Fullscreen Unity-style fog composite (the caller supplies fog.frag; see
+ *        toyengine's assets/shaders/fog.frag).
  *
  * Follows PixelStylizePass's shape almost line for line -- the closest existing
  * pass (fullscreen triangle, reads scene colour + G-buffer, owns its own
@@ -48,9 +49,9 @@ public:
      * @param target_pass Render pass of the (separate) HDR target this pass writes into.
      * @param fog_ubo    The FogData's uniform buffer (see engine/data/fog_data.h). Bound
      *                   once here, at set 1 binding 0 -- like camera_set_/light_set_ in
-     *                   PbrRenderPipeline, the buffer's VkBuffer handle never changes
+     *                   blendy's PbrRenderPipeline, the buffer's VkBuffer handle never changes
      *                   after creation, so only its per-frame upload() needs repeating.
-     * @param vert_spv   Fullscreen-triangle vertex shader (the shared tonemapping.vert).
+     * @param vert_spv   Fullscreen-triangle vertex shader (e.g. toyengine's fullscreen.vert).
      * @param frag_spv   fog.frag.
      */
     FogPass(coopa::gfx::core::Device& device,
@@ -70,7 +71,7 @@ public:
     /**
      * @brief Rebinds the three source images. Called every frame the pass runs, since
      * scene_color may be a different view depending on whether SSR ran this frame
-     * (see PbrRenderPipeline's hdr_source_view).
+     * (see blendy's PbrRenderPipeline's hdr_source_view).
      *
      * g_normal/g_position use the nearest sampler this pass owns, not linear: linear
      * filtering would blend world positions across silhouette edges, producing a wrong

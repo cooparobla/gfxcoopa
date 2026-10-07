@@ -52,8 +52,8 @@ public:
         create_search_texture_(cmd_pool);
         create_area_texture_(cmd_pool);
 
-        // Linear + clamp-to-edge, matching the raw ctor this replaces (its default mipmap_mode
-        // was NEAREST, moot here since both textures are single-mip -- max_lod=0).
+        // Linear + clamp-to-edge. mipmap_mode is moot (NEAREST) since both textures are
+        // single-mip -- max_lod=0.
         coopa::gfx::SamplerDesc desc;
         desc.min = desc.mag = coopa::gfx::Filter::Linear;
         desc.mipmap  = coopa::gfx::MipmapMode::Nearest;

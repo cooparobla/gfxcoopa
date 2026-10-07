@@ -56,8 +56,7 @@ public:
      * @brief Initializes GLFW and creates a Vulkan-compatible window.
      *
      * GLFW_CLIENT_API is set to GLFW_NO_API so no implicit OpenGL context
-     * is created. The window is non-resizable by default; call
-     * set_resizable(true) before construction or use the extended constructor.
+     * is created. The window is non-resizable unless `resizable` is true.
      *
      * A `visible = false` window is never mapped by the window system, so it
      * can neither appear on screen nor take input focus -- but it still owns a

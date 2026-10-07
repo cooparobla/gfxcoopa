@@ -50,9 +50,9 @@ public:
     /// 64 bytes -- the first 32 (through alpha_cutoff) are byte-identical to the first 32
     /// bytes of GBufferPipeline::PushConstants (which is 80 bytes total there: it carries a
     /// trailing `emissive` field this struct does not, since emissive is deferred/opaque-only
-    /// -- this forward BLEND path doesn't carry it). model/normal_matrix moved to the
-    /// per-instance vertex stream (data::InstanceData); this block is now shared once per
-    /// instanced batch, not pushed per object.
+    /// -- this forward BLEND path doesn't carry it). The model matrix is streamed per
+    /// instance (data::InstanceData), so this block is pushed once per instanced batch,
+    /// not per object.
     ///
     /// gfx_time/gfx_params are the standard trailing "surface" block every surface-shader
     /// backbone appends (see gfx/surface/gbuffer_vs.glsl and toyengine's
@@ -89,8 +89,8 @@ public:
      * @param camera_layout Set 0.
      * @param light_layout  Set 1.
      * @param shadow_layout Set 2.
-     * @param vert_spv      Vertex shader (reuses pbr.vert.spv -- see plan/transparency docs).
-     * @param frag_spv      Fragment shader (transparent.frag.spv).
+     * @param vert_spv      Vertex shader (e.g. toyengine's transparent.vert.spv).
+     * @param frag_spv      Fragment shader (e.g. toyengine's transparent.frag.spv).
      * @param extra         Optional trailing sets (e.g. GI), appended after set 2.
      * @param extra_pc_bytes Additional bytes to reserve past PushConstants' own
      *                      [0, sizeof(PushConstants)) -- for a consumer whose transparent.frag
@@ -139,10 +139,9 @@ public:
         extra_first_set_ = static_cast<uint32_t>(layouts_.size());
         layouts_.insert(layouts_.end(), extra_.layouts.begin(), extra_.layouts.end());
 
-        // Deliberately AFTER extra: going from 7 bound sets (0-6, today's max) to 8 here is not
-        // a new class of failure -- Vulkan's guaranteed maxBoundDescriptorSets minimum is only
-        // 4, so a device that couldn't do 8 already couldn't run this pass's existing 7-set
-        // layout.
+        // Deliberately AFTER extra: with up to 7 sets ahead of it (0-6) this makes 8. Vulkan's
+        // guaranteed maxBoundDescriptorSets minimum is only 4, so a device that can't bind 8
+        // couldn't bind the 7 without it either.
         material_set_index_ = static_cast<uint32_t>(layouts_.size());
         if (material_layout != nullptr) {
             layouts_.push_back(material_layout);

@@ -55,7 +55,7 @@ namespace data {
 
 /**
  * @struct Vertex
- * @brief Interleaved per-vertex data for the toon and outline pipelines.
+ * @brief Interleaved per-vertex data (vertex binding 0) for every mesh pipeline.
  */
 struct Vertex {
     glm::vec3 position; /**< Object-space vertex position. */

@@ -16,7 +16,7 @@ namespace engine {
 /**
  * @struct IndirectParams
  * @brief The indirect-lighting terms a lighting pass ADDS and an SSR
- *        composite SUBTRACTS (see gfx/indirect_specular.glsl and
+ *        composite SUBTRACTS (see toyengine's gfx/indirect_specular.glsl and
  *        SsrPass::CompositePushConstants).
  *
  * Held in one struct, and fed to both the lighting pass and the SSR pass

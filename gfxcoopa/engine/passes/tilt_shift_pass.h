@@ -1,6 +1,6 @@
 /**
  * @file tilt_shift_pass.h
- * @brief Diorama-style tilt-shift blur (see assets/shaders/tilt_shift.frag):
+ * @brief Diorama-style tilt-shift blur (the caller's tilt_shift.frag, e.g. toyengine's):
  *        a horizontal sharp band with the top and bottom progressively blurred,
  *        driven purely by screen position (no depth sampling).
  *

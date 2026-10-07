@@ -42,8 +42,9 @@ namespace targets {
  * The tiles share one image, one VkRenderPass and one framebuffer: the cascade loop
  * (record_directional_shadow_() in toyengine's pixel_render_pipeline.h) calls
  * set_cascade_viewport() between draws rather than beginning a pass per cascade. That keeps
- * the sampler a plain sampler2D/sampler2DShadow, so every gfx/shadow_sampling.glsl kernel
- * works on a cascade unchanged -- only the uv remap into the tile is new.
+ * the sampler a plain sampler2D/sampler2DShadow, so every shadow-sampling kernel
+ * (toyengine's gfx/shadow_sampling.glsl) works on a cascade unchanged -- only the uv remap
+ * into the tile is cascade-specific.
  */
 class ShadowMapTarget {
 public:

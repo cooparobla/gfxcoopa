@@ -2,7 +2,9 @@
 
 `gfxcoopa` is a modern, header-only C++20 Vulkan rendering library designed to bring clean RAII ergonomics, low-overhead resource management, and state-of-the-art graphics feature sets to Vulkan applications. Built around dynamic API function loading via Volk and GPU memory management via Vulkan Memory Allocator (VMA), `gfxcoopa` hides low-level Vulkan boilerplate without sacrificing performance or direct hardware control.
 
-The module provides a complete Physically-Based Rendering (PBR) engine incorporating Cook-Torrance BRDF shading (GGX microfacet distribution, Smith masking-shadowing, Schlick Fresnel), 2nd-order (9-coefficient) Spherical Harmonics (SH) Global Illumination probe volumes, Hierarchical Z-Buffer (Hi-Z) Screen-Space Reflections (SSR), directional and omnidirectional point light shadow mapping, multi-mode Anti-Aliasing (Jimenez SMAA 1x Ultra, TAA with temporal accumulation, FXAA 3.11), ACES filmic tonemapping, and GLFW presentation loop integration.
+The `engine` module provides the building blocks of a deferred Physically-Based Rendering (PBR) renderer: a G-buffer, Cook-Torrance deferred lighting, 2nd-order (9-coefficient) Spherical Harmonics (SH) probe volumes and reflection probes, cascaded directional / point / spot shadow maps, raymarched SDF shapes, Hi-Z Screen-Space Reflections (SSR) with an optional SSGI bounce, GTAO-style SSAO, local and froxel volumetrics, fog, bloom, auto exposure, depth of field, tilt-shift, and anti-aliasing (Jimenez SMAA 1x, TAA, FXAA 3.11). The application assembles these passes into its own frame.
+
+**Shaders belong to the caller.** A pass class owns its pipelines, targets and descriptor sets and defines the push-constant layout its shader must match, but takes the compiled `.spv` paths as constructor arguments. gfxcoopa's own `assets/shaders/` holds only the shaders its own code loads (the GI bake: `brdf_lut`, `env_prefilter`, `probe_capture`, `probe_sky_background`, `pbr.vert`; `SmaaPass`: `smaa_*`), the `test.vert`/`test.frag` pair, and the shared `gfx/` headers (`brdf`, `ibl`, `sky`, `spot_light`, `surface2d/quad_vs`) that every consumer's shaders reach through `-I`. Shader names mentioned in pass docs (`ssr.frag`, `fog.frag`, ...) are the caller's shaders; toyengine ships one set.
 
 ---
 
@@ -19,6 +21,11 @@ The module provides a complete Physically-Based Rendering (PBR) engine incorpora
                                             │
                                             ▼
                                 ┌───────────────────────┐
+                                │          app          │  (Context: bring-up + frame loop)
+                                └───────────┬───────────┘
+                                            │
+                                            ▼
+                                ┌───────────────────────┐
                                 │     presentation      │  (Window, Renderer)
                                 └───────────┬───────────┘
                                             │
@@ -26,7 +33,7 @@ The module provides a complete Physically-Based Rendering (PBR) engine incorpora
                     ▼                       ▼                       ▼
         ┌───────────────────────┐ ┌───────────────────┐ ┌───────────────────────┐
         │        engine         │ │     pipeline      │ │        command        │
-        │(Targets, Mesh, Lights)│ │(Shaders, Passes)  │ │(CmdPool, CmdBuffer)   │
+        │(Passes, Targets, Data)│ │(Shaders, Pipeline)│ │(CmdPool, CmdBuffer)   │
         └───────────┬───────────┘ └─────────┬─────────┘ └───────────┬───────────┘
                     │                       │                       │
                     └───────────────────────┼───────────────────────┘
@@ -42,7 +49,7 @@ The module provides a complete Physically-Based Rendering (PBR) engine incorpora
                                             │
                                             ▼
                                 ┌───────────────────────┐
-                                │         util          │  (Volk, Error, Debug)
+                                │         util          │  (Volk, Error, Debug, Readback)
                                 └───────────┬───────────┘
                                             │
                                             ▼
@@ -50,61 +57,34 @@ The module provides a complete Physically-Based Rendering (PBR) engine incorpora
                                 │      Vulkan API       │
                                 └───────────────────────┘
 
+   types/ (Format, SamplerDesc, VertexLayout, TextureView, ...) is Vulkan-free and usable from every layer.
+
 ┌──────────────────────────────────────────────────────────────────────────────────────────┐
-│                             ENGINE RENDER PIPELINE FLOW                                  │
+│                     TYPICAL DEFERRED FRAME (assembled by the application)                │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
-                                             │
-                                             ▼
-                         ┌───────────────────────────────────────┐
-                         │       coopa::gfx::engine::Mesh        │
-                         │ ── CameraUBO, LightUBO, ModelPush     │
-                         └───────────────────┬───────────────────┘
-                                             │
-      ┌──────────────────────┬───────────────┴───────────────┬──────────────────────┐
-      ▼                      ▼                               ▼                      ▼
-┌───────────┐      ┌──────────────────┐           ┌───────────────────┐    ┌──────────────────┐
-│ SHADOWS   │      │ G-BUFFER PASS    │           │ GI BAKING SYSTEM  │    │ VULKAN DESCR.    │
-├───────────┤      ├──────────────────┤           ├───────────────────┤    ├──────────────────┤
-│ Direction │      │ G0: Albedo + AO  │           │ SH Ray Probe Bakes│    │ Set 0: Camera UBO│
-│  - 2048²  │      │ G1: Normal + Met │           │ 9 L2 SH Coeffs    │    │ Set 1: Light UBO │
-│ Point Cube│      │ G2: Pos + Rough  │           │ BRDF LUT Bakes    │    │ Set 2: Shadows   │
-│  - 512²   │      │ Depth Attachment │           │ Reflection Maps   │    │ Set 3: GI SSBO   │
-└─────┬─────┘      └─────────┬────────┘           └─────────┬─────────┘    └─────────┬────────┘
-      │                      │                              │                        │
-      │   ┌──────────────────┴──────────────────────────────┴────────────────────────┘
-      ▼   ▼
-┌──────────────────────────────────────────────────────────────────────────────────────────┐
-│                         DEFERRED LIGHTING & SKYBOX PASS (HDR PASS)                       │
-├──────────────────────────────────────────────────────────────────────────────────────────┤
-│  • Target Format: VK_FORMAT_R16G16B16A16_SFLOAT Offscreen Target                        │
-│  • Shading: Cook-Torrance BRDF (GGX Distribution + Smith Masking + Schlick Fresnel)     │
-│  • Indirect Lighting: Spherical Harmonics L2 Cosine-Lobe Convolution                     │
-└──────────────────────────────────────────┬───────────────────────────────────────────────┘
-                                           │
-                     ┌─────────────────────┴─────────────────────┐
-                     ▼                                           ▼
-┌──────────────────────────────────────────┐   ┌──────────────────────────────────────────┐
-│        HI-Z & SSR PASS (OPTIONAL)        │   │        SCENE COLOR MIP CHAIN PASS        │
-├──────────────────────────────────────────┤   ├──────────────────────────────────────────┤
-│  • Hi-Z Mipmap Pyramid Construction      │   │  • Prefiltered Scene Color Downsampling  │
-│  • Hierarchical Ray-Marching SSR         │   │  • Glossy Cone Tapping Mip Chain         │
-└────────────────────┬─────────────────────┘   └────────────────────┬─────────────────────┘
-                     │                                              │
-                     └─────────────────────┬────────────────────────┘
-                                           │
-                                           ▼
-┌──────────────────────────────────────────────────────────────────────────────────────────┐
-│                        TONEMAPPING & ANTI-ALIASING POST-PROCESS PASS                     │
-├──────────────────────────────────────────────────────────────────────────────────────────┤
-│  • ACES Filmic Tone Curve & Gamma 2.2 Correction                                         │
-│  • Anti-Aliasing Modes: SMAA 1x Ultra (Jimenez) / TAA (Halton Jitter) / FXAA 3.11         │
-└──────────────────────────────────────────┬───────────────────────────────────────────────┘
-                                           │
-                                           ▼
-                         ┌───────────────────────────────────────┐
-                         │           Vulkan Swapchain            │
-                         │      (Present Frame to Display)       │
-                         └───────────────────────────────────────┘
+
+  ShadowMapTarget        ShadowPipeline + SdfShadowPass   (directional cascades, point cubes, spot)
+        │
+  GBufferTarget          GBufferPipeline + SdfGBufferPass
+        │                G0 albedo+AO · G1 normal+metallic · G2 position+roughness
+        │                G3 emissive · G4 velocity · D32 depth
+        │
+  HiZPass / SsaoPass     depth pyramid, GTAO + temporal resolve + bilateral blur
+        │
+  DeferredLightingPass   Cook-Torrance direct light + SH / reflection-probe indirect ──► HDR target
+        │
+  TemporalHistoryPass    shared history-validity / sample-count buffer
+  SceneColorMipPass      prefiltered HDR mip chain for glossy cone tracing
+  SsrPass                Hi-Z trace, resolve, blur, (SSGI), composite
+        │
+  TransparentPass        forward BLEND meshes; SdfForwardPass for BLEND SDFs
+  FogPass / VolumetricsPass / FroxelVolumetricsPass
+        │
+  ExposurePass · BloomPass · DofPass · TiltShiftPass
+        │
+  TaaPass · SmaaPass · FxaaPass · PixelStylizePass
+        │
+  PresentPass            final LDR image ──► swapchain
 ```
 
 ---
@@ -113,366 +93,406 @@ The module provides a complete Physically-Based Rendering (PBR) engine incorpora
 
 | Submodule | Namespace | Description |
 |---|---|---|
+| `app` | `coopa::gfx::app` | `Context`: window-to-swapchain bring-up, resize handling, frame timing and the main loop. |
 | [`command`](command/README.md) | `coopa::gfx::command` | Command buffers, command pools, and CPU/GPU sync primitives (Fences, Semaphores). |
 | [`core`](core/README.md) | `coopa::gfx::core` | Vulkan instance initialization, GLFW surface integration, physical/logical device selection, and swapchain management. |
-| [`engine`](engine/README.md) | `coopa::gfx::engine` | PBR rendering engine, offscreen targets, shadow targets, SH probe GI volume baking, Hi-Z SSR, and AA passes. |
-| [`memory`](memory/README.md) | `coopa::gfx::memory` | Vulkan Memory Allocator (VMA) RAII integration, GPU buffer management, and image allocation/transitions. |
-| [`pipeline`](pipeline/README.md) | `coopa::gfx::pipeline` | Shaders, render passes, descriptor pools/layouts/sets, and graphics pipeline state configuration. |
+| `detail` | `coopa::gfx::detail` | Internal Vk/GLFW conversions for the sealed types. Not for consumers. |
+| [`engine`](engine/README.md) | `coopa::gfx::engine` | Render passes, targets, GPU data blocks, scene components, asset loaders, GI, and engine utilities. |
+| [`memory`](memory/README.md) | `coopa::gfx::memory` | Vulkan Memory Allocator (VMA) RAII integration, GPU buffers, images, and staged image upload. |
+| [`pipeline`](pipeline/README.md) | `coopa::gfx::pipeline` | Shaders, shader search paths, surface-shader registry, render passes, descriptors, and graphics pipelines. |
 | [`presentation`](presentation/README.md) | `coopa::gfx::presentation` | GLFW windowing wrapper and multi-buffered frame orchestration (`Renderer::draw_frame()`). |
-| [`util`](util/README.md) | `coopa::gfx::util` | Debug messenger validation layers, format helpers, Volk dynamic loader initialization, and error macros. |
+| `types` | `coopa::gfx` | Vulkan-free vocabulary (`Format`, `SamplerDesc`, `VertexLayout`, `TextureView`, enums, clear values). |
+| [`util`](util/README.md) | `coopa::gfx::util` | Debug messenger, error checks, format helpers, Volk initialization, and GPU image readback. |
 
 ---
 
-## Descriptor Set Layout Architecture
+## Descriptor Set Conventions
 
-The `engine` rendering system organizes Vulkan descriptor set layouts into four specialized sets:
+The lit passes (`DeferredLightingPass`, `TransparentPass`, `SdfForwardPass`) share a leading set order; the application builds and owns these sets and passes their layouts in:
 
-| Set | Owner / Source | Contents & Bindings | Stage Flags |
-|---|---|---|---|
-| **Set 0** | `CameraUBO` | Camera view/projection matrices, jittered projection, and eye position (UBO) | Vertex & Fragment |
-| **Set 1** | `LightUBO` | Directional light vectors/colors, shadow matrices, and point light array (UBO) | Fragment |
-| **Set 2** | `ShadowMapTarget` | 2D directional shadow map + 4 omnidirectional cubemap shadow depth samplers | Fragment |
-| **Set 3** | `GiSystem` | SH Light Probe SSBO, GI Uniform UBO, BRDF Integration LUT, Reflection Cubemap | Fragment |
+| Set | Owner / Source | Contents |
+|---|---|---|
+| **Set 0** | `CameraUBO` | `CameraData`: view, projection (TAA-jittered), eye position, and the previous view/projection plus jitter for reprojection |
+| **Set 1** | `LightData` | `LightUBO`: directional light and cascades, up to 16 point and 8 spot lights, sky colours, local-shadow records |
+| **Set 2** | application | Shadow map samplers from `ShadowMapTarget` (layout defined by the caller's shaders) |
+| **Set 3+** | `ExtraSets` | Optional caller-supplied sets, e.g. `GiSystem::layout()`: GI uniforms (0), SH probe SSBO (1), BRDF LUT (2), reflection cubemaps (3-6), reflection probe UBO (7) |
+| **Last** | the pass | The pass's own set (e.g. the G-buffer + SSAO images for `DeferredLightingPass`) |
 
 ---
 
 ## File Breakdown
 
+### App Submodule (`coopa::gfx::app`)
+
+#### [context.h](app/context.h)
+- **Role**: One-object Vulkan bring-up and main loop.
+- **Key Classes / Structs**: `Context`, `ContextConfig`, `FrameCallbacks`.
+- **Details**: Owns Window → Instance → Surface → Device → Allocator → Swapchain → CommandPool → RenderPass → Renderer in order. Installs the full resize sequence, reads `ONESHOT`/`MAX_FRAMES` via `ContextConfig::from_env()`, and exposes `poll()`, `frame()`, `run()` and `submit_once()`.
+
+---
+
 ### Command Submodule (`coopa::gfx::command`)
 
 #### [command_buffer.h](command/command_buffer.h)
-- **Role**: Lightweight RAII wrapper around `VkCommandBuffer` for recording graphics, compute, and transfer commands.
+- **Role**: Non-owning wrapper around `VkCommandBuffer` with named recording methods.
 - **Key Classes / Structs**: `CommandBuffer`.
-- **Details**: Exposes inline methods for render pass recording (`begin_render_pass`/`end_render_pass`), pipeline binding, descriptor set binding, vertex/index buffer binding, viewport/scissor dynamic states, push constants, pipeline barriers, and buffer/image copy commands.
+- **Details**: Render pass begin/end, pipeline and descriptor-set binding, vertex/index buffers, viewport/scissor, typed push constants, draws, copies, and `transition()` for `memory::Image` layout changes.
 
 #### [command_pool.h](command/command_pool.h)
-- **Role**: RAII manager for `VkCommandPool` allocation and execution of transient single-use command buffers.
+- **Role**: RAII manager for `VkCommandPool`.
 - **Key Classes / Structs**: `CommandPool`.
-- **Details**: Handles allocation of primary/secondary command buffers, pool resetting, and provides a synchronous lambda helper `single_use()` for one-time GPU transfer and copy operations.
+- **Details**: `allocate()` for per-frame command buffers, `begin_single_use()`/`end_single_use()`, and `submit_once()`, which records a lambda into a one-shot buffer and waits for it.
 
 #### [sync.h](command/sync.h)
 - **Role**: RAII wrappers for Vulkan synchronization primitives.
 - **Key Classes / Structs**: `Fence`, `Semaphore`.
-- **Details**: `Fence` manages CPU-GPU execution synchronization with `wait()` and `reset()` helpers; `Semaphore` handles GPU-GPU queue submission signaling for swapchain image acquire and presentation.
+- **Details**: `Fence` provides `wait()` and `reset()` for CPU-GPU synchronization; `Semaphore` handles GPU-GPU signaling for swapchain acquire and present.
 
 ---
 
 ### Core Submodule (`coopa::gfx::core`)
 
 #### [device.h](core/device.h)
-- **Role**: Manages physical GPU selection and logical `VkDevice` instantiation.
+- **Role**: Physical GPU selection and logical `VkDevice` creation.
 - **Key Classes / Structs**: `Device`, `QueueFamilyIndices`.
-- **Details**: Automatically rates physical GPUs (prioritizing discrete graphics cards), queries queue families for graphics and present support, creates logical devices with required extensions (e.g. `VK_KHR_swapchain`), retrieves queues, and enforces idle wait on teardown (`wait_idle()`).
+- **Details**: Scores physical devices (discrete GPUs preferred), finds graphics and present queue families, enables `VK_KHR_swapchain` (and `VK_KHR_portability_subset` on MoltenVK), and waits idle on teardown.
 
 #### [instance.h](core/instance.h)
-- **Role**: Manages Vulkan instance lifecycle (`VkInstance`) and Volk loader initialization.
+- **Role**: Vulkan instance lifecycle (`VkInstance`).
 - **Key Classes / Structs**: `Instance`.
-- **Details**: Triggers `volkInitialize()` upon creation, queries required GLFW window extensions, enables `VK_LAYER_KHRONOS_validation` in debug builds, and sets up instance-level API layers.
+- **Details**: Initializes volk, enables the GLFW-required extensions plus `VK_KHR_portability_enumeration` when the loader offers it (MoltenVK), and, when validation is requested, enables `VK_LAYER_KHRONOS_validation` and `VK_EXT_debug_utils` with a `DebugMessenger`.
 
 #### [surface.h](core/surface.h)
-- **Role**: Encapsulates GLFW window surface integration (`VkSurfaceKHR`).
-- **Key Classes / Structs**: `Surface`, `SwapChainSupportDetails`.
-- **Details**: Uses `glfwCreateWindowSurface` to bind Vulkan to the platform window and queries surface capabilities, supported surface formats, and presentation modes.
+- **Role**: GLFW window surface (`VkSurfaceKHR`).
+- **Key Classes / Structs**: `Surface`, `SwapchainSupportDetails`.
+- **Details**: Creates the surface with `glfwCreateWindowSurface` and queries capabilities, formats and present modes.
 
 #### [swapchain.h](core/swapchain.h)
-- **Role**: Encapsulates `VkSwapchainKHR` creation, image view management, and dynamic recreation.
+- **Role**: `VkSwapchainKHR` creation, image views, and recreation.
 - **Key Classes / Structs**: `Swapchain`.
-- **Details**: Chooses optimal surface format (`VK_FORMAT_B8G8R8A8_SRGB`), present mode (`VK_PRESENT_MODE_MAILBOX_KHR` or `FIFO`), extent resolution, builds swapchain image views, and handles full recreation (`recreate()`) on window resize events.
+- **Details**: Prefers `B8G8R8A8_SRGB` / `SRGB_NONLINEAR`; uses FIFO when `vsync` is true, otherwise prefers MAILBOX and falls back to FIFO. `recreate()` rebuilds on resize.
 
 ---
 
 ### Memory Submodule (`coopa::gfx::memory`)
 
 #### [allocator.h](memory/allocator.h)
-- **Role**: RAII wrapper around Vulkan Memory Allocator (`VmaAllocator`).
+- **Role**: RAII wrapper around `VmaAllocator`.
 - **Key Classes / Structs**: `Allocator`.
-- **Details**: Initializes VMA using device and instance handles, providing low-overhead sub-allocated memory management for GPU buffers and textures.
+- **Details**: Initializes VMA from the instance and device handles.
 
 #### [buffer.h](memory/buffer.h)
-- **Role**: RAII abstraction for GPU memory buffers (`VkBuffer` + `VmaAllocation`).
+- **Role**: RAII GPU buffer (`VkBuffer` + `VmaAllocation`).
 - **Key Classes / Structs**: `Buffer`.
-- **Details**: Manages staging buffers, vertex/index buffers, uniform buffers (UBOs), and storage buffers (SSBOs). Provides host-mapping methods (`map()`, `unmap()`, `upload()`) with explicit VMA memory usage flags.
+- **Details**: Factories `vertex()`, `index()`, `uniform()`, `staging()` and `storage()`; `upload()` and `download()` copy through a mapping (or a temporary staging buffer for device-local memory).
 
 #### [image.h](memory/image.h)
-- **Role**: RAII abstraction for GPU images (`VkImage`, `VkImageView`, `VmaAllocation`).
+- **Role**: RAII 2D GPU image (`VkImage`, `VkImageView`, `VmaAllocation`).
 - **Key Classes / Structs**: `Image`.
-- **Details**: Owns a 2D `VkImage` + `VmaAllocation` + `VkImageView` and tracks the `TextureUsage` it was last transitioned to (`current_usage()`). Layout transitions are recorded by `command::CommandBuffer::transition()`; staged pixel upload lives in `memory/image_upload.h`.
+- **Details**: Tracks the `TextureUsage` it was last transitioned to (`current_usage()`); `view_typed()` returns a sealed `TextureView`. Layout transitions are recorded by `command::CommandBuffer::transition()`.
+
+#### [image_upload.h](memory/image_upload.h)
+- **Role**: Staged pixel upload.
+- **Key Classes / Structs**: `upload_image_2d()`.
+- **Details**: Creates a 2D `Image` and fills it from tightly packed host pixels through a staging buffer.
 
 ---
 
 ### Pipeline Submodule (`coopa::gfx::pipeline`)
 
 #### [descriptor.h](pipeline/descriptor.h)
-- **Role**: RAII abstractions for Vulkan descriptor sets, layouts, and pools.
-- **Key Classes / Structs**: `DescriptorSetLayout`, `DescriptorPool`, `DescriptorWriter`.
-- **Details**: `DescriptorSetLayout` configures layout bindings; `DescriptorPool` allocates sets; `DescriptorWriter` provides a builder pattern for updating buffer (`bind_buffer`) and image (`bind_image`) descriptors via `vkUpdateDescriptorSets`.
+- **Role**: Descriptor sets, layouts, pools, and their builders.
+- **Key Classes / Structs**: `DescriptorBinding`, `DescriptorSetLayout`, `DescriptorPool`, `DescriptorSet`, `DescriptorLayoutBuilder`, `DescriptorPoolBuilder`.
+- **Details**: Builders declare uniform/storage buffers, combined samplers and storage images per binding; `DescriptorSet::bind_buffer()`, `bind_storage_buffer()` and `bind_image()` write descriptors in the style of `glBindBufferBase`.
 
 #### [pipeline.h](pipeline/pipeline.h)
-- **Role**: RAII encapsulation of graphics and compute pipelines (`VkPipeline`, `VkPipelineLayout`).
-- **Key Classes / Structs**: `Pipeline`, `PipelineConfig`.
-- **Details**: Provides a builder pattern (`PipelineConfig`) for vertex input bindings, input assembly, rasterization state, multisampling, depth-stencil testing, color blending, dynamic states, and push constant ranges.
+- **Role**: RAII graphics pipeline (`VkPipeline`, `VkPipelineLayout`).
+- **Key Classes / Structs**: `Pipeline`, `PipelineDesc`, `RasterState`, `DepthState`, `BlendState`, `BlendMode`, `PushConstantRange`, `PipelineConfig`.
+- **Details**: `PipelineDesc` is the sealed description (shaders, `VertexLayout`, raster/depth/blend state, descriptor layouts, push constants) with GL-like defaults; `PipelineConfig` is the Vk-typed rasterization config the raw-binding constructors take. Viewport and scissor are always dynamic.
 
 #### [render_pass.h](pipeline/render_pass.h)
 - **Role**: RAII wrapper for `VkRenderPass`.
-- **Key Classes / Structs**: `RenderPass`, `RenderPassBuilder`.
-- **Details**: Simplifies creation of multi-attachment color/depth render passes, subpass descriptions, and subpass dependencies.
+- **Key Classes / Structs**: `RenderPass`.
+- **Details**: One color attachment plus an optional depth attachment, with configurable final layouts and sample count.
 
 #### [shader.h](pipeline/shader.h)
-- **Role**: Encapsulates SPIR-V shader module loading (`VkShaderModule`).
-- **Key Classes / Structs**: `ShaderModule`.
-- **Details**: Loads binary SPIR-V bytecode from file paths and creates shader stage info structures (`VkPipelineShaderStageCreateInfo`).
+- **Role**: SPIR-V shader module loading (`VkShaderModule`).
+- **Key Classes / Structs**: `Shader`.
+- **Details**: Loads a `.spv` file for one `ShaderStage` and provides `stage_info()` for pipeline creation.
+
+#### [shader_library.h](pipeline/shader_library.h)
+- **Role**: Logical shader name → `.spv` path resolver.
+- **Key Classes / Structs**: `ShaderLibrary`.
+- **Details**: Searches an ordered list of directories and returns the first match, so an app's shader directory can shadow another's (`app_over_base()`). Implicitly constructible from a single directory string.
+
+#### [surface_shader.h](pipeline/surface_shader.h)
+- **Role**: Registry of derived surface shaders that materials select by name.
+- **Key Classes / Structs**: `SurfaceShaderDomain`, `SurfaceShaderDesc`, `SurfaceShaderRegistry`.
+- **Details**: Each entry names its G-buffer/transparent and shadow entry points and a cull mode; passes such as `GBufferPipeline`, `ShadowPipeline` and `TransparentPass` build one pipeline variant per entry.
 
 ---
 
 ### Presentation Submodule (`coopa::gfx::presentation`)
 
 #### [renderer.h](presentation/renderer.h)
-- **Role**: High-level double/triple-buffered frame orchestration (`acquire` → `record` → `submit` → `present`).
+- **Role**: Multi-buffered frame orchestration (`acquire` → `record` → `submit` → `present`).
 - **Key Classes / Structs**: `Renderer`.
-- **Details**: Manages `MAX_FRAMES_IN_FLIGHT` (default 2) sets of fences, semaphores, command buffers, and swapchain framebuffers. Detects out-of-date swapchains and invokes user resize callbacks.
+- **Details**: Owns `MAX_FRAMES_IN_FLIGHT` (2) sets of fences, semaphores and command buffers plus the swapchain framebuffers. `draw_frame()` takes a record callback, an optional pre-pass callback and a resize callback; `set_resize_handler()` replaces the built-in resize path.
 
 #### [window.h](presentation/window.h)
-- **Role**: GLFW window creation, event polling, and input handling wrapper.
+- **Role**: GLFW window wrapper and input backend.
 - **Key Classes / Structs**: `Window`.
-- **Details**: Encapsulates GLFW window lifecycle, framebuffer size callbacks, input polling (`should_close()`, `poll_events()`), and window minimization state checking.
+- **Details**: Creates a `GLFW_NO_API` window (optionally hidden), tracks framebuffer resizes, owns the `coopa::input::Input` fed by GLFW callbacks, and sets the window/Dock icon.
+
+---
+
+### Types (`coopa::gfx`, `gfxcoopa/types/`)
+
+Vulkan-free headers that compile against the `coopa::gfx_pure` target; `types.h` includes them all.
+
+- **[clear.h](types/clear.h)**: `Extent2D`, `ClearColor`, `ClearDepthStencil`, `ClearValues`, `ImageRegion`.
+- **[enums.h](types/enums.h)**: `ShaderStage`, `Filter`, `AddressMode`, `MipmapMode`, `CompareOp`, `Topology`, `PolygonMode`, `CullMode`, `FrontFace`, `SampleCount`, `IndexType`, and related state enums.
+- **[format.h](types/format.h)**: `Format` and helpers (`format_from_channels()`, `is_depth()`, `is_srgb()`, ...).
+- **[sampler_desc.h](types/sampler_desc.h)**: `SamplerDesc` with presets (`pixel_art()`, `pixel_art_smooth()`, `shadow()`).
+- **[texture_view.h](types/texture_view.h)**: `TextureView`, an opaque, hashable texture identity handle.
+- **[vertex_layout.h](types/vertex_layout.h)**: `VertexBinding`, `VertexAttribute`, `VertexLayout`.
 
 ---
 
 ### Utility Submodule (`coopa::gfx::util`)
 
 #### [debug_messenger.h](util/debug_messenger.h)
-- **Role**: Vulkan validation layer debug messenger (`VkDebugUtilsMessengerEXT`).
+- **Role**: Validation-layer debug messenger (`VkDebugUtilsMessengerEXT`).
 - **Key Classes / Structs**: `DebugMessenger`.
-- **Details**: Captures Vulkan API warning/error logs and routes formatted debug reports to stdout/stderr.
+- **Details**: Routes validation output to stderr.
 
 #### [error.h](util/error.h)
-- **Role**: Error checking macros and string translation utilities.
-- **Key Classes / Structs**: `GFX_VK_CHECK()`, `vk_result_string()`.
-- **Details**: Throws `std::runtime_error` with source filename and line number when Vulkan API functions return non-success codes.
+- **Role**: Vulkan result checking.
+- **Key Classes / Structs**: `GFX_VK_CHECK()`, `vk_check()`, `vk_result_string()`.
+- **Details**: Throws `std::runtime_error` with context when a Vulkan call does not return `VK_SUCCESS`.
 
 #### [format.h](util/format.h)
-- **Role**: Vulkan format selection helpers.
-- **Key Classes / Structs**: `find_supported_format()`, `find_depth_format()`.
-- **Details**: Queries physical device format properties to select depth/stencil attachment formats (`VK_FORMAT_D32_SFLOAT`, `VK_FORMAT_D24_UNORM_S8_UINT`, etc.).
+- **Role**: OpenGL-style `VkFormat` helpers.
+- **Key Classes / Structs**: `format_from_channels()`, `format_byte_size()`, `format_has_depth()`, `format_has_stencil()`.
+- **Details**: Maps channel counts to formats and answers size/aspect questions about a `VkFormat`.
+
+#### [image_readback.h](util/image_readback.h)
+- **Role**: GPU image download, the mirror of `memory/image_upload.h`.
+- **Key Classes / Structs**: `ImageData`, `read_image()`, `save_image_png()`.
+- **Details**: Copies an image to host memory through a staging buffer and optionally writes it as a PNG.
 
 #### [volk_init.h](util/volk_init.h)
-- **Role**: Dynamic Vulkan loader initialization wrapper.
-- **Key Classes / Structs**: `init_volk()`.
-- **Details**: Calls `volkInitialize()` to dynamically load Vulkan entry points without linking against static Vulkan loader libraries.
+- **Role**: One-time volk initialization.
+- **Key Classes / Structs**: `ensure_volk_initialized()`.
+- **Details**: Loads the Vulkan loader at runtime (searching `$VULKAN_SDK/lib` and Homebrew paths on macOS); called by `Instance`'s constructor.
 
 ---
 
 ### Engine Submodule (`coopa::gfx::engine`)
 
+#### [render_features.h](engine/render_features.h)
+- **Role**: Cross-pass invariants shared by every consumer's render config.
+- **Key Classes / Structs**: `IndirectParams`.
+- **Details**: The indirect-lighting terms the lighting pass adds and the SSR composite subtracts, held in one struct so both passes are fed the same values.
+
+#### Components (`engine/components`)
+
+- **Role**: libcoopa scene components and their YAML parsers.
+- **Key Classes / Structs**: `MeshRenderer` (+ `PBRMaterial`, `AlphaMode`), `CameraComponent`, `DirectionalLightComponent`, `PointLightComponent`, `SpotLightComponent`, `EnvironmentLightComponent`, `ReflectionProbeComponent`, `GiProbeVolumeComponent`, `VolumeComponent`, `SdfRenderer`, `SdfShape`, `RenderableRef`.
+- **Details**: `register_render_components()` ([register.h](engine/components/register.h)) adds a parser for each to libcoopa's scene loader; `gather_renderables()` resolves each renderable object's `MeshRenderer` and `Transform` once.
+
 #### Data Layer (`engine/data`)
 
 ##### [camera_ubo.h](engine/data/camera_ubo.h)
-- **Role**: Camera uniform data structure and host-visible UBO buffer manager.
+- **Role**: Per-frame camera uniform buffer.
 - **Key Classes / Structs**: `CameraData`, `CameraUBO`.
-- **Details**: Uploads 16-byte aligned camera matrices (`view`, `proj`, `view_proj`, `inv_proj`, `inv_view`, `eye_pos`) and sub-pixel snapping jitter offsets for retro/TAA rendering.
+- **Details**: 288-byte std140 block: `view`, `proj`, `view_pos`, then `prev_view`, `prev_proj` and `jitter_ndc` for the G-buffer velocity attachment (`set_reprojection()`).
 
 ##### [light_data.h](engine/data/light_data.h)
-- **Role**: Uniform data structures for directional and point light sources.
-- **Key Classes / Structs**: `DirectionalLightGPU`, `PointLightGPU`, `SpotLightGPU`, `LightDataGPU`, `LightUBO`.
-- **Details**: Manages host-visible UBO allocations storing directional light matrix/color/direction and up to 4 omnidirectional point lights with attenuation parameters.
+- **Role**: Per-frame light uniform buffer.
+- **Key Classes / Structs**: `LightUBO`, `PointLightGPU`, `SpotLightGPU`, `LocalShadowGPU`, `LocalShadowBlock`, `LightData`.
+- **Details**: One directional light with up to 4 shadow cascades, up to 16 point and 8 spot lights, sky gradient colours, and the local-light shadow atlas records.
+
+##### [fog_data.h](engine/data/fog_data.h)
+- **Role**: Global fog uniform buffer for `FogPass`.
+- **Key Classes / Structs**: `FogUBO`, `FogData`.
+
+##### [volumetrics_data.h](engine/data/volumetrics_data.h)
+- **Role**: Uniform buffer for the local-volume passes.
+- **Key Classes / Structs**: `VolumeGPU`, `ScatterLightGPU`, `VolumetricsUBO`, `VolumetricsData`.
+- **Details**: Up to 8 volumes and 4 in-scattering point/spot lights per frame.
+
+##### [sdf_data.h](engine/data/sdf_data.h)
+- **Role**: Per-frame-in-flight buffers describing every `SdfRenderer` and its `SdfShape`s.
+- **Key Classes / Structs**: `SdfData`, `SdfGpuShapeType`, `SdfGpuOp`.
 
 ##### [mesh.h](engine/data/mesh.h)
-- **Role**: GPU-resident mesh data buffer and geometry loading manager.
-- **Key Classes / Structs**: `Vertex`, `Mesh`.
-- **Details**: Defines 3D vertex attributes (position, normal, texcoord, tangent), creates GPU VMA vertex/index buffers, and parses Blender-exported YAML scene format files.
+- **Role**: GPU-resident mesh.
+- **Key Classes / Structs**: `Vertex`, `InstanceData`, `MeshPart`, `MeshLod`, `MeshCpuData`, `Mesh`.
+- **Details**: `Vertex` is position, normal, uv and tangent; `InstanceData` streams per-instance model matrices. Meshes come from the Blender-exported mesh YAML (`from_node()`), from in-memory arrays, or from CPU data with LODs; a multi-buffered mesh can be rewritten each frame (`update_vertices()`).
 
 ##### [model_ubo.h](engine/data/model_ubo.h)
-- **Role**: Per-object push constant data layout structure.
+- **Role**: Per-object push constant block.
 - **Key Classes / Structs**: `ModelPushConstants`.
-- **Details**: 128-byte push constant layout containing model matrix (`mat4`) and normal matrix (`mat4 normal_matrix = transpose(inverse(model))`).
+- **Details**: 128 bytes: `model` and `normal_matrix = transpose(inverse(model))`.
 
-#### Global Illumination Layer (`engine/gi`)
+##### [texture.h](engine/data/texture.h)
+- **Role**: GPU-resident 2D texture.
+- **Key Classes / Structs**: `Texture`.
+- **Details**: An RGBA8 `Image` plus its own `Sampler`, decoded from an image file.
+
+##### [grading_lut.h](engine/data/grading_lut.h) / [palette_lut.h](engine/data/palette_lut.h)
+- **Role**: Colour-grading strip LUT and palette lookup textures.
+- **Key Classes / Structs**: `GradingLut`, `PaletteLut`.
+- **Details**: `GradingLut` loads an N·N × N strip PNG with bilinear filtering; `PaletteLut` loads a palette PNG into an N × 1 nearest-filtered texture for quantization.
+
+##### [skinned_mesh_source.h](engine/data/skinned_mesh_source.h)
+- **Role**: CPU-only bind-pose mesh with joint indices and weights.
+- **Key Classes / Structs**: `SkinnedMeshSource`.
+
+#### Asset Loaders (`engine/loaders`)
+
+- **Role**: `coopa::asset` loaders.
+- **Key Classes / Structs**: `MeshLoader`, `TextureLoader` (+ `DecodedImage`), `SkinnedMeshSourceLoader`.
+- **Details**: Decode on a worker thread, finalize GPU resources on the main thread. `TextureLoader` decodes with stb_image and honours per-path colour-space declarations.
+
+#### Global Illumination Layer (`engine/gi`, namespace `coopa::gfx::engine::gi`)
 
 ##### [brdf_lut.h](engine/gi/brdf_lut.h)
-- **Role**: Precomputed BRDF integration look-up table generator.
+- **Role**: Split-sum BRDF integration look-up table.
 - **Key Classes / Structs**: `BRDFLUT`.
-- **Details**: Computes a 512x512 R16G16_SFLOAT texture encoding Cook-Torrance BRDF scale and bias values for environment map specular IBL.
+- **Details**: Renders a 512×512 `R16G16_SFLOAT` table once, using gfxcoopa's own `brdf_lut.vert`/`.frag`.
 
 ##### [gi_baker.h](engine/gi/gi_baker.h)
-- **Role**: CPU/GPU ray-tracing probe baker for Spherical Harmonics GI.
-- **Key Classes / Structs**: `GiBaker`.
-- **Details**: Casts 128 hemispherically distributed rays per probe position against scene geometry, projecting radiance into 9 L2 Spherical Harmonics basis coefficients.
+- **Role**: CPU SH probe baker.
+- **Key Classes / Structs**: `GiBaker`, `SceneBox`, `HitInfo`.
+- **Details**: Traces 128 rays per probe against the scene's renderables (as boxes) and projects the radiance onto 9 L2 SH coefficients, baking probes in parallel.
 
 ##### [gi_data.h](engine/gi/gi_data.h)
-- **Role**: Data structures and SSBO memory layout for GI probe grids and reflection probes.
-- **Key Classes / Structs**: `SHProbe`, `ReflectionProbeGPU`, `GiUniforms`, `GiSystemData`.
-- **Details**: Defines GPU memory layouts for 9-coefficient L2 SH probes, probe bounding volumes, uniform parameters, and reflection probe cubemap matrices.
+- **Role**: GPU buffers for probe volumes and reflection probes.
+- **Key Classes / Structs**: `SHProbe`, `GiUniforms`, `ReflectionProbeUniforms`, `GiData`.
 
 ##### [gi_system.h](engine/gi/gi_system.h)
-- **Role**: Global Illumination subsystem orchestrator.
+- **Role**: Global Illumination orchestrator.
 - **Key Classes / Structs**: `GiSystem`.
-- **Details**: Manages probe grid SSBOs, BRDF LUT generation, reflection probe cubemap array, and descriptor set 3 layout bindings for real-time indirect lighting.
+- **Details**: Owns the probe SSBO, GI uniforms, BRDF LUT and up to 4 reflection-probe cubemaps; `bake()` fills the probe grid and captures each reflection probe (`ProbeCapturePass` + `EnvPrefilterPass`). Exposes one descriptor set (see the table above), usually passed to lit passes as an `ExtraSets` entry.
 
 #### Render Targets (`engine/targets`)
 
 ##### [cubemap_target.h](engine/targets/cubemap_target.h)
-- **Role**: Multi-face HDR cubemap render target manager.
+- **Role**: Mipmapped HDR colour cubemap render target.
 - **Key Classes / Structs**: `CubemapTarget`.
-- **Details**: Allocates 6-face cubemap images with individual face views and render passes for environment capture and reflection probe rendering.
+- **Details**: Per-face and per-mip views and render passes for reflection-probe capture and prefiltering.
 
 ##### [gbuffer_target.h](engine/targets/gbuffer_target.h)
-- **Role**: Offscreen multi-attachment G-Buffer render target manager.
+- **Role**: The deferred G-buffer.
 - **Key Classes / Structs**: `GBufferTarget`.
-- **Details**: Manages geometry pass attachments: G0 (`R8G8B8A8_UNORM` Albedo + AO), G1 (`R16G16B16A16_SFLOAT` World Normal + Metallic), G2 (`R16G16B16A16_SFLOAT` World Position + Roughness), and Depth (`D32_SFLOAT`).
+- **Details**: G0 `R8G8B8A8_UNORM` albedo + AO, G1 `R16G16B16A16_SFLOAT` normal + metallic, G2 `R16G16B16A16_SFLOAT` position + roughness, G3 `R16G16B16A16_SFLOAT` emissive, G4 `R16G16B16A16_SFLOAT` velocity and linear depths, and `D32_SFLOAT` depth left readable after the pass.
 
 ##### [offscreen_target.h](engine/targets/offscreen_target.h)
-- **Role**: Offscreen HDR color render target with custom resolution support.
-- **Key Classes / Structs**: `OffscreenTarget`.
-- **Details**: Allocates `VK_FORMAT_R16G16B16A16_SFLOAT` color attachments for HDR rendering, automatically transitioning color images to `SHADER_READ_ONLY_OPTIMAL` for post-processing passes.
+- **Role**: Colour (+ optional depth) render target.
+- **Key Classes / Structs**: `OffscreenTarget`, `ColorOnlyTag`.
+- **Details**: Configurable size, colour `Format` (default `RGBA8_Unorm`) and sample count; the render pass leaves the colour image shader-readable for later passes.
 
 ##### [shadow_map_target.h](engine/targets/shadow_map_target.h)
-- **Role**: Shadow map depth attachment target manager.
+- **Role**: Shadow depth targets.
 - **Key Classes / Structs**: `ShadowMapTarget`.
-- **Details**: Allocates 2048x2048 2D depth textures for directional lights and 512x512 6-face cubemap depth textures for omnidirectional point lights.
+- **Details**: A directional atlas of 1–4 cascade tiles (default 2048² per tile), a point-light cubemap (default 512² per face) and a spot-light map (default 1024²), with `begin_directional_pass()`, `set_cascade_viewport()`, `begin_cube_face_pass()` and `begin_spot_pass()`.
 
 #### Render Passes & Pipelines (`engine/passes`)
 
-##### [deferred_lighting_pass.h](engine/passes/deferred_lighting_pass.h)
-- **Role**: Screen-space deferred shading pass evaluator.
-- **Key Classes / Structs**: `DeferredLightingPass`.
-- **Details**: Binds G-Buffer attachments, shadow map samplers, and GI probe SSBOs, evaluating Cook-Torrance direct PBR and indirect SH irradiance per pixel.
+Every pass takes its `.spv` paths from the caller and documents the push-constant layout that shader must match, except `SmaaPass`, `ProbeCapturePass` and the GI bake, which load gfxcoopa's own shaders through a `ShaderLibrary`.
 
-##### [env_prefilter_pass.h](engine/passes/env_prefilter_pass.h)
-- **Role**: Specular environment cubemap pre-filtering pass.
-- **Key Classes / Structs**: `EnvPrefilterPass`.
-- **Details**: Generates mipmapped GGX pre-filtered environment cubemaps for glossy IBL reflections.
+##### Shared building blocks
+- **[fullscreen_stage.h](engine/passes/fullscreen_stage.h)**: `FullscreenStage`, `FullscreenStageDesc` — one fullscreen-triangle stage (two shaders, its own descriptor sets, a pipeline with no vertex input or depth test). Most post-process passes own one or more.
+- **[extra_sets.h](engine/passes/extra_sets.h)**: `ExtraSets` — optional app-supplied descriptor-set layouts and their binder, appended after a pass's own sets and validated together.
 
-##### [gbuffer_pipeline.h](engine/passes/gbuffer_pipeline.h)
-- **Role**: Graphics pipeline manager for G-Buffer geometry rasterization.
-- **Key Classes / Structs**: `GBufferPipeline`.
-- **Details**: Configures multi-render target (MRT) color blending, depth testing, backface culling, and shader stages for geometry pass rendering.
+##### Geometry and lighting
+- **[gbuffer_pipeline.h](engine/passes/gbuffer_pipeline.h)**: `GBufferPipeline` — opaque and alpha-masked mesh pipelines into the G-buffer, with a no-cull sibling and one variant per registered surface shader.
+- **[shadow_pipeline.h](engine/passes/shadow_pipeline.h)**: `ShadowPipeline` — depth-only directional and cube-face pipelines, with depth bias and per-surface-shader variants.
+- **[sdf_gbuffer_pass.h](engine/passes/sdf_gbuffer_pass.h)** / **[sdf_shadow_pass.h](engine/passes/sdf_shadow_pass.h)** / **[sdf_forward_pass.h](engine/passes/sdf_forward_pass.h)**: `SdfGBufferPass`, `SdfShadowPass`, `SdfForwardPass` — raymarch OPAQUE/MASK SDFs into the G-buffer, into shadow maps, and BLEND SDFs into the HDR frame alongside `TransparentPass`.
+- **[deferred_lighting_pass.h](engine/passes/deferred_lighting_pass.h)**: `DeferredLightingPass` — shades the G-buffer into an HDR target in one fullscreen draw (camera, light, shadow, extras, then its own G-buffer/SSAO set).
+- **[transparent_pass.h](engine/passes/transparent_pass.h)**: `TransparentPass` — forward alpha-blended geometry over the lit frame, depth-tested against the opaque depth, with per-surface-shader variants.
+- **[probe_capture_pass.h](engine/passes/probe_capture_pass.h)**: `ProbeCapturePass` — draws the analytic sky, then forward-lit scene geometry, into one reflection-probe cubemap face.
+- **[env_prefilter_pass.h](engine/passes/env_prefilter_pass.h)**: `EnvPrefilterPass` — GGX-prefilters mips 1..N-1 of a captured cubemap from its mip 0.
 
-##### [hiz_pass.h](engine/passes/hiz_pass.h)
-- **Role**: Hierarchical Z-Buffer depth pyramid generator.
-- **Key Classes / Structs**: `HiZPass`.
-- **Details**: Computes a downsampled depth mipmap pyramid using minimum depth reduction for fast hierarchical SSR raymarching.
+##### Screen-space effects
+- **[hiz_pass.h](engine/passes/hiz_pass.h)**: `HiZPass` — an `R32_SFLOAT` depth pyramid; the reduction is whatever the caller's fragment shader computes (min for SSR, a depth-aware average for SSAO).
+- **[ssao_pass.h](engine/passes/ssao_pass.h)**: `SsaoPass` — GTAO-style horizon AO over a prefiltered depth pyramid, temporal resolve, bilateral blur, optional half resolution with a depth/normal-aware upsample.
+- **[temporal_history_pass.h](engine/passes/temporal_history_pass.h)**: `TemporalHistoryPass` — shared per-pixel history-validity and sample-count buffer (RG16F, ping-ponged) for the temporal accumulators.
+- **[scene_color_mip_pass.h](engine/passes/scene_color_mip_pass.h)**: `SceneColorMipPass` — up to 7 mips of the lit HDR colour (`R16G16B16A16_SFLOAT`, 2×2 box filter) for SSR cone tracing.
+- **[ssr_pass.h](engine/passes/ssr_pass.h)**: `SsrPass` — Hi-Z raymarch (optionally half resolution), ping-ponged temporal resolve, bilateral blur, optional traced SSGI bounce, and a BRDF composite into the HDR frame.
 
-##### [present_pass.h](engine/passes/present_pass.h)
-- **Role**: Final blit pass transferring post-processed images to the swapchain.
-- **Key Classes / Structs**: `PresentPass`.
-- **Details**: Renders a full-screen quad sampling the final post-processing color buffer directly into the Vulkan swapchain framebuffer.
+##### Volumetrics and fog
+- **[fog_pass.h](engine/passes/fog_pass.h)**: `FogPass` — distance/height fog composite reading the G-buffer and a `FogData` UBO.
+- **[volumetrics_pass.h](engine/passes/volumetrics_pass.h)**: `VolumetricsPass` — reduced-resolution raymarch of local volumes, then a full-resolution composite.
+- **[froxel_volumetrics_pass.h](engine/passes/froxel_volumetrics_pass.h)**: `FroxelVolumetricsPass` — the froxel-grid alternative: inject, two-pass integrate, then a per-pixel apply, all as fragment passes over a 2D atlas.
 
-##### [probe_capture_pass.h](engine/passes/probe_capture_pass.h)
-- **Role**: Scene capture pass into reflection probe cubemaps.
-- **Key Classes / Structs**: `ProbeCapturePass`.
-- **Details**: Renders scene geometry from 6 orthogonal directions into cubemap face attachments for localized reflection probes.
+##### Post-processing and anti-aliasing
+- **[exposure_pass.h](engine/passes/exposure_pass.h)**: `ExposurePass` — auto-exposure metering into a 1×1 target that adapts over time.
+- **[bloom_pass.h](engine/passes/bloom_pass.h)**: `BloomPass` — threshold prefilter, downsample pyramid, additive upsample.
+- **[dof_pass.h](engine/passes/dof_pass.h)**: `DofPass` — thin-lens circle of confusion, half-resolution bokeh gather, full-resolution composite.
+- **[tilt_shift_pass.h](engine/passes/tilt_shift_pass.h)**: `TiltShiftPass` — separable screen-space focus-band blur with the upscale folded in.
+- **[fxaa_pass.h](engine/passes/fxaa_pass.h)**: `FxaaPass` — standalone FXAA 3.11 over an already-tonemapped image.
+- **[taa_pass.h](engine/passes/taa_pass.h)**: `TaaPass` — ping-ponged RGBA16F accumulation, reprojected by the G-buffer velocity (or depth and camera motion), copied into an RGBA8 output.
+- **[smaa_pass.h](engine/passes/smaa_pass.h)**: `SmaaPass` — Jimenez SMAA 1x: edge detection, blend weights, neighbourhood blend, using gfxcoopa's `smaa_*` shaders and the reference area/search textures.
+- **[pixel_stylize_pass.h](engine/passes/pixel_stylize_pass.h)**: `PixelStylizePass` — optional bloom, tonemap, depth/normal outlines, ordered dither and palette quantization in one draw.
+- **[present_pass.h](engine/passes/present_pass.h)**: `PresentPass` — writes the final LDR image to the swapchain unmodified.
 
-##### [scene_color_mip_pass.h](engine/passes/scene_color_mip_pass.h)
-- **Role**: Downsampled scene color mipmap chain generator.
-- **Key Classes / Structs**: `SceneColorMipPass`.
-- **Details**: Builds a Gaussian/box downsampled color mip chain enabling glossy reflection cone sampling during SSR post-processing.
-
-##### [shadow_pipeline.h](engine/passes/shadow_pipeline.h)
-- **Role**: Depth-only graphics pipeline for shadow map rendering.
-- **Key Classes / Structs**: `ShadowPipeline`.
-- **Details**: Configures depth bias, slope-scaled depth bias, rasterizer state, and vertex shaders for 2D directional and omnidirectional cubemap shadow passes.
-
-##### [skybox_pass.h](engine/passes/skybox_pass.h)
-- **Role**: Background skybox rendering pass.
-- **Key Classes / Structs**: `SkyboxPass`.
-- **Details**: Evaluates analytic atmospheric scattering gradients or samples environment cubemaps for background pixels unreached by scene geometry.
-
-##### [smaa_pass.h](engine/passes/smaa_pass.h)
-- **Role**: Subpixel Morphological Anti-Aliasing (SMAA 1x Ultra) post-process pass.
-- **Key Classes / Structs**: `SMAAPass`.
-- **Details**: Implements Jimenez 2013 3-pass SMAA (edge detection, blend weight calculation, neighborhood blending) using precomputed area/search textures.
-
-##### [ssr_pass.h](engine/passes/ssr_pass.h)
-- **Role**: Hierarchical Screen-Space Reflections (SSR) pass.
-- **Key Classes / Structs**: `SSRPass`.
-- **Details**: Performs Hi-Z raymarching across depth pyramids, computing glossy specular reflection contributions with temporal reprojection.
-
-##### [taa_pass.h](engine/passes/taa_pass.h)
-- **Role**: Temporal Anti-Aliasing (TAA) pass.
-- **Key Classes / Structs**: `TAAPass`.
-- **Details**: Accumulates history frames using sub-pixel Halton jittering, motion vector reprojection, and color bounding-box neighborhood clamping to eliminate aliasing.
-
-##### [tonemapping_pass.h](engine/passes/tonemapping_pass.h)
-- **Role**: ACES filmic tonemapping and FXAA post-processing pass.
-- **Key Classes / Structs**: `TonemappingPass`.
-- **Details**: Applies exposure scaling, ACES filmic s-curve tonemapping, gamma 2.2 correction, and optional FXAA 3.11 edge smoothing.
+##### 2D
+- **[textured_quad_2d_pass.h](engine/passes/textured_quad_2d_pass.h)**: `TexturedQuad2DPass`, `TexturedQuad2DDesc` — shared 2D textured-quad machinery (descriptor cache, streamed geometry, named pipeline variants) for UI and sprite passes; pairs with `gfx/surface2d/quad_vs.glsl`.
 
 #### Engine Utilities (`engine/util`)
 
 ##### [sampler.h](engine/util/sampler.h)
-- **Role**: RAII `VkSampler` wrapper and factory utility.
+- **Role**: RAII `VkSampler`.
 - **Key Classes / Structs**: `Sampler`.
-- **Details**: Factory helpers for `nearest()`, `linear()`, `shadow()` (depth comparison), and `cubemap()` texture samplers with anisotropy settings.
+- **Details**: Built from a `SamplerDesc`, or via `nearest()`, `linear()` and `shadow()` (depth comparison).
+
+##### [instance_batcher.h](engine/util/instance_batcher.h)
+- **Role**: Instanced draw batching.
+- **Key Classes / Structs**: `InstanceBatcher`.
+- **Details**: Groups per-frame draw items into contiguous batches and streams their transforms through one shared instance vertex buffer.
+
+##### [material_texture_cache.h](engine/util/material_texture_cache.h)
+- **Role**: Shared material descriptor sets.
+- **Key Classes / Structs**: `MaterialTextureCache`.
+- **Details**: One set per distinct (alpha mask, albedo, normal, metallic-roughness) combination, with neutral fallbacks for unused slots, shared by the G-buffer, shadow, transparent and probe-capture paths.
 
 ##### [sh_math.h](engine/util/sh_math.h)
-- **Role**: 2nd-order Spherical Harmonics mathematical functions.
-- **Key Classes / Structs**: `sh_basis()`, `sh_evaluate_irradiance()`.
-- **Details**: Evaluates 9 L2 real Spherical Harmonics basis functions ($Y_{lm}(\theta, \phi)$) and Cosine-lobe convolution factors for diffuse indirect lighting.
+- **Role**: 2nd-order Spherical Harmonics math.
+- **Key Classes / Structs**: `sh_basis()`, `sh_project_sample()`, `sh_evaluate_irradiance()`.
+- **Details**: The 9 real SH basis functions, sample projection, and cosine-lobe irradiance evaluation.
 
 ##### [smaa_textures.h](engine/util/smaa_textures.h)
-- **Role**: Precomputed SMAA area and search texture loader.
+- **Role**: SMAA lookup textures.
 - **Key Classes / Structs**: `SmaaTextures`.
-- **Details**: Loads embedded Jimenez SMAA 1x look-up tables into GPU textures for edge blending calculations.
+- **Details**: Uploads the Jimenez reference area and search textures from `AreaTex.h`/`SearchTex.h` (found via `SMAA_TEXTURES_DIR`; not vendored).
 
 ---
 
 ## Usage Example
 
+`app::Context` performs the whole bring-up; see the [top-level README](../README.md) for a complete triangle.
+
 ```cpp
-#include <gfxcoopa/presentation/window.h>
-#include <gfxcoopa/presentation/renderer.h>
-#include <gfxcoopa/core/instance.h>
-#include <gfxcoopa/core/surface.h>
-#include <gfxcoopa/core/device.h>
-#include <gfxcoopa/core/swapchain.h>
-#include <gfxcoopa/memory/allocator.h>
-#include <gfxcoopa/command/command_pool.h>
-#include <gfxcoopa/pipeline/render_pass.h>
+#include <gfxcoopa/app/context.h>
+
+using namespace coopa::gfx;
 
 int main() {
-    // 1. Create window context
-    coopa::gfx::presentation::Window window("GfxCoopa Application", 1280, 720);
+    app::ContextConfig config;
+    config.title = "gfxcoopa demo";
+    app::Context ctx(app::ContextConfig::from_env(config));  // reads ONESHOT / MAX_FRAMES
 
-    // 2. Initialize Vulkan Core components (Volk loader initialized inside Instance)
-    coopa::gfx::core::Instance instance("gfxcoopa_demo");
-    coopa::gfx::core::Surface surface(instance, window.handle());
-    coopa::gfx::core::Device device(instance, surface);
-    coopa::gfx::core::Swapchain swapchain(device, surface, 1280, 720);
+    app::FrameCallbacks frame;
+    frame.clear  = ClearColor{0.1f, 0.1f, 0.12f, 1.0f};
+    frame.record = [&](command::CommandBuffer& cmd) {
+        // Record draw commands into the swapchain render pass here.
+    };
 
-    // 3. Initialize Memory Allocator and Command Pool
-    coopa::gfx::memory::Allocator allocator(instance, device);
-    coopa::gfx::command::CommandPool cmd_pool(device, device.graphics_family());
-
-    // 4. Create simple presentation render pass
-    coopa::gfx::pipeline::RenderPassBuilder rp_builder(device);
-    auto render_pass = rp_builder
-        .add_color_attachment(swapchain.format(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
-        .build();
-
-    // 5. Instantiate Renderer orchestrator
-    coopa::gfx::presentation::Renderer renderer(device, swapchain, *render_pass, cmd_pool);
-
-    // 6. Primary frame loop
-    while (!window.should_close()) {
-        window.poll_events();
-
-        // Handle window resizing
-        if (window.was_resized()) {
-            auto [width, height] = window.framebuffer_size();
-            if (width > 0 && height > 0) {
-                swapchain.recreate(width, height);
-                renderer.recreate_framebuffers();
-            }
-        }
-
-        // Render frame with acquire -> record -> submit -> present pipeline
-        renderer.draw_frame([&](coopa::gfx::command::CommandBuffer& cmd) {
-            // Record draw commands here
-        }, VkClearColorValue{{0.1f, 0.1f, 0.12f, 1.0f}});
-    }
-
-    // 7. Clean GPU teardown
-    device.wait_idle();
-    return 0;
+    ctx.run(nullptr, frame);  // poll, update, draw, until the window closes
 }
 ```
+
+To drive the loop yourself, call `ctx.poll()` and `ctx.frame(frame)` while `!ctx.should_close()`. The individual objects (`presentation::Window`, `core::Instance`, `core::Device`, `core::Swapchain`, `presentation::Renderer`, ...) remain available for applications that build the chain by hand.

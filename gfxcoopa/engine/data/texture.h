@@ -2,12 +2,9 @@
  * @file texture.h
  * @brief GPU-resident 2D texture: an Image plus its own Sampler, decoded from an image file.
  *
- * Introduced alongside coopa::asset::TextureLoader to close a long-standing
- * gap: gfxcoopa had no image decoder at all (stbi_load only ever lived in
- * uicoopa, for UI sprites/fonts), so PBRMaterial's texture_albedo/
- * texture_normal/texture_metallic_roughness fields were parsed from scene
- * YAML and then read by nothing. This class + its loader are what those
- * fields now resolve to.
+ * Loaded through coopa::asset::TextureLoader; it is what PBRMaterial's
+ * texture_albedo/texture_normal/texture_metallic_roughness/texture_alpha_mask
+ * fields resolve to.
  */
 
 #ifndef GFXCOOPA_ENGINE_DATA_TEXTURE_H

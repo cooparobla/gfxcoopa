@@ -3,10 +3,10 @@
  * @brief Auto-exposure (eye adaptation) metering into a 1x1 target.
  *
  * Meters the geometric-mean luminance of an HDR image and adapts an exposure
- * multiplier toward it over time -- see assets/shaders/exposure.frag for the
- * metering and adaptation model. The result is a 1x1 R16F texture a tonemap
- * consumer multiplies its own fixed exposure by (PixelStylizePass binds it at
- * set 0 binding 5).
+ * multiplier toward it over time -- see the caller's exposure.frag (toyengine's
+ * assets/shaders/exposure.frag) for the metering and adaptation model. The
+ * result is a 1x1 R16F texture a tonemap consumer multiplies its own fixed
+ * exposure by (PixelStylizePass binds it at set 0 binding 5).
  *
  * One target plus a history image it is copied into after each draw -- the same
  * shape SsrPass uses, and NOT a two-target ping-pong. The distinction is not

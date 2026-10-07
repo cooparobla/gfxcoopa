@@ -24,9 +24,10 @@ namespace pipeline {
  *        directories and returning the first match.
  *
  * This is the runtime mirror of glslc's `-I` search order: an app's own
- * `assets/shaders/` is searched before gfxcoopa's shared base library, so an
- * app-local override shadows the base copy of the same logical name exactly
- * the way `#include "x"` shadows `#include <gfx/x>` at compile time.
+ * `assets/shaders/` is searched before gfxcoopa's (which holds the GI, SMAA
+ * and test shaders gfxcoopa's own classes load), so an app-local shader of the
+ * same logical name shadows gfxcoopa's copy exactly the way `#include "x"`
+ * shadows `#include <gfx/x>` at compile time.
  *
  * The single-argument constructors are implicit, so anywhere a
  * `const ShaderLibrary&` is expected a plain `std::string` directory works
@@ -44,7 +45,7 @@ public:
     explicit ShaderLibrary(std::vector<std::string> dirs) : dirs_(std::move(dirs)) {}
 
     /// Convenience constructor for the common two-tier case: an app's own
-    /// shader directory searched first, then gfxcoopa's shared base library.
+    /// shader directory searched first, then gfxcoopa's own assets/shaders/.
     /// `base_dir` is a required parameter rather than something this class
     /// tries to auto-detect -- gfxcoopa is header-only and has no reliable
     /// way to know where a downstream app checked out its gfxcoopa sibling;

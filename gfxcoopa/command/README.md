@@ -39,12 +39,12 @@ The `coopa::gfx::command` submodule provides RAII abstractions for Vulkan comman
 ### [command_buffer.h](command_buffer.h)
 - **Role**: Lightweight RAII wrapper around `VkCommandBuffer` for recording graphics, compute, and transfer commands.
 - **Key Classes / Structs**: `CommandBuffer`.
-- **Details**: Exposes inline methods for render pass recording (`begin_render_pass`/`end_render_pass`), pipeline binding, descriptor set binding, vertex/index buffer binding, viewport/scissor dynamic states, push constants, pipeline barriers, and buffer/image copy commands.
+- **Details**: Exposes inline methods for render pass recording (`begin_render_pass`/`end_render_pass`), pipeline binding, descriptor set binding, vertex/index buffer binding, viewport/scissor dynamic states, push constants, image layout transitions (`transition()` to a `TextureUsage`), buffer/image copies, `blit()` and `clear_color()`.
 
 ### [command_pool.h](command_pool.h)
 - **Role**: RAII manager for `VkCommandPool` allocation and execution of transient single-use command buffers.
 - **Key Classes / Structs**: `CommandPool`.
-- **Details**: Handles allocation of primary/secondary command buffers, pool resetting, and provides a synchronous lambda helper `single_use()` for one-time GPU transfer and copy operations.
+- **Details**: Allocates batches of primary command buffers (`allocate(count)`), and provides a blocking lambda helper `submit_once()` for one-shot GPU work (uploads, readbacks, bakes), built on the lower-level `begin_single_use()`/`end_single_use()` pair.
 
 ### [sync.h](sync.h)
 - **Role**: RAII wrappers for Vulkan synchronization primitives.
@@ -63,16 +63,17 @@ The `coopa::gfx::command` submodule provides RAII abstractions for Vulkan comman
 // Create a command pool for the graphics queue family
 coopa::gfx::command::CommandPool pool(device, device.graphics_family());
 
-// Allocate a command buffer
-auto cmd = pool.allocate();
+// Allocate command buffers (raw handles; wrap one in CommandBuffer to record)
+std::vector<VkCommandBuffer> raw = pool.allocate(2);
+coopa::gfx::command::CommandBuffer cmd(raw[0]);
 
 // Synchronize CPU and GPU
 coopa::gfx::command::Fence fence(device, true); // initial signaled state
 coopa::gfx::command::Semaphore image_available(device);
 coopa::gfx::command::Semaphore render_finished(device);
 
-// Single-use one-time command helper:
-pool.single_use([&](coopa::gfx::command::CommandBuffer& transient_cmd) {
+// One-shot submit: records, submits to the graphics queue and waits
+pool.submit_once([&](coopa::gfx::command::CommandBuffer& transient_cmd) {
     transient_cmd.copy_buffer(src_buffer, dst_buffer, size);
 });
 ```

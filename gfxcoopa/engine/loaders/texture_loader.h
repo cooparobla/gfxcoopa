@@ -8,10 +8,9 @@
  * the only place that touches the GPU (uploads the decoded pixels via
  * gfx::memory::upload_image_2d).
  *
- * stb_image's implementation lives in gfxcoopa now (STB_IMAGE_IMPLEMENTATION
- * is defined once, in gfxcoopa's own CMakeLists.txt) — moved down from
- * uicoopa, which had the only image decoder in the whole workspace despite
- * gfxcoopa being where texture-mapped materials actually need one.
+ * stb_image's implementation is compiled once, in the gfxcoopa_impl target
+ * (STB_IMAGE_IMPLEMENTATION is defined in gfxcoopa's own CMakeLists.txt), so
+ * gfxcoopa and every library above it share one decoder.
  *
  * Color space: every upload declares one via declare_color_space() (see below) rather than
  * guessing. An albedo map uploaded as if it were linear renders visibly washed out, because
@@ -66,7 +65,7 @@ struct DecodedImage {
  * asset by declare_color_space() — call it with a path's ColorSpace before the matching
  * load()/load_async() call for that path; finalize_typed() looks up what was declared (default
  * ColorSpace::Linear when nothing was) and uploads accordingly. A caller that never declares
- * anything gets today's behavior: every texture linear.
+ * anything gets every texture uploaded as linear.
  *
  * Both declare_color_space() and finalize_typed() run on the main thread — the former from
  * scene/material parsing, the latter from AssetManager::update() (or a synchronous load()'s

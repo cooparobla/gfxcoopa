@@ -34,9 +34,8 @@ namespace memory {
  *
  * Records and submits a one-shot command buffer (via CommandPool::submit_once()) that
  * transitions the image Undefined -> TransferDst, copies the staging buffer into it, then
- * transitions TransferDst -> ShaderRead, and blocks until the transfer queue is idle before
- * returning — matching the synchronous, "ready to sample immediately" contract every call
- * site this replaces already relied on.
+ * transitions TransferDst -> ShaderRead, and blocks until the graphics queue is idle before
+ * returning, so the image is ready to sample immediately.
  *
  * @param device          Logical device.
  * @param allocator       VMA allocator.
@@ -77,8 +76,8 @@ inline std::unique_ptr<Image> upload_image_2d(core::Device&         device,
 }
 
 /**
- * @brief Raw-`VkFormat` overload of the above, for the small number of internal callers not
- * yet migrated to the sealed `Format` enum. Prefer the `Format`-taking overload in new code.
+ * @brief Raw-`VkFormat` overload of the above, for internal callers that hold a `VkFormat`
+ * rather than the sealed `Format` enum. Prefer the `Format`-taking overload in new code.
  */
 inline std::unique_ptr<Image> upload_image_2d(core::Device&         device,
                                               Allocator&            allocator,

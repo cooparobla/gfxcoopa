@@ -35,7 +35,7 @@ namespace passes {
  * result into the caller's shared AA output target (RGBA8, alpha forced opaque -- the 16F
  * buffer's alpha carries the per-pixel accumulation age and its colour carries the sub-8-bit
  * increments late accumulation needs, neither of which may leak into the screenshot path).
- * The ping-pong replaces a copy-based history update entirely; the render passes' own layout
+ * The ping-pong needs no copy-based history update; the render passes' own layout
  * transitions do all the synchronisation.
  *
  * Reprojection uses the caller's velocity image when set_source_images() is given one (the

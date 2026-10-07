@@ -36,17 +36,16 @@ namespace passes {
 ///      LOAD_OP_CLEAR, so the sky fill can't be a separate pass; it has to be
 ///      the first draw inside the same instance.
 ///
-/// Deliberately NOT built on PbrPipeline/pbr.frag: that shader samples the
-/// reflection cubemap recursively, which would be a hazard against the very
-/// image this pass is writing, and PbrPipeline's ctor mandates a shadow
-/// descriptor set this pass doesn't use (see probe_capture.frag -- no
-/// shadows in v1).
+/// Uses its own probe_capture.frag rather than a general lighting shader: a shader
+/// that samples the reflection cubemap would read the very image this pass is
+/// writing, and a shadowed one would need a shadow descriptor set this pass doesn't
+/// bind (see probe_capture.frag -- no shadow sampling).
 class ProbeCapturePass {
 public:
     /// 32 bytes -- byte-identical to the first 32 bytes of GBufferPipeline::PushConstants
-    /// (48 bytes total there) / TransparentPass::PushConstants. model/normal_matrix moved
-    /// to the per-instance vertex stream (data::InstanceData); this block is now shared
-    /// once per instanced batch, not pushed per object. Probe capture is a forward path,
+    /// (80 bytes total there) / TransparentPass::PushConstants. The model matrix is streamed
+    /// per instance (data::InstanceData), so this block is pushed once per instanced batch,
+    /// not per object. Probe capture is a forward path,
     /// so it doesn't carry the deferred-only `emissive` field either.
     struct PushConstants {
         glm::vec4 albedo       = {0.8f, 0.8f, 0.8f, 1.0f};

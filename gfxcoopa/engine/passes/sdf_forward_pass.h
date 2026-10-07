@@ -16,9 +16,8 @@
  * Shading matches TransparentPass's transparent.frag exactly (same direct
  * lighting formula, same gfx_ssr_trace() call against the same Hi-Z/scene-
  * colour chain via the same ExtraSets mechanism) -- see toyengine's
- * sdf_forward.frag, which includes the extracted pixel_forward_shading.glsl
- * body transparent.frag itself now also includes, so the two can never
- * silently diverge.
+ * sdf_forward.frag, which includes the same pixel_forward_shading.glsl
+ * body transparent.frag includes, so the two can never silently diverge.
  */
 
 #ifndef GFXCOOPA_ENGINE_PASSES_SDF_FORWARD_PASS_H

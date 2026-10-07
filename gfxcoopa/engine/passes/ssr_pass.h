@@ -61,7 +61,7 @@ public:
         int   start_mip;         // Hi-Z mip the march starts at (ssr_start_mip)
         int   min_mip0_steps;    // self-reflection gate (ssr_min_mip0_steps)
         int   max_color_mip = 0; // top mip of the prefiltered scene-colour chain
-        float jitter_strength = 0.0f; // 0 = old deterministic mirror-ray trace (ssr_jitter)
+        float jitter_strength = 0.0f; // 0 = deterministic mirror-ray trace (ssr_jitter)
         int   frame_index     = 0;    // decorrelates the jitter's noise frame to frame
 
         static constexpr int kFlagPrevFrameColor = 1;
@@ -121,7 +121,7 @@ public:
     /// every consumer's ssr_composite.frag -- whatever else it does -- reads
     /// max_color_mip/sky_intensity/ssgi_intensity/ssgi_distance at the same
     /// offsets. A consumer that doesn't use a field (blendy has no SSGI
-    /// bounce term today) simply never reads it; the bytes are harmless.
+    /// bounce term) simply never reads it; the bytes are harmless.
     struct CompositePushConstants {
         glm::vec2 ssr_resolution;      // offset 0  -- resolution of u_ssr_map (trace res under half-res)
         glm::vec2 screen_resolution;   // offset 8  -- always full screen res
@@ -201,8 +201,8 @@ public:
         // Reprojection: current clip space -> previous frame's clip space, composed in DOUBLE
         // precision by the caller (glm::dmat4(prev_view_proj) * glm::inverse(glm::dmat4(proj) *
         // glm::dmat4(view))) before truncating to float. World-scale magnitudes cancel inside the
-        // double product; a float composition -- or the RGBA16F G-buffer position this replaces --
-        // drifts by whole pixels at scene scales of a few hundred units, which made the
+        // double product; a float composition -- or reprojecting the RGBA16F G-buffer position --
+        // drifts by whole pixels at scene scales of a few hundred units, making the
         // accumulated reflection slide and boil against the geometry in motion. Same scheme
         // SsaoPass::Params::reproject and TaaPass use. reproject_valid says whether it (and the
         // history buffer) exist yet -- false for the first two frames and right after a resize.
@@ -427,8 +427,8 @@ public:
                 .build(device));
 
         // Composite G-buffer layout: same G0-G2 plus an SSAO sampler (binding 3), so the
-        // composite can attenuate the SSR/env delta by the same ao * ssao term
-        // deferred_lighting.frag applies to indirect_specular (see ssr_composite.frag).
+        // composite can attenuate the SSR/env delta by the same ao * ssao term the
+        // lighting pass applies to indirect_specular (see toyengine's ssr_composite.frag).
         comp_gbuf_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
                 .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
@@ -477,7 +477,7 @@ public:
         // per-pixel accumulation count (see set_temporal_count_image(), which also explains the
         // permanent neutral fallback binding 3 starts out holding).
         //
-        // Depth, NOT the G-buffer world position this binding used to hold: G2 is RGBA16F, and at
+        // Depth, NOT the G-buffer world position: G2 is RGBA16F, and at
         // world coordinates of a few hundred units its quantization alone is multiple pixels of
         // reprojection error. See ssr_resolve.frag's file doc.
         // 4 = the trace's per-pixel hit distance (hit_target_; the zero image for SSGI), 5 = the

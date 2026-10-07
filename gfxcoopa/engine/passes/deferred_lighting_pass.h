@@ -99,10 +99,10 @@ public:
     /// enabled, or its permanent neutral (fully-unoccluded) texture when disabled/absent, so this
     /// binding is never left pointing at an image still in VK_IMAGE_LAYOUT_UNDEFINED.
     ///
-    /// Still raw (VkImageView/VkSampler), unlike set_gbuffer_images() above: SsaoPass -- the only
-    /// source of this argument -- is one of this refactor's "hard tier" files (its output_view()/
-    /// neutral_view() accessors have no TextureView-returning sibling), so a sealed parameter here
-    /// would have no caller who could actually satisfy it yet.
+    /// Raw (VkImageView/VkSampler), unlike set_gbuffer_images() above: SsaoPass -- the only
+    /// source of this argument -- has no TextureView-returning sibling of its output_view()/
+    /// neutral_view() accessors, so a sealed parameter here would have no caller able to
+    /// satisfy it.
     void set_ssao_image(VkImageView ssao_view, VkSampler ssao_sampler) {
         stage_->set().bind_image(3, ssao_view, ssao_sampler);
     }

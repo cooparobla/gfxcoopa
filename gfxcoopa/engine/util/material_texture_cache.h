@@ -6,7 +6,7 @@
  * DescriptorSet per distinct 4-texture combination a material references.
  *
  * One cache serves all four texture slots across every consuming pass, so gfxcoopa's own
- * probe-capture path (gi/gi_baker.h) and toyengine's G-buffer/shadow/transparent passes
+ * probe-capture path (gi/gi_system.h, passes/probe_capture_pass.h) and toyengine's G-buffer/shadow/transparent passes
  * share descriptor sets instead of each maintaining its own.
  *
  * Every material -- textured or not -- binds a full 4-tuple set. Untextured slots bind a
@@ -99,7 +99,7 @@ public:
         // Tangent-space "no bump" normal: (0, 0, 1) encoded as unsigned [0,1] -> (0.5, 0.5, 1.0)
         // -> (128, 128, 255). Decodes to (0.0039, 0.0039, 1.0) rather than exactly (0, 0, 1) -- a
         // 0.32-degree tilt from 128/255 vs. the mathematically exact 127.5, far below the width
-        // of a lighting band in pixel_lighting.frag. Documented, not branched around.
+        // of a lighting band in toyengine's pixel_lighting.frag. Documented, not branched around.
         const uint8_t flat_normal_pixel[4] = {128, 128, 255, 255};
         flat_normal_texture_ = std::make_unique<coopa::gfx::engine::data::Texture>(
             coopa::gfx::engine::data::Texture::upload(

@@ -7,8 +7,9 @@
 # than copying this file into their own cmake/.
 #
 # Mirrors `cbuild --vulkan` (the primary build tool for this workspace, see
-# /home/coopa/.sww/packages/cbuild/cbuild), which reads the same
-# assets/shaders/.glslc_flags file this does. Unlike cbuild -- which always
+# /home/coopa/.sww/packages/cbuild/cbuild), which takes its -I paths from
+# assets/shaders/.glslc_flags; this function passes the equivalent -I paths
+# itself and does not read that file. Unlike cbuild -- which always
 # recompiles everything -- this target is incremental via glslc -MD depfiles:
 # editing a shared gfx/*.glsl body correctly retriggers every .vert/.frag
 # that includes it, which a file(GLOB) + DEPENDS-on-the-source-only rule
@@ -29,13 +30,11 @@ find_program(GLSLC glslc HINTS $ENV{VULKAN_SDK}/bin)
 # Captured here, at include()-time, rather than read from CMAKE_CURRENT_LIST_DIR
 # inside gfx_add_shader_target() below: CMAKE_CURRENT_LIST_DIR inside a
 # function body tracks the CALLER's listfile (whichever CMakeLists.txt
-# invoked gfx_add_shader_target), not this file's own directory -- verified
-# empirically (a consumer repo's shader target computed gfxcoopa's shader
-# dir as its own grandparent directory instead). Capturing it in a variable
-# at this file's own top level, while CMAKE_CURRENT_LIST_DIR is genuinely
-# this file's directory, and reading that captured variable from inside the
-# function is the fix (CMake variables are dynamically scoped, so the
-# function sees it correctly regardless of who calls it).
+# invoked gfx_add_shader_target), not this file's own directory, so a
+# consumer's call would resolve gfxcoopa's shader dir relative to the
+# consumer. At this file's top level CMAKE_CURRENT_LIST_DIR is this file's
+# directory; CMake variables are dynamically scoped, so the function sees the
+# captured value regardless of who calls it.
 set(GFX_SHADERS_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 # gfx_add_shader_target(<target-name>
@@ -45,11 +44,9 @@ set(GFX_SHADERS_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 # )
 #
 # INCLUDE_DIR is optional and defaults to SHADER_DIR. gfxcoopa's own
-# assets/shaders/ (the shared `gfx/*.glsl` library every pass shader
-# #includes) is ALWAYS additionally searched, so callers never need to pass
-# it themselves -- this is what "the GLSL #include path is a parallel API
-# surface" meant before consolidation: every consumer had to know and pass
-# gfxcoopa's shader dir by hand.
+# assets/shaders/ (home of the shared `gfx/brdf|ibl|sky|spot_light.glsl` and
+# `gfx/surface2d/` headers) is ALWAYS additionally searched, so callers never
+# need to know or pass gfxcoopa's shader dir themselves.
 function(gfx_add_shader_target TARGET_NAME)
     cmake_parse_arguments(ARG "" "SHADER_DIR;INCLUDE_DIR" "" ${ARGN})
 

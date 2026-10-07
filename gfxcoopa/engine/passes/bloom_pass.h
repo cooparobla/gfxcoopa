@@ -237,9 +237,9 @@ public:
     /// COLOR_ATTACHMENT_WRITE -> FRAGMENT_SHADER / SHADER_READ; see render_pass.h's
     /// needs_exit_dependency block) -- precisely the write-then-read hazard between
     /// consecutive pyramid stages. SmaaPass chains three OffscreenTargets the same
-    /// way with no manual barriers; this pass follows that precedent, not
-    /// SceneColorMipPass's manual per-mip barrier (whose accompanying comment
-    /// predates that exit dependency and is stale).
+    /// way with no manual barriers; this pass follows that precedent rather than
+    /// SceneColorMipPass's explicit per-mip barrier, which restates that same
+    /// exit dependency.
     void execute(coopa::gfx::command::CommandBuffer& cmd, const Params& params) {
         static constexpr VkClearColorValue kBlack{{0.0f, 0.0f, 0.0f, 1.0f}};
 

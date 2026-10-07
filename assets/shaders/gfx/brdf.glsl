@@ -2,8 +2,8 @@
 #define GFX_BRDF_GLSL
 
 // gfx/brdf.glsl -- Cook-Torrance BRDF helpers shared by every deferred/
-// forward lighting pass (deferred_lighting.frag, pbr.frag, probe_capture.frag,
-// transparent.frag) and, via fresnel_schlick_roughness, by gfx/ibl.glsl.
+// forward lighting shader (gfxcoopa's probe_capture.frag and the consumer's
+// own lighting shaders) and, via fresnel_schlick_roughness, by gfx/ibl.glsl.
 //
 // Declares no uniforms, samplers or blocks, so every includer can place its
 // descriptor sets at whatever index suits it. env_brdf_approx() is Karis'

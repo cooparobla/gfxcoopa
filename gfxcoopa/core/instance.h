@@ -3,8 +3,8 @@
  * @brief Vulkan instance creation and lifetime management.
  *
  * The Instance is the entry point for all Vulkan API calls. It initializes
- * volk, creates VkInstance, and (in debug builds) installs a validation
- * layer debug messenger. Analogous to creating an OpenGL context.
+ * volk, creates VkInstance, and (when validation is enabled and the layer is
+ * installed) installs a validation-layer debug messenger. Analogous to creating an OpenGL context.
  */
 
 #ifndef COOPA_GFX_CORE_INSTANCE_H
@@ -52,8 +52,9 @@ public:
      *
      * @param app_name Application display name embedded in the instance.
      * @param enable_validation Enable Khronos validation layer + debug messenger.
-     * @throws std::runtime_error if instance creation fails or validation is
-     *         requested but not available.
+     * @throws std::runtime_error if instance creation fails. A requested but
+     *         missing validation layer only logs a warning; the instance is
+     *         created without it.
      */
     Instance(const std::string& app_name, bool enable_validation = true) {
         // Initialize volk (loads vulkan-1.so / vulkan-1.dll at runtime).

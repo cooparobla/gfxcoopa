@@ -1,7 +1,7 @@
 /**
  * @file volumetrics_pass.h
- * @brief Raymarched LOCAL volumes (see assets/shaders/volumetrics_march.frag and
- *        volumetrics_composite.frag).
+ * @brief Raymarched LOCAL volumes (the caller's volumetrics_march.frag and
+ *        volumetrics_composite.frag, e.g. toyengine's).
  *
  * Two fullscreen stages. The MARCH integrates the medium into a low-resolution
  * target (rgb = in-scatter, a = transmittance) -- the expensive part, so it runs at

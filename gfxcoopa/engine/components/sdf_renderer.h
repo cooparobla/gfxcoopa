@@ -90,7 +90,7 @@ public:
     float surface_epsilon = 0.001f;
 
     /// Finite-difference step used by the tetrahedral normal estimator
-    /// (see GFX_SDF_NORMAL in gfx/sdf_march_body.glsl).
+    /// (see gfx_sdf_normal_renderer() in toyengine's gfx/sdf_scene_body.glsl).
     float normal_epsilon = 0.002f;
 
     /// Default smooth-blend strength applied when a collected SdfShape

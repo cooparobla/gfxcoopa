@@ -1,6 +1,6 @@
 /**
  * @file camera_ubo.h
- * @brief Per-frame camera matrices UBO for the toon and outline render passes.
+ * @brief Per-frame camera matrices UBO (set 0 of every scene pass).
  *
  * Manages a host-visible uniform buffer containing view matrix, projection matrix,
  * and camera world position. Updated once per frame from the active CameraComponent.

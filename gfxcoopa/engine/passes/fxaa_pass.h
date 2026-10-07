@@ -7,10 +7,8 @@
  * pipeline::RenderPass's hardcoded LOAD_OP_CLEAR, documented on FogPass itself, for why that
  * target can't be the same image this pass reads from).
  *
- * Unlike blendy's ToneMappingPass (tonemapping_pass.h), which fuses FXAA into the HDR->LDR
- * tonemap step and re-tonemaps every one of FXAA's ~30 taps, this pass expects an
- * already-tonemapped LDR source and does no exposure/ACES work itself -- see fxaa.frag's own
- * file doc for why that's a deliberate behavior change, not just a refactor.
+ * This pass expects an already-tonemapped LDR source and does no exposure/ACES work itself -- see toyengine's
+ * fxaa.frag file doc for why it reads LDR rather than re-tonemapping every tap.
  */
 
 #ifndef GFXCOOPA_ENGINE_PASSES_FXAA_PASS_H

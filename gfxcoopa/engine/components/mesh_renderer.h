@@ -112,7 +112,7 @@ struct PBRMaterial {
     std::string texture_alpha_mask         = "";
 
     /// Empty (the default) selects the stock surface shader for this material's
-    /// alpha_mode -- exactly today's behaviour. Otherwise the name of a shader registered
+    /// alpha_mode. Otherwise the name of a shader registered
     /// in a pipeline::SurfaceShaderRegistry (see gfxcoopa/pipeline/surface_shader.h and the
     /// layered-shaders plan's gfx/surface/*.glsl backbones): a scene author writing
     /// `shader: foliage` picks the same G-buffer/shadow/shadow-cube backbone their
@@ -160,7 +160,7 @@ struct PBRMaterial {
      *
      * When false (Opaque/Blend, or a Mask material with no texture_alpha_mask), the G-buffer
      * and shadow passes bind a 1x1 white fallback instead, which collapses the shader-side test
-     * back to today's constant-alpha behaviour.
+     * back to the constant material.albedo.a test.
      */
     bool has_alpha_mask() const { return alpha_mode == AlphaMode::Mask && alpha_mask_handle.is_loaded(); }
 
@@ -184,7 +184,8 @@ struct PBRMaterial {
      * A value of 0.0 disables the discard entirely, which is what OPAQUE and BLEND
      * materials need since only MASK performs an alpha test in the G-buffer pass. When
      * has_alpha_mask() is true, the shader multiplies this against the sampled mask's alpha
-     * rather than the constant material.albedo.a alone -- see gbuffer.frag/shadow_depth.frag.
+     * rather than the constant material.albedo.a alone -- see the caller's G-buffer and
+     * shadow shaders (toyengine's gfx/surface/gbuffer_fs.glsl / shadow_fs.glsl).
      *
      * @return 0.0 for non-Mask materials, otherwise alpha_cutoff clamped to (0, 1].
      */

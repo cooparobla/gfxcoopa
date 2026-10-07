@@ -29,7 +29,7 @@ namespace passes {
 /**
  * @class GBufferPipeline
  * @brief The pipelines that rasterize opaque and alpha-masked geometry into the
- *        G-buffer's four colour attachments.
+ *        G-buffer's five colour attachments.
  *
  * Holds the stock back-face-culled pipeline, a no-cull sibling, and one variant
  * per named SurfaceShaderDesc registered through add_variant(). bind() selects
@@ -42,8 +42,8 @@ public:
     // pushed once per instanced draw batch, not per object.
     //
     // 80 bytes total. The first 32 bytes (through alpha_cutoff) are byte-identical to
-    // TransparentPass::PushConstants / ProbeCapturePass::PushConstants, which stay at 32 bytes -- emissive is deferred
-    // (opaque G-buffer) only, so those forward-path structs deliberately don't grow.
+    // the first 32 of TransparentPass::PushConstants / ProbeCapturePass::PushConstants --
+    // emissive is deferred (opaque G-buffer) only, so those forward-path structs don't carry it.
     //
     // gfx_time/gfx_params are the standard trailing "surface" block every surface-shader
     // backbone appends (see gfx/surface/gbuffer_vs.glsl/gbuffer_fs.glsl) -- 32 bytes, fixed

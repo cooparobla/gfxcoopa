@@ -1,6 +1,6 @@
 # Pipeline Submodule (`coopa::gfx::pipeline`)
 
-The `coopa::gfx::pipeline` submodule provides RAII wrappers and builders for Vulkan shaders, render passes, descriptor pools/layouts/sets, and graphics pipeline state configuration.
+The `coopa::gfx::pipeline` submodule provides RAII wrappers and builders for Vulkan shaders, render passes, descriptor pools/layouts/sets, and graphics pipeline state configuration, plus the shader-name resolver and surface-shader registry the engine passes use.
 
 ---
 
@@ -12,12 +12,12 @@ The `coopa::gfx::pipeline` submodule provides RAII wrappers and builders for Vul
 └──────────────────────────────────────────────────────────────────────────────────────────┘
 
        ┌───────────────────────┐                        ┌───────────────────────┐
-       │     ShaderModule      │                        │  DescriptorSetLayout  │
+       │        Shader         │                        │  DescriptorSetLayout  │
        └───────────┬───────────┘                        └───────────┬───────────┘
                    │                                                │
                    ▼                                                ▼
        ┌───────────────────────┐                        ┌───────────────────────┐
-       │    PipelineConfig     ├───────────────────────►│    PipelineLayout     │
+       │     PipelineDesc      ├───────────────────────►│   VkPipelineLayout    │
        └───────────┬───────────┘                        └───────────┬───────────┘
                    │                                                │
                    ▼                                                ▼
@@ -32,23 +32,33 @@ The `coopa::gfx::pipeline` submodule provides RAII wrappers and builders for Vul
 
 ### [descriptor.h](descriptor.h)
 - **Role**: RAII abstractions for Vulkan descriptor sets, layouts, and pools.
-- **Key Classes / Structs**: `DescriptorSetLayout`, `DescriptorPool`, `DescriptorWriter`.
-- **Details**: `DescriptorSetLayout` configures layout bindings; `DescriptorPool` allocates sets; `DescriptorWriter` provides a builder pattern for updating buffer (`bind_buffer`) and image (`bind_image`) descriptors via `vkUpdateDescriptorSets`.
+- **Key Classes / Structs**: `DescriptorSetLayout`, `DescriptorPool`, `DescriptorSet`, `DescriptorLayoutBuilder`, `DescriptorPoolBuilder`.
+- **Details**: `DescriptorLayoutBuilder` adds bindings by type (`uniform_buffer`, `storage_buffer`, `combined_sampler`, `storage_image`) and builds a `DescriptorSetLayout`; `DescriptorPoolBuilder` sizes a pool from the layouts it will serve (`add_sets(layout, count)`); `DescriptorSet` is allocated from a pool and updated with `bind_buffer`, `bind_storage_buffer` and `bind_image`.
 
 ### [pipeline.h](pipeline.h)
-- **Role**: RAII encapsulation of graphics and compute pipelines (`VkPipeline`, `VkPipelineLayout`).
-- **Key Classes / Structs**: `Pipeline`, `PipelineConfig`.
-- **Details**: Provides a builder pattern (`PipelineConfig`) for vertex input bindings, input assembly, rasterization state, multisampling, depth-stencil testing, color blending, dynamic states, and push constant ranges.
+- **Role**: RAII encapsulation of a graphics pipeline and its layout (`VkPipeline`, `VkPipelineLayout`).
+- **Key Classes / Structs**: `Pipeline`, `PipelineDesc`, `RasterState`, `DepthState`, `BlendState`, `PushConstantRange`, `BlendMode`, `PipelineConfig`.
+- **Details**: The sealed constructor takes a `PipelineDesc` (shaders, `VertexLayout`, descriptor layouts, push-constant ranges, raster/depth/blend state); a blend `color_attachment_count` of 0 takes the count from the `RenderPass`. Raw-typed constructors taking `PipelineConfig` and Vk structs remain for internal use. Viewport and scissor are always dynamic.
 
 ### [render_pass.h](render_pass.h)
 - **Role**: RAII wrapper for `VkRenderPass`.
-- **Key Classes / Structs**: `RenderPass`, `RenderPassBuilder`.
-- **Details**: Simplifies creation of multi-attachment color/depth render passes, subpass descriptions, and subpass dependencies.
+- **Key Classes / Structs**: `RenderPass`.
+- **Details**: A single-subpass pass with an optional color attachment, optional depth attachment and optional MSAA, with configurable final layouts (present vs. shader-read). Exposes `samples()` and `color_attachment_count()` for the sealed `Pipeline` constructor.
 
 ### [shader.h](shader.h)
 - **Role**: Encapsulates SPIR-V shader module loading (`VkShaderModule`).
-- **Key Classes / Structs**: `ShaderModule`.
-- **Details**: Loads binary SPIR-V bytecode from file paths and creates shader stage info structures (`VkPipelineShaderStageCreateInfo`).
+- **Key Classes / Structs**: `Shader`.
+- **Details**: Loads a compiled `.spv` file for one stage (`ShaderStage` or `VkShaderStageFlagBits`) and builds its `VkPipelineShaderStageCreateInfo`.
+
+### [shader_library.h](shader_library.h)
+- **Role**: Resolves a logical shader name (e.g. `"ssr_composite.frag"`) to a compiled `.spv` path.
+- **Key Classes / Structs**: `ShaderLibrary`.
+- **Details**: Searches an ordered list of directories and returns the first match, caching results. A plain directory string converts implicitly to a one-entry library; `app_over_base(app_dir, base_dir)` builds the two-tier "app first, then gfxcoopa's `assets/shaders/`" search path.
+
+### [surface_shader.h](surface_shader.h)
+- **Role**: Registry of derived surface shaders (custom vertex/fragment entry points layered on the G-buffer, shadow and transparent backbones).
+- **Key Classes / Structs**: `SurfaceShaderDesc`, `SurfaceShaderDomain`, `SurfaceShaderRegistry`.
+- **Details**: Each description names its logical entry points (`vert`, `frag`, `shadow_vert`, `shadow_frag`, `shadow_cube_vert`, `shadow_cube_frag`) plus a cull mode; the caller resolves them through its `ShaderLibrary` and hands the `.spv` paths to a pass's `add_variant()`. `add()` and `require()` throw on empty, duplicate or unknown names.
 
 ---
 
@@ -60,29 +70,26 @@ The `coopa::gfx::pipeline` submodule provides RAII wrappers and builders for Vul
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/pipeline.h>
 
-// 1. Create render pass
-coopa::gfx::pipeline::RenderPassBuilder rp_builder(device);
-auto render_pass = rp_builder
-    .add_color_attachment(swapchain.format(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
-    .build();
+using namespace coopa::gfx;
+
+// 1. Create render pass (color only, presented to the swapchain)
+pipeline::RenderPass render_pass(device, swapchain.image_format(), VK_FORMAT_UNDEFINED);
 
 // 2. Load SPIR-V shaders
-coopa::gfx::pipeline::ShaderModule vert_shader(device, "shaders/vert.spv");
-coopa::gfx::pipeline::ShaderModule frag_shader(device, "shaders/frag.spv");
+pipeline::Shader vert_shader(device, "assets/shaders/test.vert.spv", ShaderStage::Vertex);
+pipeline::Shader frag_shader(device, "assets/shaders/test.frag.spv", ShaderStage::Fragment);
 
 // 3. Build descriptor set layout
-coopa::gfx::pipeline::DescriptorSetLayout layout = coopa::gfx::pipeline::DescriptorSetLayout::Builder(device)
-    .add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT)
-    .build();
+pipeline::DescriptorSetLayout layout = pipeline::DescriptorLayoutBuilder()
+    .uniform_buffer(0, ShaderStage::Vertex)
+    .build(device);
 
-// 4. Configure and create graphics pipeline
-coopa::gfx::pipeline::PipelineConfig config{};
-config.shader_stages = {
-    vert_shader.stage_info(VK_SHADER_STAGE_VERTEX_BIT),
-    frag_shader.stage_info(VK_SHADER_STAGE_FRAGMENT_BIT)
-};
-config.descriptor_set_layouts = { layout.handle() };
-config.render_pass = render_pass->handle();
+// 4. Describe and create the graphics pipeline
+pipeline::PipelineDesc desc;
+desc.shaders            = {&vert_shader, &frag_shader};
+desc.descriptor_layouts = {&layout};
+desc.depth.test         = false;  // no depth attachment
+desc.depth.write        = false;
 
-coopa::gfx::pipeline::Pipeline pipeline(device, config);
+pipeline::Pipeline triangle(device, render_pass, desc);
 ```

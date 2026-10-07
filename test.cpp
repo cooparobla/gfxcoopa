@@ -634,9 +634,8 @@ void test_descriptor_set() {
 // --- Sealed API (gfxcoopa/types/*, gfxcoopa/pipeline builders,
 //     gfxcoopa/command/command_buffer.h's transition/copy additions) ---
 //
-// The tests above exercise the raw Vk*-typed API surface, which every
-// pre-seal downstream consumer had to speak directly. This test exercises
-// the sealed replacement end-to-end against a live device+validation
+// The tests above exercise the raw Vk*-typed API surface. This test
+// exercises the sealed API end-to-end against a live device+validation
 // layers, not just compiling it -- proving the barrier access/stage masks
 // in detail::barrier_masks_for() and the descriptor pool sizing in
 // DescriptorPoolBuilder are actually correct at runtime, not merely

@@ -54,9 +54,8 @@ public:
                        const std::string& frag_spv)
         : device_(device), allocator_(allocator)
     {
-        // 1. Shaders. vert_spv is expected to be hiz_downsample.vert.spv -- it is a
-        // byte-identical fullscreen-triangle generator to every other pass in this pipeline,
-        // so no new vertex shader is needed here.
+        // 1. Shaders. vert_spv is the caller's shared fullscreen-triangle vertex shader
+        // (toyengine's fullscreen.vert), the same one every other fullscreen pass uses.
         // 2. Sampler. max_lod and mipmap_mode are set in recreate() once mip_levels_ is known --
         // a sampler with maxLod = 0 silently clamps every explicit-LOD read back to mip 0 (the
         // exact trap documented in hiz_pass.h), and MIPMAP_MODE_NEAREST would make the cone LOD
@@ -253,10 +252,9 @@ public:
 
             cmd.end_render_pass();
 
-            // Per-mip availability/visibility barrier -- not optional. The shared RenderPass's
-            // only subpass dependency has srcAccessMask = 0, which is not sufficient to make
-            // this mip's colour write visible to the next mip's (or SSR's) fragment-shader read
-            // of it (see hiz_pass.h's identical barrier for the full explanation).
+            // Per-mip availability/visibility barrier making this mip's colour write visible
+            // to the next mip's (or SSR's) fragment-shader read of it -- an explicit restatement
+            // of the render pass's exit dependency (see hiz_pass.h's identical barrier).
             VkImageMemoryBarrier mip_barrier{};
             mip_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
             mip_barrier.oldLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

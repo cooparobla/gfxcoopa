@@ -29,12 +29,12 @@ endif()
 configure_file(configuration/root_directory.h.in configuration/root_directory.h)
 
 # --- Shader compilation ---
-# gfxcoopa's own assets/shaders/ is the base shader library every other repo
-# points -I at, so compiling it here (INCLUDE_DIR == SHADER_DIR) is both
-# gfxcoopa's own shader build AND a continuously-run compile test that every
-# base entry point still works standalone against the gfx/ headers it ships.
-# INCLUDE_DIR defaults to gfxcoopa's own shaders (see cmake/GfxShaders.cmake),
-# so a downstream consumer does not pass it explicitly.
+# assets/shaders/ holds the shaders gfxcoopa's own code loads (GI: brdf_lut,
+# env_prefilter, probe_capture; SmaaPass: smaa_*), the test.vert/.frag pair
+# test.cpp draws with, and the shared gfx/ headers (brdf, ibl, sky, spot_light,
+# surface2d) that consumers reach through -I. Every other shader lives with the
+# app that loads it. INCLUDE_DIR defaults to gfxcoopa's own shaders (see
+# cmake/GfxShaders.cmake), so a downstream consumer does not pass it explicitly.
 include(cmake/GfxShaders.cmake)
 gfx_add_shader_target(shaders
     SHADER_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders"

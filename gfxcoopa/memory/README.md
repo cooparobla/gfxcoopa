@@ -22,7 +22,7 @@ The `coopa::gfx::memory` submodule provides Vulkan Memory Allocator (VMA) RAII i
         ├───────────────────────┤                       ├───────────────────────┤
         │ - VkBuffer            │                       │ - VkImage             │
         │ - VmaAllocation       │                       │ - VkImageView         │
-        │ - map() / upload()    │                       │ - current_usage()     │
+        │ - upload()/download() │                       │ - current_usage()     │
         └───────────────────────┘                       └───────────────────────┘
 ```
 
@@ -38,12 +38,17 @@ The `coopa::gfx::memory` submodule provides Vulkan Memory Allocator (VMA) RAII i
 ### [buffer.h](buffer.h)
 - **Role**: RAII abstraction for GPU memory buffers (`VkBuffer` + `VmaAllocation`).
 - **Key Classes / Structs**: `Buffer`.
-- **Details**: Manages staging buffers, vertex/index buffers, uniform buffers (UBOs), and storage buffers (SSBOs). Provides host-mapping methods (`map()`, `unmap()`, `upload()`) with explicit VMA memory usage flags.
+- **Details**: Named factories for host-visible, persistently mapped buffers (`vertex()`, `index()`, `uniform()`, `staging()`, `storage()`), plus constructors taking either the sealed `BufferUsage`/`MemoryResidency` vocabulary or raw Vk/VMA flags. `upload()`/`download()` copy through the persistent mapping, or map and unmap for an unmapped buffer.
 
 ### [image.h](image.h)
 - **Role**: RAII abstraction for GPU images (`VkImage`, `VkImageView`, `VmaAllocation`).
 - **Key Classes / Structs**: `Image`.
-- **Details**: Owns a 2D `VkImage` + `VmaAllocation` + `VkImageView` and tracks the `TextureUsage` it was last transitioned to (`current_usage()`), which is what lets `command::CommandBuffer::transition()` take only a destination. Staged pixel upload lives in `image_upload.h`.
+- **Details**: Owns a 2D `VkImage` + `VmaAllocation` + `VkImageView` and tracks the `TextureUsage` it was last transitioned to (`current_usage()`), which is what lets `command::CommandBuffer::transition()` take only a destination. Constructors accept either the sealed `Format`/`ImageUsage`/`MemoryResidency`/`SampleCount` vocabulary or raw Vk/VMA types.
+
+### [image_upload.h](image_upload.h)
+- **Role**: Staged pixel upload into a new 2D image.
+- **Key Classes / Structs**: `upload_image_2d()`.
+- **Details**: Copies tightly packed pixels into a staging buffer, then uses `CommandPool::submit_once()` to transition the image to `TransferDst`, copy, and transition to `ShaderRead`. Blocks until done, so the returned image is ready to sample.
 
 ---
 
@@ -52,19 +57,23 @@ The `coopa::gfx::memory` submodule provides Vulkan Memory Allocator (VMA) RAII i
 ```cpp
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/memory/buffer.h>
-#include <gfxcoopa/memory/image.h>
+#include <gfxcoopa/memory/image_upload.h>
+
+using namespace coopa::gfx;
 
 // Create VMA Allocator
-coopa::gfx::memory::Allocator allocator(instance, device);
+memory::Allocator allocator(instance, device);
 
-// Allocate a GPU vertex buffer
-coopa::gfx::memory::Buffer vertex_buffer(
-    allocator,
-    sizeof(Vertex) * vertices.size(),
-    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-    VMA_MEMORY_USAGE_GPU_ONLY
-);
+// Host-visible, persistently mapped vertex buffer
+VkDeviceSize bytes = sizeof(Vertex) * vertices.size();
+memory::Buffer vertex_buffer = memory::Buffer::vertex(device, allocator, bytes);
+vertex_buffer.upload(vertices.data(), bytes);
 
-// Upload data using staging buffer
-vertex_buffer.upload(cmd, vertices.data(), sizeof(Vertex) * vertices.size());
+// A custom combination through the sealed vocabulary
+memory::Buffer ssbo(device, allocator, bytes,
+                    BufferUsage::Storage | BufferUsage::TransferDst, MemoryResidency::GpuOnly);
+
+// Upload RGBA8 pixels into a sampled image (blocks until ready)
+std::unique_ptr<memory::Image> tex = memory::upload_image_2d(
+    device, allocator, cmd_pool, pixels, width, height, Format::RGBA8_Unorm, 4);
 ```

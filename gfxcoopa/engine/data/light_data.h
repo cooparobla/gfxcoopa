@@ -1,8 +1,8 @@
 /**
  * @file light_data.h
- * @brief Per-frame directional light UBO for toon shading.
+ * @brief Per-frame light UBO: one directional light (with shadow cascades), point and
+ *        spot lights, sky colours, and the local-light shadow records.
  *
- * A single directional light described by direction, color, and ambient color.
  * Uploaded as a uniform buffer updated once per frame.
  */
 
@@ -107,8 +107,8 @@ struct alignas(16) LightUBO {
     glm::vec4 dir_direction          = glm::vec4(0.0f); /**< xyz = light direction (normalized), w = intensity */
     glm::vec4 dir_color              = glm::vec4(0.0f); /**< xyz = RGB color, w = unused */
     /**< Directional/point soft-shadow tuning. Its position in the struct is
-     * fixed: the ~11 shader LightUBO blocks across gfxcoopa/toyengine/blendy
-     * must byte-match this layout, so moving it shifts every later field.
+     * fixed: every shader-side LightUBO block (gfxcoopa's probe_capture.frag,
+     * toyengine's and blendy's) must byte-match this layout, so moving it shifts every later field.
      *   x = directional shadow intensity, 0..1 (DirectionalLightComponent::shadow_intensity)
      *   y = point-light PCF disk radius, as a tangent-space offset on a unit sample
      *       direction (toyengine converts this from PixelRenderConfig::point_shadow_softness
@@ -144,8 +144,8 @@ struct alignas(16) LightUBO {
 
     // Spot Lights -- appended after sky_ground for the same reason point_lights'
     // doc gives: nothing above this line moves, so a shader with no spot support
-    // (gfxcoopa's pbr.frag/deferred_lighting.frag/transparent.frag/probe_capture.frag,
-    // any out-of-repo consumer) keeps compiling against the shorter prefix unchanged.
+    // (one whose block stops at sky_ground) keeps compiling against the shorter prefix
+    // unchanged.
     glm::mat4     spot_light_space_matrix = glm::mat4(1.0f); /**< Light projection * view matrix for the one shadow-casting spot (see light_counts.w). */
     glm::vec4     spot_shadow_params      = glm::vec4(0.005f, 0.0f, 0.0f, 0.05f); /**< x=bias, y=PCF penumbra scale K in texels*distance -- the shader divides by the fragment's light-space depth for a constant world-width penumbra; 0=hard (see calc_spot_shadow in pixel_shadow_body.glsl), z=shadow_enabled (1 or 0), w=normal_bias */
     SpotLightGPU  spot_lights[MAX_SPOT_LIGHTS];
@@ -169,15 +169,15 @@ struct alignas(16) LightUBO {
 
     // --- Directional shadow cascades ---
     //
-    // Appended last, per this struct's own append-only rule. The directional shadow map is
+    // Appended per this struct's own append-only rule. The directional shadow map is
     // an ATLAS of up to MAX_DIR_CASCADES tiles (see ShadowMapTarget), each tile a separate
     // ortho fit to one slice of the camera's depth range, so near-camera geometry gets a
     // box a few metres across while distant geometry keeps a coarse one.
     //
     // dir_light_space_matrix / dir_shadow_params.y / dir_shadow_params.w / pcss_params.y
-    // above hold CASCADE 0's values. A consumer with no cascade support (gfxcoopa's own
-    // pbr.frag/deferred_lighting.frag/transparent.frag) therefore keeps shading against the
-    // near cascade through the shorter prefix, rather than reading garbage.
+    // above hold CASCADE 0's values. A consumer with no cascade support therefore keeps
+    // shading against the near cascade through the shorter prefix, rather than reading
+    // garbage.
     glm::mat4 dir_cascade_matrix[MAX_DIR_CASCADES] = {
         glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f)
     };                                              /**< Per-cascade light projection * view;
@@ -228,11 +228,10 @@ struct alignas(16) LightUBO {
     LocalShadowBlock local_shadows;
 };
 
-// Pins the offset of sky_zenith -- the field every pre-spot-light shader's LightUBO
-// prefix ends on -- immediately after point_lights, so a future edit that inserts
-// something ahead of it (rather than appending after spot_lights, like this change
-// did) fails to compile instead of silently desyncing every hand-written GLSL block
-// from the C++ layout.
+// Pins the offset of sky_zenith -- where a shader LightUBO prefix with no spot support
+// ends -- immediately after point_lights, so an edit that inserts something ahead of it
+// (rather than appending at the end) fails to compile instead of silently desyncing every
+// hand-written GLSL block from the C++ layout.
 static_assert(offsetof(LightUBO, sky_zenith) == offsetof(LightUBO, point_lights) + sizeof(PointLightGPU) * MAX_POINT_LIGHTS,
     "LightUBO::sky_zenith moved -- every shader LightUBO block (gfxcoopa/toyengine/blendy) "
     "byte-matches this prefix; see the point_lights/sky_zenith comment above.");

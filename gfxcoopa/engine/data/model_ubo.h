@@ -1,6 +1,6 @@
 /**
  * @file model_ubo.h
- * @brief Per-object model matrix push constants for toon and outline pipelines.
+ * @brief A 128-byte per-object model + normal matrix push-constant block.
  *
  * Uses push constants (not a UBO) for the per-object model data — push constants
  * avoid descriptor set updates for each draw call and fit within the guaranteed

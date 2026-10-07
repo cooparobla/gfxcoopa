@@ -1,11 +1,9 @@
 # Extra glslc flags for this repo's shaders. Read by cbuild --vulkan
-# (/home/coopa/.sww/packages/cbuild/cbuild) and by cmake/GfxShaders.cmake.
-# One token per line. ${SIBLINGS} expands to the parent directory of this
-# repo checkout (the same thing CMake's ROOT_DIR_PARENT means).
+# (/home/coopa/.sww/packages/cbuild/cbuild); cmake/GfxShaders.cmake passes the
+# same -I itself. One token per line. ${SIBLINGS} expands to the parent
+# directory of this repo checkout (the same thing CMake's ROOT_DIR_PARENT means).
 #
-# gfxcoopa is the base shader library itself, but it still needs -I pointed
-# at its own assets/shaders/ so its base entry points can #include <gfx/...>
-# headers exactly like a downstream app would -- this is what makes those
-# entry points a real compile test of the shared-body hook contract.
+# -I points at gfxcoopa's own assets/shaders/ so its entry points can
+# #include <gfx/...> headers exactly like a downstream app does.
 -I
 ${SIBLINGS}/gfxcoopa/assets/shaders

@@ -2,8 +2,8 @@
  * @file dof_pass.h
  * @brief Physically-based depth of field: thin-lens circle of confusion ->
  *        half-resolution golden-angle spiral bokeh gather -> full-resolution
- *        composite (see assets/shaders/dof_coc.frag, dof_bokeh.frag,
- *        dof_composite.frag).
+ *        composite (shaders supplied by the caller -- see toyengine's
+ *        dof_coc.frag, dof_bokeh.frag, dof_composite.frag).
  *
  * Modelled on BloomPass's shape (owns its own OffscreenTargets, one Pipeline per
  * distinct shader, every descriptor bound once at construction -- so unlike
@@ -91,7 +91,7 @@ public:
         /// Plain multiplier on |CoC|, applied BEFORE the max_radius clamp. The blur-STRENGTH
         /// dial, deliberately separate from both focus_range (which sets how WIDE the sharp
         /// zone is) and max_radius (a safety ceiling -- see its own doc and config.yaml's
-        /// dof_max_radius comment for why using that as a strength dial was a bug). 0 is a
+        /// dof_max_radius comment for why it must not be used as a strength dial). 0 is a
         /// full DOF bypass.
         float blur_scale = 1.0f;
         int   sample_count = 32;        ///< Spiral taps; clamped to [8, MAX_DOF_TAPS] in-shader.

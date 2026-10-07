@@ -85,7 +85,7 @@ public:
 
         // 2b. Self-contained probe-capture resources (camera, light, BRDF LUT
         //     descriptor infra + the prefilter's source-cube descriptor).
-        //     Deliberately NOT shared with PbrRenderPipeline's per-frame
+        //     Deliberately NOT shared with blendy's PbrRenderPipeline's per-frame
         //     camera/light UBOs: bake() runs once, early -- before
         //     renderables_ is built, before the frame's camera/light data is
         //     written, and before any shadow pass has ever executed (shadow
@@ -164,8 +164,8 @@ public:
         // Bindings 3-6: reflectionMap_0..3 (Combined Image Samplers). Four
         // separately-named bindings, not a samplerCube[] array -- this device
         // does not enable shaderSampledImageArrayDynamicIndexing, so a
-        // dynamically-indexed sampler array would be illegal. Mirrors
-        // point_shadow_map_0..3 in deferred_lighting.frag/pbr.frag.
+        // dynamically-indexed sampler array would be illegal. See
+        // ibl_specular_probes_blended() in gfx/ibl.glsl for the shader side.
         coopa::gfx::pipeline::DescriptorLayoutBuilder gi_layout_builder;
         gi_layout_builder.uniform_buffer(0, coopa::gfx::ShaderStage::Fragment);   // GiUniforms (UBO)
         gi_layout_builder.storage_buffer(1, coopa::gfx::ShaderStage::Fragment);  // gi::SHProbes (SSBO)
@@ -403,11 +403,11 @@ private:
     /// cubemap_targets_[index]'s mip 0 from probe_pos, then GGX-prefilters
     /// mips 1..N-1 from that capture. Fully self-contained (own camera/light
     /// UBOs, shared across every probe index) -- see the constructor comment
-    /// for why this doesn't reuse PbrRenderPipeline's per-frame ones.
+    /// for why this doesn't reuse blendy's PbrRenderPipeline's per-frame ones.
     /**
      * @brief True when two materials would produce byte-identical probe-capture push constants.
      *
-     * Same fields as PbrRenderPipeline's own same_material_() predicate,
+     * Same fields as blendy's PbrRenderPipeline's own same_material_() predicate,
      * minus alpha/alpha_cutoff: probe capture always forces albedo.a=1 and
      * cutoff=0 regardless of the source material (see capture_reflection_probe_()'s
      * "always render fully opaque" comment), so those two never actually
@@ -441,7 +441,7 @@ private:
         // --- (1) Lights, straight from the scene. Shadows are disabled: no
         //         shadow pass has run yet at bake time (shadow images are
         //         still UNDEFINED), and probe_capture.frag declares no
-        //         shadow samplers. v1 limitation: probe capture is unshadowed.
+        //         shadow samplers, so probe capture is unshadowed.
         auto& lu = capture_lights_->data();
         lu = data::LightUBO{}; // reset counts / point array
         if (auto* dir_light = scene.find_first_component<DirectionalLightComponent>()) {
@@ -500,7 +500,7 @@ private:
         // A local, one-shot InstanceBatcher: this is a bake (called a
         // handful of times, not per frame), so there's no reason to keep a
         // persistent instance buffer around between bakes the way
-        // PbrRenderPipeline does for its per-frame geometry passes. Same
+        // blendy's PbrRenderPipeline does for its per-frame geometry passes. Same
         // batch key as the G-buffer/transparent passes (mesh + material
         // equality) -- probe capture always forces albedo.a=1 and cutoff=0,
         // so those two fields are excluded from the comparison here.
@@ -625,7 +625,7 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       gi_set_;
 
     // Self-contained resources for real reflection-probe geometry capture
-    // (see capture_reflection_probe_()). Independent of PbrRenderPipeline's
+    // (see capture_reflection_probe_()). Independent of blendy's PbrRenderPipeline's
     // per-frame camera/light UBOs -- built once, reused across every probe's bake.
     std::unique_ptr<data::CameraUBO> capture_camera_;
     std::unique_ptr<data::LightData> capture_lights_;

@@ -1,7 +1,7 @@
 /**
  * @file pixel_stylize_pass.h
  * @brief Optional bloom + tonemap + outline + ordered dither + palette
- *        quantization overlay (see assets/shaders/pixel_stylize.frag).
+ *        quantization overlay (the caller's pixel_stylize.frag, e.g. toyengine's).
  *
  * The tonemap step is optional (PushConstants::exposure <= 0 disables it):
  * a full PBR renderer with its own tonemap/AA chain (e.g. blendy) feeds
@@ -58,7 +58,7 @@ public:
      * outline_color (vec4) is listed first so its GLSL std430 16-byte
      * alignment lands at offset 0 for free -- everywhere else in gfxcoopa
      * that mixes a vec4 with scalars in a push-constant block (e.g.
-     * SsrPass::ResolvePushConstants, gbuffer.frag's material block) follows
+     * SsrPass::ResolvePushConstants, GBufferPipeline::PushConstants) follows
      * the same ordering, since a vec4 placed mid-struct forces the GLSL
      * side to insert padding the plain C++ struct below doesn't replicate.
      */
@@ -76,7 +76,7 @@ public:
         float     exposure              = 0.0f;  ///< <= 0 disables the tonemap step (input is already LDR).
         /// Final multiplier on the pre-blurred bloom image bound at binding 4 (see
         /// set_source_images()'s bloom_result param and BloomPass). <= 0 disables it.
-        /// No threshold/LOD fields here anymore: BloomPass's own bright-pass shader
+        /// No threshold/LOD fields here: BloomPass's own bright-pass shader
         /// thresholds once, per source texel, before any blurring -- re-thresholding
         /// the finished blurred result here would eat the halo falloff the pyramid
         /// exists to produce, and there is no mip chain left to pick an LOD from.

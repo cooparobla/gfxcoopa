@@ -127,7 +127,7 @@ struct alignas(16) SdfGlobals {
     glm::vec4 camera_pos    = glm::vec4(0.0f);
     // Forward (BLEND) pass lighting/indirect/SSR tuning -- byte-for-byte the same fields
     // toyengine's ForwardGlobals carries (forward_globals.h, the mesh forward path's own
-    // analogous UBO), moved to a UBO instead of a push constant because the SDF forward
+    // analogous UBO), carried in a UBO rather than a push constant because the SDF forward
     // shader's per-object range/march fields (read from the renderer SSBO, not pushed)
     // already leave no push-constant room for this block too -- see this file's doc and
     // the plan's "why not push constants" note.

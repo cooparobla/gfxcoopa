@@ -70,8 +70,11 @@ built on it.
   Meshes are welded, cache-optimised and given LODs with meshoptimizer.
 - **Rendering helpers.** Instanced batching, a material texture cache, samplers and skinned
   mesh data.
-- **Shader library.** All GLSL lives in `assets/shaders/`. Shared bodies sit under
-  `assets/shaders/gfx/`, so an application can override one entry point and reuse the rest.
+- **Caller-supplied shaders.** Most passes define their push-constant and descriptor layouts
+  and take `.spv` paths from the caller, which owns the GLSL (toyengine ships a full set).
+  `assets/shaders/` holds only the shaders gfxcoopa loads itself (GI baking, SMAA), the
+  test-suite triangle, and shared headers under `assets/shaders/gfx/` (BRDF, IBL, sky, spot
+  light, 2D quad vertex backbone) that consumers `#include` through the default `-I` path.
 
 ## Getting started
 
@@ -186,7 +189,8 @@ The `gfxcoopa` executable is the test suite (`test.cpp`). It runs the CPU-only t
 then brings up a Vulkan device and checks every core wrapper: buffers, images, shaders,
 render passes, pipelines, descriptors, sync, readback, `Context` and swapchain resize. It
 loads shaders by relative path, so run it from the repository root. It opens a small window
-while it runs and needs the Khronos validation layer installed.
+while it runs and enables the Khronos validation layer (install it so validation errors
+surface).
 
 ## Project layout
 
@@ -209,7 +213,7 @@ gfxcoopa/
     ├── gi/          SH probe baking, GiSystem, BRDF LUT
     ├── loaders/     AssetManager loaders for meshes and textures
     └── util/        samplers, instance batcher, texture cache, SMAA textures, SH math
-assets/shaders/  GLSL entry points; gfx/ holds the shared bodies
+assets/shaders/  GI, SMAA and test shaders; gfx/ holds the shared GLSL headers
 cmake/           GfxShaders.cmake (gfx_add_shader_target)
 includes/        vendored volk (submodule), VMA, stb_image
 src/             gfx_impl.cpp: the single TU that compiles volk/VMA/stb implementations
@@ -225,8 +229,9 @@ test.cpp         the test suite
   differ on Retina displays, so size render targets from `ctx.extent()` (framebuffer pixels).
 - **Present modes.** `vsync = true` (the default) uses FIFO. With `vsync = false` gfxcoopa
   prefers MAILBOX and falls back to FIFO. MoltenVK has no MAILBOX, so it is always FIFO there.
-- **Validation.** `ContextConfig::validation` defaults to `true`, and `Instance` throws if the
-  Khronos validation layer is not installed. Set it to `false` to run without the layer.
+- **Validation.** `ContextConfig::validation` defaults to `true`. If the Khronos validation
+  layer is not installed, `Instance` logs a warning and continues without it. Set it to
+  `false` to skip the layer.
 - **SMAA.** `engine/util/smaa_textures.h` includes `SearchTex.h` and `AreaTex.h` from the
   [SMAA reference implementation](https://github.com/iryoku/smaa). They are not vendored.
   If you use `SmaaPass`, pass `-DSMAA_TEXTURES_DIR=/path/to/smaa/Textures`.

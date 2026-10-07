@@ -323,7 +323,8 @@ public:
     /// @param hiz_view   The prefiltered depth pyramid, levels 1..N only (built with HiZPass's
     ///                   external_level0): ssao.frag reads mip k-1 of it for level k.
     /// @param depth_view The rasterized depth -- level 0 of that pyramid, read directly
-    ///                   instead of being copied into it (exact: level 0 was a texelFetch copy).
+    ///                   instead of being copied into it (exact: a level-0 copy would be a
+    ///                   texelFetch of the same texels).
     /// @param velocity_view The G-buffer's velocity attachment (GBufferTarget::g4_view_typed():
     ///                   xy = uv motion since last frame, z = previous linear view depth, w =
     ///                   current), or null: the resolve then falls back to Params::reproject,

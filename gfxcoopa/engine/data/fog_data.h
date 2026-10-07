@@ -43,8 +43,8 @@ struct alignas(16) FogUBO {
     glm::vec4 mode_density   = glm::vec4(0.0f); /**< x = mode (0 Linear/1 Exp/2 Exp2), y = density, z = linear_start, w = linear_end. */
     glm::vec4 height_params  = glm::vec4(0.0f); /**< x = height_base, y = height_falloff (<=0 disables), z = sky_blend, w = sun_amount. */
     glm::vec4 misc_params    = glm::vec4(0.0f); /**< x = sun anisotropy g, y = max_opacity,
-                                                 z = UNUSED (was the local volume count, before fog
-                                                 became global-only),
+                                                 z = unused (fog is global-only; local volumes
+                                                 live in VolumetricsUBO),
                                                  w = fog_max_distance -- the distance the global fog term
                                                  saturates at, and the distance sky pixels are evaluated at
                                                  (rather than a hard-coded "no fog"), so a grazing ray's

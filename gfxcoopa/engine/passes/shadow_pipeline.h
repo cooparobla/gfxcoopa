@@ -27,27 +27,24 @@ namespace passes {
 
 /**
  * @struct DirectionalShadowPushConstants
- * @brief Push constant block for directional shadow depth pass (68 bytes).
+ * @brief Push constant block for directional shadow depth pass (112 bytes).
  *
  * model is streamed per-instance via data::InstanceData rather than pushed
- * here. light_space_matrix is shared across the whole pass call; alpha is
- * per-BATCH (all instances in one draw share one
- * mesh AND, for BLEND casters, one alpha -- see InstanceBatcher's shadow
- * batch key) and drives shadow_depth.frag's stochastic alpha-dither discard.
- * 1.0 (the default, and always what OPAQUE/MASK casters get) means "fully
- * opaque, no dithering" -- see shadow_common.glsl.
+ * here. light_space_matrix is shared across the whole pass call. alpha is a
+ * per-batch caster opacity slot (1.0 = fully opaque, the default); the
+ * shadow fragment shader declares it but need not read it -- toyengine's
+ * gfx/surface/shadow_fs.glsl only performs the CUTOUT mask test.
  */
 struct alignas(16) DirectionalShadowPushConstants {
     glm::mat4 light_space_matrix;
     float     alpha = 1.0f;
 
     /// CUTOUT (AlphaMode::Mask) support: 0.0 disables the alpha-mask discard in
-    /// shadow_depth.frag entirely (the default, and what OPAQUE/BLEND casters get -- see
+    /// the shadow fragment shader entirely (the default, and what OPAQUE/BLEND casters get -- see
     /// PBRMaterial::gpu_alpha_cutoff()); a masked caster's own material.gpu_alpha_cutoff()
     /// otherwise. Only meaningful when this ShadowPipeline was built with a non-null
-    /// material_layout (see the ctor) -- shadow_depth.frag has no mask sampler to test
-    /// against otherwise, and every caller that predates CUTOUT never sets this field, so it
-    /// stays at its 0.0 default and behaves exactly as before.
+    /// material_layout (see the ctor) -- the shader has no mask sampler to test against
+    /// otherwise, so a caller with no CUTOUT support leaves this at its 0.0 default.
     float     alpha_cutoff = 0.0f;
 
     /// Explicit std430 padding: glm::vec4 is NOT guaranteed 16-byte aligned in this build
@@ -77,10 +74,10 @@ static_assert(sizeof(DirectionalShadowPushConstants) <= 128,
 
 /**
  * @struct CubeShadowPushConstants
- * @brief Push constant block for point light cubemap shadow pass (84 bytes).
+ * @brief Push constant block for point light cubemap shadow pass (128 bytes).
  *
- * Same model-removal as DirectionalShadowPushConstants above; alpha has the
- * same per-batch, stochastic-dither meaning too.
+ * Same as DirectionalShadowPushConstants above (model streamed per instance,
+ * alpha a per-batch opacity slot), plus the light's position and range.
  */
 struct alignas(16) CubeShadowPushConstants {
     glm::mat4 light_space_matrix;
@@ -88,7 +85,7 @@ struct alignas(16) CubeShadowPushConstants {
     float     alpha = 1.0f;
 
     /// See DirectionalShadowPushConstants::alpha_cutoff -- same CUTOUT meaning, same
-    /// backward-compatible 0.0 default.
+    /// 0.0 (disabled) default.
     float     alpha_cutoff = 0.0f;
 
     /// Explicit std430 padding -- see DirectionalShadowPushConstants::_pad0/_pad1 for why
@@ -133,7 +130,7 @@ public:
         // (built here, not via data::Vertex::layout(), which declares all four of its
         // position/normal/uv/tangent attributes) eliminates validation warnings about unconsumed
         // locations 1/2/3 for normal, uv, and tangent. When material_layout is non-null (CUTOUT
-        // support requested), location 2 (uv) is added too, so shadow_depth.frag/shadow_cube.frag
+        // support requested), location 2 (uv) is added too, so the shadow fragment shaders
         // can alpha-test against the same mask texture the G-buffer pass uses; location 1
         // (normal) and 3 (tangent) stay unconsumed either way -- depth-only shading needs neither.
         //

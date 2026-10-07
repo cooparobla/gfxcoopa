@@ -35,9 +35,9 @@ namespace passes {
  * @brief Builds a hierarchical depth (Hi-Z) pyramid from the G-buffer depth.
  *
  * The reduction each coarse level applies is whatever `frag_spv` computes:
- * hiz_downsample.frag's min() for the conservative pyramid SsrPass marches,
- * ao_depth_downsample.frag's depth-aware weighted average for the prefiltered
- * pyramid SsaoPass marches.
+ * e.g. toyengine's hiz_downsample.frag min() for the conservative pyramid SsrPass
+ * marches, or its ao_depth_downsample.frag depth-aware weighted average for the
+ * prefiltered pyramid SsaoPass marches.
  *
  * Owns the pyramid image, one view and framebuffer per mip, and one descriptor
  * set per mip. execute() records one fullscreen draw per level.
@@ -297,13 +297,13 @@ public:
 
             cmd.end_render_pass();
 
-            // The shared RenderPass's only subpass dependency handles entry synchronization
-            // (EXTERNAL -> 0) with srcAccessMask = 0, which is not sufficient to make this
-            // mip's color write visible to the next mip's (or, on the last iteration, SSR's)
-            // fragment-shader read of it -- an unsynchronized read-after-write hazard across
-            // the whole pyramid. Layout doesn't change (render pass finalLayout is already
-            // SHADER_READ_ONLY_OPTIMAL, matching the read), this is purely an availability/
-            // visibility barrier scoped to the single mip level just written.
+            // Makes this mip's color write visible to the next mip's (or, on the last
+            // iteration, SSR's) fragment-shader read of it. The render pass's EXIT dependency
+            // (finalLayout SHADER_READ_ONLY_OPTIMAL; see render_pass.h's needs_exit_dependency)
+            // already orders the same write -> read pair, so this barrier is an explicit,
+            // per-mip restatement of it. Layout doesn't change (finalLayout already matches
+            // the read); this is purely an availability/visibility barrier scoped to the
+            // single mip level just written.
             VkImageMemoryBarrier mip_barrier{};
             mip_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
             mip_barrier.oldLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

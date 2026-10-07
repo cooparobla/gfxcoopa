@@ -1,8 +1,8 @@
 /**
  * @file offscreen_target.h
- * @brief Low-resolution render target for the retro rendering pipeline.
+ * @brief Single-colour-attachment render target (optionally with depth) at any resolution.
  *
- * Creates a color attachment (VK_FORMAT_R8G8B8A8_UNORM) and, unless built with
+ * Creates a color attachment (RGBA8_Unorm by default; the format is a ctor parameter) and, unless built with
  * kColorOnly, a depth attachment at a configurable resolution, with a matching RenderPass that transitions the
  * color image to SHADER_READ_ONLY_OPTIMAL after rendering so it can be sampled
  * by subsequent passes (post-processing, upscale).
@@ -59,7 +59,7 @@ inline constexpr ColorOnlyTag kColorOnly{};
  *
  * // Per frame:
  * target.begin(cmd);
- *   // Record toon + outline draw calls here...
+ *   // Record draw calls here...
  * target.end(cmd);
  *
  * // Now target.color_view() can be bound to a sampler for the upscale pass.

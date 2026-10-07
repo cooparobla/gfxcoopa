@@ -24,9 +24,8 @@ void main() {
     vec4 world_pos = in_model * vec4(in_position, 1.0);
     frag_world_pos = world_pos.xyz;
 
-    // normal_matrix used to be CPU-computed and streamed alongside model; now
-    // derived here instead, since scenes use non-uniform scale (e.g. Cornell
-    // box walls) so mat3(in_model) alone is wrong.
+    // Normal matrix derived from the per-instance model matrix: scenes use
+    // non-uniform scale (e.g. Cornell box walls), so mat3(in_model) alone is wrong.
     mat3 norm_mat = transpose(inverse(mat3(in_model)));
     vec3 N = normalize(norm_mat * in_normal);
     vec3 T = normalize(norm_mat * in_tangent.xyz);

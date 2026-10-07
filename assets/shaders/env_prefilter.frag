@@ -4,7 +4,7 @@
 // mip-0 capture (probe_capture.frag + probe_sky_background.frag write mip 0;
 // this shader never writes it). Reads source_cube (mip 0 only, bound via
 // CubemapTarget::mip0_cube_view()) instead of evaluating sky_gradient()
-// closed-form, since mip 0 may now contain real scene geometry.
+// closed-form, since mip 0 holds the captured scene geometry.
 
 #include "cubemap_faces.glsl"
 
