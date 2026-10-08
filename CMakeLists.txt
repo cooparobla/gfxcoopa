@@ -119,6 +119,9 @@ target_link_libraries(gfxcoopa_pure INTERFACE coopa::lib)
 # matching project() above, because `cplay` runs `./build/<project name>`. ---
 add_executable(gfxcoopa test.cpp)
 add_dependencies(gfxcoopa shaders)
+if(GFX_SHADER_OUTPUT_ROOT)   # shaders compiled into the build tree (cmake/GfxShaders.cmake)
+    target_compile_definitions(gfxcoopa PRIVATE GFX_TEST_SHADER_DIR="${GFX_SHADER_OUTPUT_ROOT}/shaders")
+endif()
 target_link_libraries(gfxcoopa PRIVATE coopa::gfx)
 
 enable_testing()

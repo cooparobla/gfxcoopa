@@ -111,9 +111,15 @@ static coopa::gfx::memory::Allocator*            g_allocator  = nullptr;
 static coopa::gfx::command::CommandPool*         g_cmd_pool   = nullptr;
 static coopa::gfx::pipeline::RenderPass*         g_render_pass = nullptr;
 
-// Shader .spv paths (relative to the binary, resolved at test time).
+// Shader .spv paths: next to the sources (relative to the repo root, the test's cwd), or where a
+// build that sets GFX_SHADER_OUTPUT_ROOT compiled them (see cmake/GfxShaders.cmake).
+#ifdef GFX_TEST_SHADER_DIR
+static const char* VERT_SPV = GFX_TEST_SHADER_DIR "/test.vert.spv";
+static const char* FRAG_SPV = GFX_TEST_SHADER_DIR "/test.frag.spv";
+#else
 static const char* VERT_SPV = "assets/shaders/test.vert.spv";
 static const char* FRAG_SPV = "assets/shaders/test.frag.spv";
+#endif
 
 // ==========================================================================
 // Test cases

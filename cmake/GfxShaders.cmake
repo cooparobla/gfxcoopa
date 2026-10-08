@@ -47,8 +47,21 @@ set(GFX_SHADERS_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 # assets/shaders/ (home of the shared `gfx/brdf|ibl|sky|spot_light.glsl` and
 # `gfx/surface2d/` headers) is ALWAYS additionally searched, so callers never
 # need to know or pass gfxcoopa's shader dir themselves.
+#
+# Where the .spv files go:
+#   OUTPUT_DIR <dir>               this target's .spv (and glslc depfiles) go there;
+#   else GFX_SHADER_OUTPUT_ROOT    if the including build sets this variable, into
+#                                  <root>/<TARGET_NAME>/ -- a build tree that shares a
+#                                  source checkout with other build trees (toyengine's
+#                                  linked game projects) keeps its shaders to itself;
+#   else                           next to each source (the standalone default, which
+#                                  the repos' own demos and tests load from).
+# The runtime must look where they went (e.g. a ShaderLibrary over the output dirs).
 function(gfx_add_shader_target TARGET_NAME)
-    cmake_parse_arguments(ARG "" "SHADER_DIR;INCLUDE_DIR" "" ${ARGN})
+    cmake_parse_arguments(ARG "" "SHADER_DIR;INCLUDE_DIR;OUTPUT_DIR" "" ${ARGN})
+    if(NOT ARG_OUTPUT_DIR AND GFX_SHADER_OUTPUT_ROOT)
+        set(ARG_OUTPUT_DIR "${GFX_SHADER_OUTPUT_ROOT}/${TARGET_NAME}")
+    endif()
 
     if(NOT ARG_INCLUDE_DIR)
         set(ARG_INCLUDE_DIR "${ARG_SHADER_DIR}")
@@ -69,21 +82,30 @@ function(gfx_add_shader_target TARGET_NAME)
         "${ARG_SHADER_DIR}/*.vert"
         "${ARG_SHADER_DIR}/*.frag")
 
+    if(ARG_OUTPUT_DIR)
+        file(MAKE_DIRECTORY "${ARG_OUTPUT_DIR}")
+    endif()
     set(SPV_OUTPUTS "")
     foreach(SHADER ${SHADER_SRCS})
+        if(ARG_OUTPUT_DIR)
+            get_filename_component(SHADER_NAME "${SHADER}" NAME)
+            set(SPV "${ARG_OUTPUT_DIR}/${SHADER_NAME}.spv")
+        else()
+            set(SPV "${SHADER}.spv")
+        endif()
         add_custom_command(
-            OUTPUT  "${SHADER}.spv"
+            OUTPUT  "${SPV}"
             COMMAND ${GLSLC}
                     -I "${ARG_INCLUDE_DIR}"
                     -I "${GFX_BASE_SHADER_DIR}"
-                    -MD -MF "${SHADER}.spv.d" -MT "${SHADER}.spv"
-                    "${SHADER}" -o "${SHADER}.spv"
+                    -MD -MF "${SPV}.d" -MT "${SPV}"
+                    "${SHADER}" -o "${SPV}"
             DEPENDS "${SHADER}"
-            DEPFILE "${SHADER}.spv.d"
+            DEPFILE "${SPV}.d"
             COMMENT "glslc ${SHADER}"
             VERBATIM
         )
-        list(APPEND SPV_OUTPUTS "${SHADER}.spv")
+        list(APPEND SPV_OUTPUTS "${SPV}")
     endforeach()
 
     add_custom_target(${TARGET_NAME} ALL DEPENDS ${SPV_OUTPUTS})
