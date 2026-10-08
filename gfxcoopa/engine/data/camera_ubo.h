@@ -120,8 +120,14 @@ public:
     void set_reprojection(const glm::mat4& prev_view, const glm::mat4& prev_proj, glm::vec2 jitter_ndc) {
         data_.prev_view  = prev_view;
         data_.prev_proj  = prev_proj;
-        data_.jitter_ndc = glm::vec4(jitter_ndc, 0.0f, 0.0f);
+        data_.jitter_ndc = glm::vec4(jitter_ndc, data_.jitter_ndc.z, 0.0f);
     }
+
+    /**
+     * @brief Render pixels per metre at 1 m from the eye (0.5 * render height * proj[1][1]),
+     *        carried in jitter_ndc.z -- what tessellation stages size their edge factors by.
+     */
+    void set_pixel_scale(float px_scale) { data_.jitter_ndc.z = px_scale; }
 
     /** @brief The host-side copy of what update() last uploaded (view is the snapped one). */
     const CameraData& data() const { return data_; }

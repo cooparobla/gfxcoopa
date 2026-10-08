@@ -60,6 +60,20 @@ struct SurfaceShaderDesc {
     /// Per-shader rasterization override -- e.g. foliage cards want CullMode::None (drawn
     /// from both sides) where the stock backbone defaults to CullMode::Back.
     coopa::gfx::CullMode cull = coopa::gfx::CullMode::Back;
+
+    // --- Tessellation (optional; appended so positional initializers above stay valid) ---
+    //
+    // A tessellated draw runs a pass-through vertex stage, a control stage (edge factors from
+    // camera distance) and an EVALUATION stage, which is where the shader's displacement
+    // hook (gfx_surface_vertex) runs on the generated vertices. A shader with a stock vertex
+    // stage (empty `vert`) uses the stock evaluation stages; one that overrides `vert` must
+    // name its own `tese` (its hook compiled against the evaluation backbone), or it simply
+    // draws untessellated. `tesc` overrides the control stage (e.g. a wider cull margin for
+    // large displacement); empty uses the stock one.
+    std::string tesc;              ///< G-buffer / transparent tessellation control (optional).
+    std::string tese;              ///< G-buffer / transparent tessellation evaluation.
+    std::string shadow_tese;       ///< Directional shadow tessellation evaluation (Opaque domain).
+    std::string shadow_cube_tese;  ///< Cube shadow tessellation evaluation (Opaque domain).
 };
 
 /**

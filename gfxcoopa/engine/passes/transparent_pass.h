@@ -126,6 +126,10 @@ public:
           extra_pc_bytes_(extra_pc_bytes)
     {
         extra_.validate("TransparentPass");
+        pc_stages_ = coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment;
+        if (device.supports_tessellation()) {
+            pc_stages_ = pc_stages_ | coopa::gfx::ShaderStage::TessControl | coopa::gfx::ShaderStage::TessEval;
+        }
         vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
@@ -265,12 +269,42 @@ public:
      * @param cull     Face culling for this variant (Back unless the surface is two-sided).
      */
     void add_variant(const std::string& name, const std::string& vert_spv, const std::string& frag_spv,
-                     coopa::gfx::CullMode cull = coopa::gfx::CullMode::Back) {
+                     coopa::gfx::CullMode cull = coopa::gfx::CullMode::Back,
+                     const std::string& tesc_spv = {}, const std::string& tese_spv = {}) {
         Variant v;
         v.vert_shader = std::make_unique<coopa::gfx::pipeline::Shader>(device_, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         v.frag_shader = std::make_unique<coopa::gfx::pipeline::Shader>(device_, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
         v.pipeline    = create_pipeline_(*v.vert_shader, *v.frag_shader, cull);
+        // Tessellated twin: shared pass-through vertex stage, this variant's (or the default)
+        // control stage, its evaluation stage (the hook) and fragment stage.
+        if (tess_vert_ && !tese_spv.empty()) {
+            v.tesc_shader = std::make_unique<coopa::gfx::pipeline::Shader>(
+                device_, tesc_spv.empty() ? tesc_path_ : tesc_spv, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT);
+            v.tese_shader = std::make_unique<coopa::gfx::pipeline::Shader>(device_, tese_spv, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
+            v.tess_pipeline = create_pipeline_(*tess_vert_, *v.frag_shader, cull, v.tesc_shader.get(), v.tese_shader.get());
+        }
         variants_.emplace(name, std::move(v));
+    }
+
+    /**
+     * @brief Builds the stock tessellated pipeline and records the shared pass-through vertex /
+     *        default control stages for variants' twins. Call before add_variant(); a no-op on a
+     *        device without tessellation.
+     */
+    void enable_tessellation(const std::string& tess_vert_spv, const std::string& tesc_spv, const std::string& tese_spv) {
+        if (!device_.supports_tessellation()) return;
+        tesc_path_ = tesc_spv;
+        tess_vert_ = std::make_unique<coopa::gfx::pipeline::Shader>(device_, tess_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
+        tess_tesc_ = std::make_unique<coopa::gfx::pipeline::Shader>(device_, tesc_spv, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT);
+        tess_tese_ = std::make_unique<coopa::gfx::pipeline::Shader>(device_, tese_spv, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
+        tess_pipeline_ = create_pipeline_(*tess_vert_, *frag_shader_, coopa::gfx::CullMode::Back, tess_tesc_.get(), tess_tese_.get());
+    }
+
+    /** @brief True if `name` (empty = stock) has a tessellated pipeline. */
+    bool has_tessellated(const std::string& name) const {
+        auto it = variants_.find(name);
+        if (it != variants_.end()) return it->second.tess_pipeline != nullptr;
+        return tess_pipeline_ != nullptr;
     }
 
     /** @brief True if a variant named `name` was registered via add_variant(). */
@@ -282,10 +316,17 @@ public:
      * @brief Binds a named variant's pipeline, or the stock pipeline if `name` is empty or
      *        unregistered (see PBRMaterial::shader's doc: empty means "stock").
      */
-    void bind(coopa::gfx::command::CommandBuffer& cmd, const std::string& name) {
+    void bind(coopa::gfx::command::CommandBuffer& cmd, const std::string& name, bool tessellated = false) {
         auto it = variants_.find(name);
-        cmd.bind_pipeline(it != variants_.end() ? *it->second.pipeline : *pipeline_);
+        if (it != variants_.end()) {
+            cmd.bind_pipeline(tessellated && it->second.tess_pipeline ? *it->second.tess_pipeline : *it->second.pipeline);
+            return;
+        }
+        cmd.bind_pipeline(tessellated && tess_pipeline_ ? *tess_pipeline_ : *pipeline_);
     }
+
+    /** @brief The push range's stages (Vertex|Fragment, + tessellation when supported). */
+    coopa::gfx::ShaderStage push_stages() const { return pc_stages_; }
 
     /// Binds the caller's extra sets (e.g. GI), if any were provided at construction. Call
     /// after bind(), alongside binding sets 0-2, before draws. A no-op when `extra` was empty.
@@ -312,7 +353,7 @@ public:
     /// requires a push call's stageFlags to match the declared range's stageFlags for every
     /// byte it touches, not just the stages that actually read that particular sub-range.
     void push(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& pc) {
-        cmd.push_constants(coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, pc);
+        cmd.push_constants(pc_stages_, pc);
     }
 
     /** @brief Ends the render pass. */
@@ -335,6 +376,8 @@ private:
         std::unique_ptr<coopa::gfx::pipeline::Shader> vert_shader;
         std::unique_ptr<coopa::gfx::pipeline::Shader> frag_shader;
         std::unique_ptr<coopa::gfx::pipeline::Pipeline> pipeline;
+        std::unique_ptr<coopa::gfx::pipeline::Shader> tesc_shader, tese_shader;
+        std::unique_ptr<coopa::gfx::pipeline::Pipeline> tess_pipeline;   ///< null: no tessellated twin
     };
 
     /// Builds one Pipeline against this pass's shared render pass, descriptor layouts,
@@ -343,12 +386,17 @@ private:
     /// them is the two shader modules.
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> create_pipeline_(
         coopa::gfx::pipeline::Shader& vert, coopa::gfx::pipeline::Shader& frag,
-        coopa::gfx::CullMode cull = coopa::gfx::CullMode::Back) {
+        coopa::gfx::CullMode cull = coopa::gfx::CullMode::Back,
+        coopa::gfx::pipeline::Shader* tesc = nullptr, coopa::gfx::pipeline::Shader* tese = nullptr) {
         coopa::gfx::pipeline::PipelineDesc desc;
         desc.shaders = {&vert, &frag};
+        if (tesc && tese) {
+            desc.shaders = {&vert, tesc, tese, &frag};
+            desc.patch_control_points = 3;
+        }
         desc.vertex  = coopa::gfx::engine::data::Vertex::layout().append(coopa::gfx::engine::data::InstanceData::layout());
         desc.descriptor_layouts = layouts_;
-        desc.push_constants = {{coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, 0,
+        desc.push_constants = {{pc_stages_, 0,
                                 static_cast<uint32_t>(sizeof(PushConstants) + extra_pc_bytes_)}};
         desc.raster.cull  = cull;
         desc.raster.front = coopa::gfx::FrontFace::CounterClockwise;
@@ -490,6 +538,11 @@ private:
     std::vector<const coopa::gfx::pipeline::DescriptorSetLayout*> layouts_;
 
     std::map<std::string, Variant> variants_;
+
+    coopa::gfx::ShaderStage pc_stages_ = coopa::gfx::ShaderStage::Vertex;
+    std::string tesc_path_;
+    std::unique_ptr<coopa::gfx::pipeline::Shader> tess_vert_, tess_tesc_, tess_tese_;
+    std::unique_ptr<coopa::gfx::pipeline::Pipeline> tess_pipeline_;
 };
 
 } // namespace passes

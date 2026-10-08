@@ -121,6 +121,8 @@ inline VkShaderStageFlags to_vk(ShaderStage s) {
     if (any(s, ShaderStage::Fragment)) f |= VK_SHADER_STAGE_FRAGMENT_BIT;
     if (any(s, ShaderStage::Geometry)) f |= VK_SHADER_STAGE_GEOMETRY_BIT;
     if (any(s, ShaderStage::Compute))  f |= VK_SHADER_STAGE_COMPUTE_BIT;
+    if (any(s, ShaderStage::TessControl)) f |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+    if (any(s, ShaderStage::TessEval))    f |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
     return f;
 }
 
@@ -133,6 +135,8 @@ inline VkShaderStageFlagBits to_vk_bit(ShaderStage s) {
         case ShaderStage::Fragment: return VK_SHADER_STAGE_FRAGMENT_BIT;
         case ShaderStage::Geometry: return VK_SHADER_STAGE_GEOMETRY_BIT;
         case ShaderStage::Compute:  return VK_SHADER_STAGE_COMPUTE_BIT;
+        case ShaderStage::TessControl: return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+        case ShaderStage::TessEval:    return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
         default:                    return VK_SHADER_STAGE_VERTEX_BIT;
     }
 }
@@ -180,6 +184,7 @@ inline VkPrimitiveTopology to_vk(Topology t) {
         case Topology::LineList:      return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
         case Topology::LineStrip:     return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
         case Topology::PointList:     return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+        case Topology::PatchList:     return VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
     }
     return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 }

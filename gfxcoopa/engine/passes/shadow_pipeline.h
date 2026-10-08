@@ -53,8 +53,8 @@ struct alignas(16) DirectionalShadowPushConstants {
     /// would land at C++ offset 72 while the GLSL side puts it at 80 -- exactly the
     /// mismatch Vulkan's validation layer catches as "block range outside push constant
     /// range". Same convention as data::CameraData's _pad0 (see camera_ubo.h).
-    float     _pad0 = 0.0f;
-    float     _pad1 = 0.0f;
+    uint32_t  tess_a = 0u;   // packHalf2x16(edge_pixels, max_factor); 0 = untessellated (gfx/surface/tess_common.glsl)
+    uint32_t  tess_b = 0u;   // packHalf2x16(max_distance, displacement_scale)
 
     /// Standard trailing "surface" block (see gfx/surface/shadow_vs.glsl) -- 32 bytes,
     /// zero-initialized by default so a stock caster is unaffected. A derived shader's
@@ -90,8 +90,8 @@ struct alignas(16) CubeShadowPushConstants {
 
     /// Explicit std430 padding -- see DirectionalShadowPushConstants::_pad0/_pad1 for why
     /// this is required rather than relying on glm::vec4's C++ alignment.
-    float     _pad0 = 0.0f;
-    float     _pad1 = 0.0f;
+    uint32_t  tess_a = 0u;   // packHalf2x16(edge_pixels, max_factor); 0 = untessellated (gfx/surface/tess_common.glsl)
+    uint32_t  tess_b = 0u;   // packHalf2x16(max_distance, displacement_scale)
 
     /// See DirectionalShadowPushConstants::gfx_time/gfx_params -- same surface-block
     /// meaning. With mat4 + vec4 + 2 floats + 2 pad floats already at 96 bytes, these
@@ -122,9 +122,18 @@ public:
                    const std::string&    dir_frag_spv,
                    const std::string&    cube_vert_spv,
                    const std::string&    cube_frag_spv,
-                   const pipeline::DescriptorSetLayout* material_layout = nullptr)
-        : device_(device), dir_pass_(dir_pass), cube_pass_(cube_pass)
+                   const pipeline::DescriptorSetLayout* material_layout = nullptr,
+                   std::vector<const pipeline::DescriptorSetLayout*> extra_layouts = {})
+        : device_(device), dir_pass_(dir_pass), cube_pass_(cube_pass), extra_layouts_(std::move(extra_layouts))
     {
+        pc_stages_ = coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment;
+        if (device.supports_tessellation()) {
+            pc_stages_ = pc_stages_ | coopa::gfx::ShaderStage::TessControl | coopa::gfx::ShaderStage::TessEval;
+        }
+        // A tessellated caster reads the whole vertex (the pass-through stage forwards normal /
+        // uv / tangent to the evaluation stage, where displacement needs them).
+        tess_vertex_layout_ = data::Vertex::layout();
+        tess_vertex_layout_.append(data::InstanceData::layout());
         // Shadow depth shaders only consume position (location 0) from the per-vertex stream,
         // plus the per-instance model matrix (locations 4-7) -- a position-only binding-0 layout
         // (built here, not via data::Vertex::layout(), which declares all four of its
@@ -182,10 +191,31 @@ public:
      *                       say) means the variant never back-face culls its casters either,
      *                       whatever the material asks; Back builds a culled pipeline too.
      */
+    /**
+     * @brief Builds the stock tessellated shadow pipelines and records the shared pass-through
+     *        vertex / control stages variants' tessellated twins use. Call before add_variant();
+     *        a no-op on a device without tessellation.
+     */
+    void enable_tessellation(const std::string& tess_vert_spv,
+                             const std::string& dir_tesc_spv, const std::string& dir_tese_spv,
+                             const std::string& cube_tesc_spv, const std::string& cube_tese_spv) {
+        if (!device_.supports_tessellation()) return;
+        tess_vert_ = std::make_unique<pipeline::Shader>(device_, tess_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
+        dir_tesc_  = std::make_unique<pipeline::Shader>(device_, dir_tesc_spv, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT);
+        cube_tesc_ = std::make_unique<pipeline::Shader>(device_, cube_tesc_spv, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT);
+        dir_tese_  = std::make_unique<pipeline::Shader>(device_, dir_tese_spv, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
+        cube_tese_ = std::make_unique<pipeline::Shader>(device_, cube_tese_spv, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
+        dir_tess_pipeline_         = create_dir_pipeline_(*tess_vert_, *dir_frag_, false, dir_tesc_.get(), dir_tese_.get());
+        dir_tess_pipeline_culled_  = create_dir_pipeline_(*tess_vert_, *dir_frag_, true, dir_tesc_.get(), dir_tese_.get());
+        cube_tess_pipeline_        = create_cube_pipeline_(*tess_vert_, *cube_frag_, false, cube_tesc_.get(), cube_tese_.get());
+        cube_tess_pipeline_culled_ = create_cube_pipeline_(*tess_vert_, *cube_frag_, true, cube_tesc_.get(), cube_tese_.get());
+    }
+
     void add_variant(const std::string& name,
                      const std::string& dir_vert_spv, const std::string& dir_frag_spv,
                      const std::string& cube_vert_spv, const std::string& cube_frag_spv,
-                     coopa::gfx::CullMode cull = coopa::gfx::CullMode::None) {
+                     coopa::gfx::CullMode cull = coopa::gfx::CullMode::None,
+                     const std::string& dir_tese_spv = {}, const std::string& cube_tese_spv = {}) {
         Variant v;
         v.dir_vert  = std::make_unique<pipeline::Shader>(device_, dir_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         v.dir_frag  = std::make_unique<pipeline::Shader>(device_, dir_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -198,6 +228,15 @@ public:
         if (cull != coopa::gfx::CullMode::None) {
             v.dir_pipeline_culled  = create_dir_pipeline_(*v.dir_vert, *v.dir_frag, true);
             v.cube_pipeline_culled = create_cube_pipeline_(*v.cube_vert, *v.cube_frag, true);
+        }
+        // Tessellated twins: shared pass-through vertex + control stages, this variant's
+        // evaluation stages (its displacement hook) and fragment stages. Two-sided only, like
+        // the plain variant's default.
+        if (tess_vert_ && !dir_tese_spv.empty() && !cube_tese_spv.empty()) {
+            v.dir_tese  = std::make_unique<pipeline::Shader>(device_, dir_tese_spv, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
+            v.cube_tese = std::make_unique<pipeline::Shader>(device_, cube_tese_spv, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
+            v.dir_tess_pipeline  = create_dir_pipeline_(*tess_vert_, *v.dir_frag, false, dir_tesc_.get(), v.dir_tese.get());
+            v.cube_tess_pipeline = create_cube_pipeline_(*tess_vert_, *v.cube_frag, false, cube_tesc_.get(), v.cube_tese.get());
         }
 
         variants_.emplace(name, std::move(v));
@@ -220,19 +259,31 @@ public:
     /// too, so culling them halves the caster's raster work without changing the map. A
     /// variant registered with CullMode::None ignores it and always draws both sides.
     void bind_directional(command::CommandBuffer& cmd, const std::string& name,
-                          bool cull_backfaces = false) const {
+                          bool cull_backfaces = false, bool tessellated = false) const {
         auto it = variants_.find(name);
         if (it != variants_.end()) {
             const Variant& v = it->second;
+            if (tessellated && v.dir_tess_pipeline) { cmd.bind_pipeline(*v.dir_tess_pipeline); return; }
             cmd.bind_pipeline((cull_backfaces && v.dir_pipeline_culled) ? *v.dir_pipeline_culled
                                                                          : *v.dir_pipeline);
+            return;
+        }
+        if (tessellated && dir_tess_pipeline_) {
+            cmd.bind_pipeline(cull_backfaces ? *dir_tess_pipeline_culled_ : *dir_tess_pipeline_);
             return;
         }
         cmd.bind_pipeline(cull_backfaces ? *dir_pipeline_culled_ : *dir_pipeline_);
     }
 
+    /** @brief True if `name` (empty = stock) has tessellated shadow pipelines. */
+    bool has_tessellated(const std::string& name) const {
+        auto it = variants_.find(name);
+        if (it != variants_.end()) return it->second.dir_tess_pipeline != nullptr;
+        return dir_tess_pipeline_ != nullptr;
+    }
+
     void push_directional(command::CommandBuffer& cmd, const DirectionalShadowPushConstants& pc) const {
-        cmd.push_constants(coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, pc);
+        cmd.push_constants(pc_stages_, pc);
     }
 
     void bind_cube(command::CommandBuffer& cmd) const {
@@ -242,20 +293,28 @@ public:
     /// Binds a named variant's cube pipeline, or the stock one if `name` is empty or
     /// unregistered. `cull_backfaces` as for bind_directional().
     void bind_cube(command::CommandBuffer& cmd, const std::string& name,
-                   bool cull_backfaces = false) const {
+                   bool cull_backfaces = false, bool tessellated = false) const {
         auto it = variants_.find(name);
         if (it != variants_.end()) {
             const Variant& v = it->second;
+            if (tessellated && v.cube_tess_pipeline) { cmd.bind_pipeline(*v.cube_tess_pipeline); return; }
             cmd.bind_pipeline((cull_backfaces && v.cube_pipeline_culled) ? *v.cube_pipeline_culled
                                                                           : *v.cube_pipeline);
+            return;
+        }
+        if (tessellated && cube_tess_pipeline_) {
+            cmd.bind_pipeline(cull_backfaces ? *cube_tess_pipeline_culled_ : *cube_tess_pipeline_);
             return;
         }
         cmd.bind_pipeline(cull_backfaces ? *cube_pipeline_culled_ : *cube_pipeline_);
     }
 
     void push_cube(command::CommandBuffer& cmd, const CubeShadowPushConstants& pc) const {
-        cmd.push_constants(coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, pc);
+        cmd.push_constants(pc_stages_, pc);
     }
+
+    /** @brief The stages the push range covers (Vertex|Fragment, + tessellation when supported). */
+    coopa::gfx::ShaderStage push_stages() const { return pc_stages_; }
 
 private:
     struct Variant {
@@ -265,6 +324,9 @@ private:
         std::unique_ptr<pipeline::Shader>   cube_vert, cube_frag;
         std::unique_ptr<pipeline::Pipeline> cube_pipeline;
         std::unique_ptr<pipeline::Pipeline> cube_pipeline_culled;   // null: variant is two-sided
+        std::unique_ptr<pipeline::Shader>   dir_tese, cube_tese;
+        std::unique_ptr<pipeline::Pipeline> dir_tess_pipeline;      // null: no tessellated twin
+        std::unique_ptr<pipeline::Pipeline> cube_tess_pipeline;
     };
 
     /// Raster state for a shadow pipeline. Shadow targets render with a POSITIVE-height
@@ -278,35 +340,48 @@ private:
         desc.raster.front = coopa::gfx::FrontFace::Clockwise;
     }
 
+    /// The layouts every shadow pipeline shares: the material set (when there is one) and the
+    /// host's extra sets after it (toyengine's surface-world set at 1).
+    std::vector<const pipeline::DescriptorSetLayout*> layouts_() const {
+        std::vector<const pipeline::DescriptorSetLayout*> l;
+        if (material_layout_ != nullptr) l.push_back(material_layout_);
+        l.insert(l.end(), extra_layouts_.begin(), extra_layouts_.end());
+        return l;
+    }
+
     std::unique_ptr<pipeline::Pipeline> create_dir_pipeline_(pipeline::Shader& vert, pipeline::Shader& frag,
-                                                             bool cull_backfaces) {
+                                                             bool cull_backfaces,
+                                                             pipeline::Shader* tesc = nullptr, pipeline::Shader* tese = nullptr) {
         pipeline::PipelineDesc desc;
-        desc.vertex       = vertex_layout_;
+        desc.vertex       = tese ? tess_vertex_layout_ : vertex_layout_;
         set_shadow_raster_(desc, cull_backfaces);
         desc.depth.test   = true;
         desc.depth.write  = true;
-        if (material_layout_ != nullptr) {
-            desc.descriptor_layouts = {material_layout_};
-        }
+        desc.descriptor_layouts = layouts_();
         desc.shaders = {&vert, &frag};
-        desc.push_constants = {{coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment,
-                                0, sizeof(DirectionalShadowPushConstants)}};
+        if (tesc && tese) {
+            desc.shaders = {&vert, tesc, tese, &frag};
+            desc.patch_control_points = 3;
+        }
+        desc.push_constants = {{pc_stages_, 0, sizeof(DirectionalShadowPushConstants)}};
         return std::make_unique<pipeline::Pipeline>(device_, dir_pass_, desc);
     }
 
     std::unique_ptr<pipeline::Pipeline> create_cube_pipeline_(pipeline::Shader& vert, pipeline::Shader& frag,
-                                                              bool cull_backfaces) {
+                                                              bool cull_backfaces,
+                                                              pipeline::Shader* tesc = nullptr, pipeline::Shader* tese = nullptr) {
         pipeline::PipelineDesc desc;
-        desc.vertex       = vertex_layout_;
+        desc.vertex       = tese ? tess_vertex_layout_ : vertex_layout_;
         set_shadow_raster_(desc, cull_backfaces);
         desc.depth.test   = true;
         desc.depth.write  = true;
-        if (material_layout_ != nullptr) {
-            desc.descriptor_layouts = {material_layout_};
-        }
+        desc.descriptor_layouts = layouts_();
         desc.shaders = {&vert, &frag};
-        desc.push_constants = {{coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment,
-                                0, sizeof(CubeShadowPushConstants)}};
+        if (tesc && tese) {
+            desc.shaders = {&vert, tesc, tese, &frag};
+            desc.patch_control_points = 3;
+        }
+        desc.push_constants = {{pc_stages_, 0, sizeof(CubeShadowPushConstants)}};
         return std::make_unique<pipeline::Pipeline>(device_, cube_pass_, desc);
     }
 
@@ -315,6 +390,12 @@ private:
     pipeline::RenderPass&               cube_pass_;
     coopa::gfx::VertexLayout            vertex_layout_;
     const pipeline::DescriptorSetLayout* material_layout_ = nullptr;
+    std::vector<const pipeline::DescriptorSetLayout*> extra_layouts_;
+    coopa::gfx::ShaderStage             pc_stages_ = coopa::gfx::ShaderStage::Vertex;
+    coopa::gfx::VertexLayout            tess_vertex_layout_;
+    std::unique_ptr<pipeline::Shader>   tess_vert_, dir_tesc_, cube_tesc_, dir_tese_, cube_tese_;
+    std::unique_ptr<pipeline::Pipeline> dir_tess_pipeline_, dir_tess_pipeline_culled_;
+    std::unique_ptr<pipeline::Pipeline> cube_tess_pipeline_, cube_tess_pipeline_culled_;
 
     std::unique_ptr<pipeline::Shader>   dir_vert_;
     std::unique_ptr<pipeline::Shader>   dir_frag_;

@@ -70,6 +70,11 @@ public:
         glm::vec4 emissive     = {0.0f, 0.0f, 0.0f, 0.0f}; // 16 bytes; xyz = pre-multiplied emissive radiance, w reserved
         glm::vec4 gfx_time     = {0.0f, 0.0f, 0.0f, 0.0f}; // 16 bytes; x=time, y=delta_time, z=frame_index, w=spare
         glm::vec4 gfx_params   = {0.0f, 0.0f, 0.0f, 0.0f}; // 16 bytes; four author-defined floats
+        // 16 bytes: x = packHalf2x16(tess edge_pixels, tess max_factor), y = packHalf2x16(tess
+        // max_distance, displacement_scale) -- both 0 for an untessellated draw; z = surface
+        // flags (bit 0: no snow cover); w reserved. Read by every stage (gfx/surface/tess_common.glsl,
+        // gfx/surface/snow.glsl).
+        glm::uvec4 surface_ext = {0u, 0u, 0u, 0u};
     };
     static_assert(sizeof(PushConstants) <= 128,
                  "GBufferPipeline::PushConstants exceeds Vulkan's guaranteed "
@@ -81,13 +86,22 @@ public:
                     VkDescriptorSetLayout camera_layout,
                     VkDescriptorSetLayout material_layout,
                     const std::string& vert_spv,
-                    const std::string& frag_spv)
+                    const std::string& frag_spv,
+                    const std::vector<VkDescriptorSetLayout>& extra_layouts = {})
         : device_(device), render_pass_(render_pass)
     {
-        // Descriptor set layouts
+        // Descriptor set layouts: camera, material, then any extra sets the host appends (toyengine's
+        // surface-world set at 2 -- bound once per pass with this pipeline's layout()).
         std::vector<VkDescriptorSetLayout> layouts = { camera_layout };
         if (material_layout != VK_NULL_HANDLE) {
             layouts.push_back(material_layout);
+        }
+        layouts.insert(layouts.end(), extra_layouts.begin(), extra_layouts.end());
+        // Tessellation stages read the push block too (tess params, gfx_time/gfx_params for the
+        // displacement hook) -- only named when the device has them.
+        pc_stages_ = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        if (device_.supports_tessellation()) {
+            pc_stages_ |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
         }
 
         // Push constant range -- VERTEX|FRAGMENT: the fragment stage still owns
@@ -97,7 +111,7 @@ public:
         // requires the same block declared byte-for-byte in both stages when they share one
         // VkPushConstantRange (see gfx/surface/gbuffer_vs.glsl and gbuffer_fs.glsl).
         VkPushConstantRange pc_range{};
-        pc_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pc_range.stageFlags = pc_stages_;
         pc_range.offset     = 0;
         pc_range.size       = sizeof(PushConstants);
 
@@ -140,6 +154,12 @@ public:
             if (v.pipeline != VK_NULL_HANDLE) {
                 vkDestroyPipeline(device_.handle(), v.pipeline, nullptr);
             }
+            if (v.tess_pipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device_.handle(), v.tess_pipeline, nullptr);
+            }
+        }
+        for (VkPipeline p : {tess_pipeline_, tess_pipeline_no_cull_}) {
+            if (p != VK_NULL_HANDLE) vkDestroyPipeline(device_.handle(), p, nullptr);
         }
         if (pipeline_ != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_.handle(), pipeline_, nullptr);
@@ -177,12 +197,47 @@ public:
      *                 two-sided foliage cards).
      */
     void add_variant(const std::string& name, const std::string& vert_spv,
-                     const std::string& frag_spv, coopa::gfx::CullMode cull) {
+                     const std::string& frag_spv, coopa::gfx::CullMode cull,
+                     const std::string& tesc_spv = {}, const std::string& tese_spv = {}) {
         Variant v;
         v.vert_shader = std::make_unique<coopa::gfx::pipeline::Shader>(device_, vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         v.frag_shader = std::make_unique<coopa::gfx::pipeline::Shader>(device_, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
         v.pipeline    = create_pipeline_(*v.vert_shader, *v.frag_shader, cull);
+        // A tessellated twin: the shared pass-through vertex stage (enable_tessellation()), this
+        // variant's control / evaluation stages (its hook runs in the evaluation stage), its
+        // own fragment stage.
+        if (tess_vert_shader_ && !tese_spv.empty()) {
+            v.tesc_shader = std::make_unique<coopa::gfx::pipeline::Shader>(
+                device_, tesc_spv.empty() ? tesc_path_ : tesc_spv, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT);
+            v.tese_shader = std::make_unique<coopa::gfx::pipeline::Shader>(device_, tese_spv, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
+            v.tess_pipeline = create_pipeline_(*tess_vert_shader_, *v.frag_shader, cull, v.tesc_shader.get(), v.tese_shader.get());
+        }
         variants_.emplace(name, std::move(v));
+    }
+
+    /**
+     * @brief Builds the stock tessellated pipelines (both cull modes) and records the shared
+     *        pass-through vertex / default control stages variants' tessellated twins use.
+     *        Call before add_variant(); a no-op on a device without tessellation.
+     */
+    void enable_tessellation(const std::string& tess_vert_spv, const std::string& tesc_spv,
+                             const std::string& tese_spv) {
+        if (!device_.supports_tessellation()) return;
+        tesc_path_ = tesc_spv;
+        tess_vert_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device_, tess_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
+        tess_tesc_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device_, tesc_spv, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT);
+        tess_tese_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device_, tese_spv, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
+        tess_pipeline_ = create_pipeline_(*tess_vert_shader_, *frag_shader_, coopa::gfx::CullMode::Back,
+                                          tess_tesc_shader_.get(), tess_tese_shader_.get());
+        tess_pipeline_no_cull_ = create_pipeline_(*tess_vert_shader_, *frag_shader_, coopa::gfx::CullMode::None,
+                                                  tess_tesc_shader_.get(), tess_tese_shader_.get());
+    }
+
+    /** @brief True if `name` (empty = stock) has a tessellated pipeline. */
+    bool has_tessellated(const std::string& name) const {
+        auto it = variants_.find(name);
+        if (it != variants_.end()) return it->second.tess_pipeline != VK_NULL_HANDLE;
+        return tess_pipeline_ != VK_NULL_HANDLE;
     }
 
     /** @brief True if a variant named `name` was registered via add_variant(). */
@@ -206,16 +261,21 @@ public:
      *                       back-face-culled pipeline.
      */
     void bind(coopa::gfx::command::CommandBuffer& cmd, const std::string& name,
-             bool cull_backfaces = true) const {
+             bool cull_backfaces = true, bool tessellated = false) const {
         auto it = variants_.find(name);
-        VkPipeline p = (it != variants_.end()) ? it->second.pipeline
-                                               : (cull_backfaces ? pipeline_ : pipeline_no_cull_);
+        VkPipeline p = VK_NULL_HANDLE;
+        if (it != variants_.end()) {
+            p = (tessellated && it->second.tess_pipeline != VK_NULL_HANDLE) ? it->second.tess_pipeline : it->second.pipeline;
+        } else if (tessellated && tess_pipeline_ != VK_NULL_HANDLE) {
+            p = cull_backfaces ? tess_pipeline_ : tess_pipeline_no_cull_;
+        } else {
+            p = cull_backfaces ? pipeline_ : pipeline_no_cull_;
+        }
         vkCmdBindPipeline(cmd.handle(), VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     }
 
     void push(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& pc) const {
-        cmd.push_constants(pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(PushConstants), &pc);
+        cmd.push_constants(pipeline_layout_, pc_stages_, 0, sizeof(PushConstants), &pc);
     }
 
     VkPipelineLayout layout() const {
@@ -226,7 +286,10 @@ private:
     struct Variant {
         std::unique_ptr<coopa::gfx::pipeline::Shader> vert_shader;
         std::unique_ptr<coopa::gfx::pipeline::Shader> frag_shader;
+        std::unique_ptr<coopa::gfx::pipeline::Shader> tesc_shader;
+        std::unique_ptr<coopa::gfx::pipeline::Shader> tese_shader;
         VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipeline tess_pipeline = VK_NULL_HANDLE;   ///< null: no tessellated twin
     };
 
     /// Builds one VkPipeline against this object's shared pipeline_layout_/render_pass_/
@@ -235,7 +298,10 @@ private:
     /// modules and the cull mode.
     VkPipeline create_pipeline_(const coopa::gfx::pipeline::Shader& vert_shader,
                                const coopa::gfx::pipeline::Shader& frag_shader,
-                               coopa::gfx::CullMode cull) {
+                               coopa::gfx::CullMode cull,
+                               const coopa::gfx::pipeline::Shader* tesc_shader = nullptr,
+                               const coopa::gfx::pipeline::Shader* tese_shader = nullptr) {
+        const bool tess = tesc_shader && tese_shader;
         VkPipelineVertexInputStateCreateInfo vertex_input{};
         vertex_input.sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
         vertex_input.vertexBindingDescriptionCount   = static_cast<uint32_t>(binding_vec_.size());
@@ -245,8 +311,12 @@ private:
 
         VkPipelineInputAssemblyStateCreateInfo input_assembly{};
         input_assembly.sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        input_assembly.topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        input_assembly.topology               = tess ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         input_assembly.primitiveRestartEnable = VK_FALSE;
+
+        VkPipelineTessellationStateCreateInfo tessellation{};
+        tessellation.sType              = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+        tessellation.patchControlPoints = 3;
 
         VkDynamicState dynamic_states[] = {
             VK_DYNAMIC_STATE_VIEWPORT,
@@ -302,17 +372,20 @@ private:
         color_blending.attachmentCount = 5;
         color_blending.pAttachments    = blend_attachments;
 
-        VkPipelineShaderStageCreateInfo stages[] = {
-            vert_shader.stage_info(),
-            frag_shader.stage_info()
-        };
+        std::vector<VkPipelineShaderStageCreateInfo> stages = { vert_shader.stage_info() };
+        if (tess) {
+            stages.push_back(tesc_shader->stage_info());
+            stages.push_back(tese_shader->stage_info());
+        }
+        stages.push_back(frag_shader.stage_info());
 
         VkGraphicsPipelineCreateInfo pipeline_info{};
         pipeline_info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        pipeline_info.stageCount          = 2;
-        pipeline_info.pStages             = stages;
+        pipeline_info.stageCount          = static_cast<uint32_t>(stages.size());
+        pipeline_info.pStages             = stages.data();
         pipeline_info.pVertexInputState   = &vertex_input;
         pipeline_info.pInputAssemblyState = &input_assembly;
+        pipeline_info.pTessellationState  = tess ? &tessellation : nullptr;
         pipeline_info.pViewportState      = &viewport_state;
         pipeline_info.pRasterizationState = &rasterizer;
         pipeline_info.pMultisampleState   = &multisampling;
@@ -338,6 +411,16 @@ private:
     VkPipelineLayout pipeline_layout_   = VK_NULL_HANDLE;
     VkPipeline       pipeline_          = VK_NULL_HANDLE; // stock, CullMode::Back
     VkPipeline       pipeline_no_cull_  = VK_NULL_HANDLE; // stock, CullMode::None -- see bind()
+    VkShaderStageFlags pc_stages_ = 0;                    // the push range's stages (tess when supported)
+
+    // Tessellation (enable_tessellation()): the shared pass-through vertex / default control
+    // stages and the stock tessellated pipelines.
+    std::string tesc_path_;
+    std::unique_ptr<coopa::gfx::pipeline::Shader> tess_vert_shader_;
+    std::unique_ptr<coopa::gfx::pipeline::Shader> tess_tesc_shader_;
+    std::unique_ptr<coopa::gfx::pipeline::Shader> tess_tese_shader_;
+    VkPipeline tess_pipeline_         = VK_NULL_HANDLE;
+    VkPipeline tess_pipeline_no_cull_ = VK_NULL_HANDLE;
 
     std::map<std::string, Variant> variants_;
 };

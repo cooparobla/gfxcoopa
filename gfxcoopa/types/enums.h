@@ -33,6 +33,8 @@ enum class ShaderStage : uint32_t {
     Fragment = 1u << 1,
     Geometry = 1u << 2,
     Compute  = 1u << 3,
+    TessControl = 1u << 4,   ///< Tessellation control (hull). Needs Device::supports_tessellation().
+    TessEval    = 1u << 5,   ///< Tessellation evaluation (domain).
 };
 
 /// @brief Combines two shader-stage masks.
@@ -107,6 +109,7 @@ enum class Topology {
     LineList,
     LineStrip,
     PointList,
+    PatchList,   ///< Tessellation patches (PipelineDesc::patch_control_points sets their size).
 };
 
 /// @brief Rasterizer fill mode.

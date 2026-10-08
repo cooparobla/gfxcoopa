@@ -188,6 +188,12 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
     load_map("texture_metallic_roughness", material.texture_metallic_roughness, ColorSpace::Linear,
              material.metallic_roughness_handle);
     load_map("texture_alpha_mask", material.texture_alpha_mask, ColorSpace::Linear, material.alpha_mask_handle);
+    load_map("texture_displacement", material.texture_displacement, ColorSpace::Linear, material.displacement_handle);
+    if (mat_node.contains("displacement_scale")) {
+        const fkyaml::node& d = mat_node.at("displacement_scale");
+        material.displacement_scale = d.is_integer() ? static_cast<float>(d.get_value<int64_t>()) : d.get_value<float>();
+    }
+    if (mat_node.contains("snow") && mat_node.at("snow").is_boolean()) material.snow = mat_node.at("snow").get_value<bool>();
 
     // Derived surface shader (see PBRMaterial::shader's doc and the layered-shaders plan's
     // gfx/surface/*.glsl backbones). Registered-name validation happens later, once a
@@ -303,6 +309,31 @@ inline void register_render_components(core::Device& device,
                 mr->lod_bias = node.at("lod_bias").get_value<float>();
             if (node.contains("lods_enabled"))
                 mr->lods_enabled = node.at("lods_enabled").get_value<bool>();
+            // `tessellation: true` with flat `tess_edge_pixels` / `tess_max_factor` /
+            // `tess_max_distance` (the editor's spelling), or one block
+            // `tessellation: {enabled, edge_pixels, max_factor, max_distance}`.
+            {
+                auto num = [](const fkyaml::node& n, float def) {
+                    if (n.is_float_number()) return static_cast<float>(n.get_value<double>());
+                    if (n.is_integer()) return static_cast<float>(n.get_value<int64_t>());
+                    return def;
+                };
+                auto& tess = mr->tessellation;
+                if (node.contains("tessellation")) {
+                    const fkyaml::node& t = node.at("tessellation");
+                    if (t.is_boolean()) {
+                        tess.enabled = t.get_value<bool>();
+                    } else if (t.is_mapping()) {
+                        tess.enabled = !t.contains("enabled") || !t.at("enabled").is_boolean() || t.at("enabled").get_value<bool>();
+                        if (t.contains("edge_pixels"))  tess.edge_pixels  = num(t.at("edge_pixels"), tess.edge_pixels);
+                        if (t.contains("max_factor"))   tess.max_factor   = num(t.at("max_factor"), tess.max_factor);
+                        if (t.contains("max_distance")) tess.max_distance = num(t.at("max_distance"), tess.max_distance);
+                    }
+                }
+                if (node.contains("tess_edge_pixels"))  tess.edge_pixels  = num(node.at("tess_edge_pixels"), tess.edge_pixels);
+                if (node.contains("tess_max_factor"))   tess.max_factor   = num(node.at("tess_max_factor"), tess.max_factor);
+                if (node.contains("tess_max_distance")) tess.max_distance = num(node.at("tess_max_distance"), tess.max_distance);
+            }
 
             if (!mesh_path_key.empty()) {
                 // Async: the fkYAML mesh parse (data::Mesh::from_node) is pure CPU decode with

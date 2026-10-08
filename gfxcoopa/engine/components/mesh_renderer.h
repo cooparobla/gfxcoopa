@@ -111,6 +111,18 @@ struct PBRMaterial {
     /// coverage value, not color data. Ignored by SdfRenderer (SDFs have no UVs to sample with).
     std::string texture_alpha_mask         = "";
 
+    /// Height map for TESSELLATED renderers (MeshRenderer::tessellation): the red channel,
+    /// times displacement_scale, pushes each generated vertex out along its normal (Unity's
+    /// tessellation + displacement). Read in the tessellation evaluation stage only; an
+    /// untessellated draw ignores it. Linear, never sRGB.
+    std::string texture_displacement       = "";
+    float       displacement_scale         = 0.05f;   ///< Metres at a height-map value of 1.
+
+    /// Weather snow cover lands on this material's up-facing, sky-open surfaces (the G-buffer
+    /// backbone's snow layer, toyengine's gfx/surface/snow.glsl). False opts out -- emissive
+    /// panels, interiors the occlusion map misses, anything snow must never whiten.
+    bool        snow                       = true;
+
     /// Empty (the default) selects the stock surface shader for this material's
     /// alpha_mode. Otherwise the name of a shader registered
     /// in a pipeline::SurfaceShaderRegistry (see gfxcoopa/pipeline/surface_shader.h and the
@@ -148,6 +160,7 @@ struct PBRMaterial {
     coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> normal_handle;
     coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> metallic_roughness_handle;
     coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> alpha_mask_handle;
+    coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> displacement_handle;
 
     /** @brief Returns true when this material must be drawn by the forward transparent pass. */
     bool is_blended() const { return alpha_mode == AlphaMode::Blend; }
@@ -177,6 +190,9 @@ struct PBRMaterial {
 
     /** @brief Returns true when this material has a loaded metallic/roughness map to sample. */
     bool has_metallic_roughness_map() const { return metallic_roughness_handle.is_loaded(); }
+
+    /** @brief Returns true when this material has a loaded displacement (height) map. */
+    bool has_displacement_map() const { return displacement_handle.is_loaded(); }
 
     /**
      * @brief Returns the alpha cutoff as the GPU shader sees it.
@@ -325,6 +341,34 @@ public:
 
     /// False pins this renderer to LOD 0 and ignores the mesh's cull_screen_size.
     bool lods_enabled = true;
+
+    /**
+     * Camera-adaptive tessellation (Unity's "tessellation" geometry option): each triangle is
+     * subdivided on the GPU so its edges are about `edge_pixels` render pixels long, up to
+     * `max_factor` per edge, falling back to the plain mesh beyond `max_distance` metres. The
+     * material's surface shader (its displacement hook -- water's waves, foliage, snow) runs on
+     * the generated vertices, and a displacement map (PBRMaterial::texture_displacement) adds
+     * detail. Needs a device with tessellation (the renderer draws untessellated, warning
+     * once, otherwise). Applies to the G-buffer, both shadow passes and the forward
+     * transparent pass, so displaced geometry casts matching shadows.
+     */
+    struct Tessellation {
+        bool  enabled      = false;
+        float edge_pixels  = 6.0f;    ///< Target edge length in render pixels (smaller = denser).
+        float max_factor   = 16.0f;   ///< Cap on subdivisions per edge (the hardware allows 64).
+        float max_distance = 60.0f;   ///< Beyond this the mesh draws as authored (factor 1).
+    } tessellation;
+
+    /// Runtime-only tessellation a system imposes (e.g. the water quality tier on water tiles);
+    /// never serialized, so the authored `tessellation` stays what the scene file says. Used
+    /// instead of `tessellation` while `has_tessellation_override` is set.
+    Tessellation tessellation_override;
+    bool has_tessellation_override = false;
+
+    /** @brief The tessellation the renderer draws with: the override if set, else the authored block. */
+    const Tessellation& effective_tessellation() const {
+        return has_tessellation_override ? tessellation_override : tessellation;
+    }
 
 private:
     std::string mesh_path_; /**< Logical mesh path from YAML. */

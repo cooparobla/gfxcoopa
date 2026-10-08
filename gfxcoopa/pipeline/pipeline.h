@@ -61,6 +61,7 @@ struct PipelineConfig {
     VkSampleCountFlagBits  samples                = VK_SAMPLE_COUNT_1_BIT;               /**< MSAA sample count. */
     VkCompareOp             depth_compare_op       = VK_COMPARE_OP_LESS;                  /**< Depth comparison function. */
     uint32_t                color_attachment_count = 1;                                   /**< Color attachments sharing this blend state. */
+    uint32_t                patch_control_points   = 0;                                   /**< > 0: a tessellation pipeline (PATCH_LIST of this many control points). */
 };
 
 /// @brief A single push constant range: which stages read it, and its
@@ -122,6 +123,10 @@ struct PipelineDesc {
     RasterState raster;
     DepthState  depth;
     BlendState  blend;
+    /// > 0: a tessellation pipeline whose patches have this many control points (3 for
+    /// triangles). `shaders` must then hold a TessControl and a TessEval stage, and the
+    /// device must report Device::supports_tessellation(). The topology becomes PatchList.
+    uint32_t    patch_control_points = 0;
 };
 
 /**
@@ -397,6 +402,7 @@ private:
         t.config.depth_write      = desc.depth.write;
         t.config.depth_compare_op = detail::to_vk(desc.depth.compare);
         t.config.blend_mode       = desc.blend.mode;
+        t.config.patch_control_points = desc.patch_control_points;
         return t;
     }
 
@@ -450,8 +456,13 @@ private:
         // Input assembly.
         VkPipelineInputAssemblyStateCreateInfo input_assembly{};
         input_assembly.sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        input_assembly.topology               = config.topology;
+        input_assembly.topology               = config.patch_control_points > 0 ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST
+                                                                                : config.topology;
         input_assembly.primitiveRestartEnable = VK_FALSE;
+
+        VkPipelineTessellationStateCreateInfo tessellation{};
+        tessellation.sType              = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+        tessellation.patchControlPoints = config.patch_control_points;
 
         // Dynamic viewport/scissor — always enabled so resize is handled without rebuild.
         VkDynamicState dynamic_states[] = {
@@ -576,6 +587,7 @@ private:
         pipeline_info.pStages             = stages.data();
         pipeline_info.pVertexInputState   = &vertex_input;
         pipeline_info.pInputAssemblyState = &input_assembly;
+        pipeline_info.pTessellationState  = config.patch_control_points > 0 ? &tessellation : nullptr;
         pipeline_info.pViewportState      = &viewport_state;
         pipeline_info.pRasterizationState = &rasterizer;
         pipeline_info.pMultisampleState   = &multisampling;

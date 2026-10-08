@@ -66,7 +66,10 @@ public:
     static constexpr uint32_t kAlbedoBinding            = 1;
     static constexpr uint32_t kNormalBinding            = 2;
     static constexpr uint32_t kMetallicRoughnessBinding = 3;
-    static constexpr uint32_t kBindingCount             = 4;
+    /// Height map a tessellated draw displaces along the normal (r * displacement_scale) --
+    /// read in the tessellation EVALUATION stage only; black (no displacement) by default.
+    static constexpr uint32_t kDisplacementBinding      = 4;
+    static constexpr uint32_t kBindingCount             = 5;
 
     /// Sets allocated for distinct texture combinations. Sized well above any one scene's
     /// authored texture variety -- one set per unique 4-tuple of Texture*, not per material
@@ -78,12 +81,18 @@ public:
                          coopa::gfx::command::CommandPool& cmd_pool)
         : device_(device)
     {
+        // The displacement map is the evaluation stage's; on a device without tessellation
+        // nothing samples it, but the binding stays so every layout matches.
+        const coopa::gfx::ShaderStage disp_stages = device.supports_tessellation()
+            ? coopa::gfx::ShaderStage::TessEval | coopa::gfx::ShaderStage::Fragment
+            : coopa::gfx::ShaderStage::Fragment;
         layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
                 .combined_sampler(kAlphaMaskBinding, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(kAlbedoBinding, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(kNormalBinding, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(kMetallicRoughnessBinding, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(kDisplacementBinding, disp_stages)
                 .build(device));
 
         // +1 for fallback_set_ below, allocated from the same pool.
@@ -106,7 +115,14 @@ public:
                 device, allocator, cmd_pool, flat_normal_pixel, 1, 1,
                 coopa::gfx::Format::RGBA8_Unorm, coopa::gfx::SamplerDesc::pixel_art()));
 
+        const uint8_t black_pixel[4] = {0, 0, 0, 255};
+        black_texture_ = std::make_unique<coopa::gfx::engine::data::Texture>(
+            coopa::gfx::engine::data::Texture::upload(
+                device, allocator, cmd_pool, black_pixel, 1, 1,
+                coopa::gfx::Format::RGBA8_Unorm, coopa::gfx::SamplerDesc::pixel_art()));
+
         fallback_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *pool_, *layout_);
+        fallback_set_->bind_image(kDisplacementBinding, black_texture_->view_typed(), black_texture_->sampler_object());
         fallback_set_->bind_image(kAlphaMaskBinding, white_texture_->view_typed(), white_texture_->sampler_object());
         fallback_set_->bind_image(kAlbedoBinding, white_texture_->view_typed(), white_texture_->sampler_object());
         fallback_set_->bind_image(kNormalBinding, flat_normal_texture_->view_typed(), flat_normal_texture_->sampler_object());
@@ -136,14 +152,28 @@ public:
      *         drawn as if it had no textures -- e.g. an editor's Solid shading. */
     const coopa::gfx::pipeline::DescriptorSet& untextured_set() const { return *fallback_set_; }
 
+    /** @brief untextured_set() but keeping `material`'s displacement map: Solid shading drops the
+     *         colour maps, not the shape a tessellated surface is displaced into. */
+    const coopa::gfx::pipeline::DescriptorSet& untextured_set_for(const coopa::gfx::engine::components::PBRMaterial& material) {
+        return set_for_key_({nullptr, nullptr, nullptr, nullptr,
+                             material.has_displacement_map() ? material.displacement_handle.get() : nullptr});
+    }
+
     const coopa::gfx::pipeline::DescriptorSet& set_for(const coopa::gfx::engine::components::PBRMaterial& material) {
-        Key key = {
+        return set_for_key_({
             material.has_alpha_mask() ? material.alpha_mask_handle.get() : nullptr,
             material.has_albedo_map() ? material.albedo_handle.get() : nullptr,
             material.has_normal_map() ? material.normal_handle.get() : nullptr,
             material.has_metallic_roughness_map() ? material.metallic_roughness_handle.get() : nullptr,
-        };
-        if (key[0] == nullptr && key[1] == nullptr && key[2] == nullptr && key[3] == nullptr) {
+            material.has_displacement_map() ? material.displacement_handle.get() : nullptr,
+        });
+    }
+
+private:
+    using Key = std::array<const coopa::gfx::engine::data::Texture*, kBindingCount>;
+
+    const coopa::gfx::pipeline::DescriptorSet& set_for_key_(const Key& key) {
+        if (key[0] == nullptr && key[1] == nullptr && key[2] == nullptr && key[3] == nullptr && key[4] == nullptr) {
             return *fallback_set_;
         }
         auto it = sets_.find(key);
@@ -155,19 +185,18 @@ public:
         bind_slot_(*set, kAlbedoBinding, key[1]);
         bind_slot_(*set, kNormalBinding, key[2]);
         bind_slot_(*set, kMetallicRoughnessBinding, key[3]);
+        bind_slot_(*set, kDisplacementBinding, key[4]);
         auto [inserted, _] = sets_.emplace(key, std::move(set));
         return *inserted->second;
     }
-
-private:
-    using Key = std::array<const coopa::gfx::engine::data::Texture*, kBindingCount>;
 
     /// Binds `texture` at `binding` if non-null, else this cache's fallback for that binding
     /// (flat-normal at kNormalBinding, white everywhere else).
     void bind_slot_(coopa::gfx::pipeline::DescriptorSet& set, uint32_t binding,
                     const coopa::gfx::engine::data::Texture* texture) {
         const coopa::gfx::engine::data::Texture& t =
-            texture ? *texture : (binding == kNormalBinding ? *flat_normal_texture_ : *white_texture_);
+            texture ? *texture : (binding == kNormalBinding ? *flat_normal_texture_
+                                : binding == kDisplacementBinding ? *black_texture_ : *white_texture_);
         set.bind_image(binding, t.view_typed(), t.sampler_object());
     }
 
@@ -176,6 +205,7 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      pool_;
     std::unique_ptr<coopa::gfx::engine::data::Texture>         white_texture_;
     std::unique_ptr<coopa::gfx::engine::data::Texture>         flat_normal_texture_;
+    std::unique_ptr<coopa::gfx::engine::data::Texture>         black_texture_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       fallback_set_;
     std::map<Key, std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> sets_;
 };

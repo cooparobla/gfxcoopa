@@ -80,7 +80,9 @@ function(gfx_add_shader_target TARGET_NAME)
     # deliberately never globbed here (only *.vert/*.frag entry points are).
     file(GLOB SHADER_SRCS CONFIGURE_DEPENDS
         "${ARG_SHADER_DIR}/*.vert"
-        "${ARG_SHADER_DIR}/*.frag")
+        "${ARG_SHADER_DIR}/*.frag"
+        "${ARG_SHADER_DIR}/*.tesc"
+        "${ARG_SHADER_DIR}/*.tese")
 
     if(ARG_OUTPUT_DIR)
         file(MAKE_DIRECTORY "${ARG_OUTPUT_DIR}")

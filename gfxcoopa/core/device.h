@@ -97,6 +97,11 @@ public:
      */
     VkPhysicalDevice physical() const { return physical_device_; }
 
+    /** @brief True when the tessellation stages are enabled (the device reports tessellationShader). */
+    bool supports_tessellation() const { return tessellation_supported_; }
+    /** @brief The device's maxTessellationGenerationLevel (64 on Apple GPUs); 0 without tessellation. */
+    uint32_t max_tessellation_level() const { return tessellation_supported_ ? max_tessellation_level_ : 0u; }
+
     /** @brief The selected GPU's name, as the driver reports it. */
     std::string gpu_name() const {
         VkPhysicalDeviceProperties props;
@@ -314,6 +319,18 @@ private:
 
         VkPhysicalDeviceFeatures features{};
         features.samplerAnisotropy = VK_TRUE; // Enable anisotropic filtering
+        // Tessellation when the device has it (MoltenVK does, through Metal's tessellator):
+        // surface shaders then get camera-adaptive tessellated variants; without it they draw
+        // untessellated. See supports_tessellation().
+        {
+            VkPhysicalDeviceFeatures available{};
+            vkGetPhysicalDeviceFeatures(physical_device_, &available);
+            features.tessellationShader = available.tessellationShader;
+            tessellation_supported_ = available.tessellationShader == VK_TRUE;
+            VkPhysicalDeviceProperties props{};
+            vkGetPhysicalDeviceProperties(physical_device_, &props);
+            max_tessellation_level_ = props.limits.maxTessellationGenerationLevel;
+        }
 
         std::vector<const char*> extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
@@ -378,6 +395,8 @@ private:
     }
 
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE; /**< Selected GPU. */
+    bool             tessellation_supported_ = false;   /**< tessellationShader enabled (see supports_tessellation()). */
+    uint32_t         max_tessellation_level_ = 0;
     VkDevice         device_          = VK_NULL_HANDLE; /**< Logical device. */
     VkQueue          graphics_queue_  = VK_NULL_HANDLE; /**< Graphics submission queue. */
     VkQueue          present_queue_   = VK_NULL_HANDLE; /**< Presentation queue. */
