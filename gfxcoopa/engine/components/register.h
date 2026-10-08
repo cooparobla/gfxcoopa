@@ -43,6 +43,10 @@
 #include <gfxcoopa/engine/loaders/texture_loader.h>
 #include <gfxcoopa/types/enums.h>
 
+#include <filesystem>
+#include <mutex>
+#include <unordered_map>
+
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/components/camera_component.h>
 #include <gfxcoopa/engine/components/directional_light.h>
@@ -59,6 +63,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -229,6 +234,30 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
  */
 inline fkyaml::node load_material_document_(const std::string& ref, coopa::asset::AssetManager& assets,
                                             const coopa::scene::SceneLoader::ParseContext& ctx) {
+    // A shared material is referenced by many objects (a scene of 500 rocks names
+    // `materials/stone` 500 times): resolve + read + parse it once, not per reference. Each use
+    // re-checks the file's write time and size, so an edited material is picked up on the next
+    // load -- one stat instead of a resolve (~10 stats) and a parse.
+    struct Cached {
+        std::string file;   // the resolved document (yaml or caml twin)
+        std::filesystem::file_time_type mtime{};
+        std::uintmax_t size = 0;
+        fkyaml::node doc;
+    };
+    static std::mutex cache_mutex;
+    static std::unordered_map<std::string, Cached> cache;
+    const std::string key = ref + '\n' + ctx.base_dir();
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        auto it = cache.find(key);
+        if (it != cache.end()) {
+            std::error_code ec1, ec2;
+            const auto mtime = std::filesystem::last_write_time(it->second.file, ec1);
+            const auto size = std::filesystem::file_size(it->second.file, ec2);
+            if (!ec1 && !ec2 && mtime == it->second.mtime && size == it->second.size) return it->second.doc;
+            cache.erase(it);
+        }
+    }
     std::string path = ref;
     if (!coopa::yaml::is_document_ext(path)) path += ".yaml";
     const std::string resolved = assets.source().resolve(path, ctx.base_dir());
@@ -236,7 +265,18 @@ inline fkyaml::node load_material_document_(const std::string& ref, coopa::asset
         throw std::runtime_error("[gfxcoopa] Material '" + ref + "' not found (looked for '" + path +
                                  "' in the scene directory and asset roots)");
     }
-    return coopa::yaml::load_document(coopa::yaml::resolve_variant(resolved));
+    Cached entry;
+    entry.file = coopa::yaml::resolve_variant(resolved);
+    entry.doc = coopa::yaml::load_document(entry.file);
+    std::error_code ec1, ec2;
+    entry.mtime = std::filesystem::last_write_time(entry.file, ec1);
+    entry.size = std::filesystem::file_size(entry.file, ec2);
+    fkyaml::node doc = entry.doc;
+    if (!ec1 && !ec2) {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        cache[key] = std::move(entry);
+    }
+    return doc;
 }
 
 /**
