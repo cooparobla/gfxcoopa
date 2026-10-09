@@ -336,6 +336,29 @@ public:
     }
 
     /**
+     * @brief Binds a storage image (compute read/write, like glBindImageTexture). The image
+     * must be in VK_IMAGE_LAYOUT_GENERAL whenever a dispatch reads or writes it.
+     * @param binding    The binding index within the set.
+     * @param image_view The VkImageView to expose (a single mip level).
+     */
+    void bind_storage_image(uint32_t binding, VkImageView image_view) {
+        VkDescriptorImageInfo image_info{};
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        image_info.imageView   = image_view;
+
+        VkWriteDescriptorSet write{};
+        write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet          = set_;
+        write.dstBinding      = binding;
+        write.dstArrayElement = 0;
+        write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write.descriptorCount = 1;
+        write.pImageInfo      = &image_info;
+
+        vkUpdateDescriptorSets(device_.handle(), 1, &write, 0, nullptr);
+    }
+
+    /**
      * @brief Binds a combined image sampler, using the sealed TextureView
      * instead of a raw VkImageView.
      * @param binding    The binding index within the set.
