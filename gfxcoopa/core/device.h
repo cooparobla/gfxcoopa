@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <limits>
 #include <cstring>
+#include <cstdio>
 
 #include <gfxcoopa/core/instance.h>
 #include <gfxcoopa/core/surface.h>
@@ -43,6 +44,27 @@ struct QueueFamilyIndices {
      * @return True if graphics and present families are both valid.
      */
     bool is_complete() const { return graphics.has_value() && present.has_value(); }
+};
+
+/**
+ * @struct ComputeCaps
+ * @brief What the device offers compute work, queried once at device creation (see
+ *        Device::compute_caps()). gfxcoopa records compute in-line on the graphics queue
+ *        (there is no async compute queue), so `graphics_queue_compute` is the gate:
+ *        Device::supports_compute() is exactly that bit.
+ */
+struct ComputeCaps {
+    bool     graphics_queue_compute       = false; ///< The graphics queue family has VK_QUEUE_COMPUTE_BIT.
+    uint32_t max_storage_buffer_range     = 0;     ///< Largest storage-buffer descriptor range, bytes.
+    uint32_t max_per_stage_storage_buffers = 0;    ///< Storage buffers one shader stage may bind.
+    uint32_t max_set_storage_buffers      = 0;     ///< Storage buffers across a whole pipeline layout.
+    uint32_t max_work_group_invocations   = 0;     ///< local_size_x * y * z ceiling.
+    uint32_t max_work_group_size[3]       = {};    ///< Per-axis local_size ceiling.
+    uint32_t max_work_group_count[3]      = {};    ///< Per-axis dispatch() group-count ceiling.
+    uint32_t max_shared_memory            = 0;     ///< `shared` variable bytes per work group.
+    uint64_t min_storage_buffer_offset_alignment = 0; ///< Sub-range binding alignment.
+    bool     multi_draw_indirect          = false; ///< draw_indirect() with draw_count > 1 (enabled when present).
+    bool     draw_indirect_first_instance = false; ///< Indirect args may use a non-zero firstInstance (enabled when present).
 };
 
 /**
@@ -101,6 +123,12 @@ public:
     bool supports_tessellation() const { return tessellation_supported_; }
     /** @brief The device's maxTessellationGenerationLevel (64 on Apple GPUs); 0 without tessellation. */
     uint32_t max_tessellation_level() const { return tessellation_supported_ ? max_tessellation_level_ : 0u; }
+
+    /** @brief True when compute dispatches can be recorded into graphics-queue command
+     *         buffers (the graphics family reports compute). Gate every compute path on it. */
+    bool supports_compute() const { return compute_caps_.graphics_queue_compute; }
+    /** @brief The device's compute and storage-buffer limits; see ComputeCaps. */
+    const ComputeCaps& compute_caps() const { return compute_caps_; }
 
     /** @brief The selected GPU's name, as the driver reports it. */
     std::string gpu_name() const {
@@ -330,6 +358,11 @@ private:
             VkPhysicalDeviceProperties props{};
             vkGetPhysicalDeviceProperties(physical_device_, &props);
             max_tessellation_level_ = props.limits.maxTessellationGenerationLevel;
+            // Indirect-draw conveniences for compute-fed draws: enabled when present (MoltenVK
+            // has both), never required -- a single draw with firstInstance 0 needs neither.
+            features.multiDrawIndirect         = available.multiDrawIndirect;
+            features.drawIndirectFirstInstance = available.drawIndirectFirstInstance;
+            query_compute_caps_(available, props);
         }
 
         std::vector<const char*> extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
@@ -394,9 +427,51 @@ private:
         vkGetDeviceQueue(device_, queue_families_.present.value(),  0, &present_queue_);
     }
 
+    /**
+     * @brief Fills compute_caps_ from the selected GPU's limits and its graphics queue family,
+     *        and logs them once per process (an editor or test that brings up several devices
+     *        on the same GPU prints them once).
+     */
+    void query_compute_caps_(const VkPhysicalDeviceFeatures& available, const VkPhysicalDeviceProperties& props) {
+        uint32_t count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &count, nullptr);
+        std::vector<VkQueueFamilyProperties> families(count);
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &count, families.data());
+        const uint32_t gfx = queue_families_.graphics.value();
+
+        ComputeCaps& c = compute_caps_;
+        const VkPhysicalDeviceLimits& l = props.limits;
+        c.graphics_queue_compute        = gfx < count && (families[gfx].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
+        c.max_storage_buffer_range      = l.maxStorageBufferRange;
+        c.max_per_stage_storage_buffers = l.maxPerStageDescriptorStorageBuffers;
+        c.max_set_storage_buffers       = l.maxDescriptorSetStorageBuffers;
+        c.max_work_group_invocations    = l.maxComputeWorkGroupInvocations;
+        c.max_shared_memory             = l.maxComputeSharedMemorySize;
+        c.min_storage_buffer_offset_alignment = l.minStorageBufferOffsetAlignment;
+        for (int i = 0; i < 3; ++i) {
+            c.max_work_group_size[i]  = l.maxComputeWorkGroupSize[i];
+            c.max_work_group_count[i] = l.maxComputeWorkGroupCount[i];
+        }
+        c.multi_draw_indirect          = available.multiDrawIndirect == VK_TRUE;
+        c.draw_indirect_first_instance = available.drawIndirectFirstInstance == VK_TRUE;
+
+        static bool logged = false;
+        if (logged) return;
+        logged = true;
+        std::printf("[gfxcoopa] compute: %s on graphics queue family %u | storage buffer range %u MiB, "
+                    "%u per stage, %u per layout | work group <= %u invocations (%u, %u, %u), "
+                    "shared %u KiB | multiDrawIndirect %d, drawIndirectFirstInstance %d\n",
+                    c.graphics_queue_compute ? "supported" : "UNSUPPORTED", gfx,
+                    c.max_storage_buffer_range >> 20, c.max_per_stage_storage_buffers, c.max_set_storage_buffers,
+                    c.max_work_group_invocations, c.max_work_group_size[0], c.max_work_group_size[1],
+                    c.max_work_group_size[2], c.max_shared_memory >> 10,
+                    c.multi_draw_indirect ? 1 : 0, c.draw_indirect_first_instance ? 1 : 0);
+    }
+
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE; /**< Selected GPU. */
     bool             tessellation_supported_ = false;   /**< tessellationShader enabled (see supports_tessellation()). */
     uint32_t         max_tessellation_level_ = 0;
+    ComputeCaps      compute_caps_;                     /**< See compute_caps(). */
     VkDevice         device_          = VK_NULL_HANDLE; /**< Logical device. */
     VkQueue          graphics_queue_  = VK_NULL_HANDLE; /**< Graphics submission queue. */
     VkQueue          present_queue_   = VK_NULL_HANDLE; /**< Presentation queue. */

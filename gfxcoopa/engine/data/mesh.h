@@ -384,6 +384,12 @@ public:
      * @param vertices     Interleaved vertex data; must be non-empty.
      * @param indices      32-bit index data; must be non-empty.
      * @param buffer_count Number of vertex buffers to allocate (clamped to at least 1).
+     * @param compute_writable Also create the vertex buffers with BufferUsage::Storage, so a
+     *        compute pass can write vertices in place (GPU skinning): bind vertex_buffer(slot)
+     *        as a storage buffer, dispatch, then mark_gpu_written(slot, ...) and put a
+     *        CommandBuffer::compute_to_draw_barrier() before the draws. The buffers stay
+     *        host-visible, so update_vertices() (the CPU fallback) keeps working on the same
+     *        mesh. Off by default: every existing mesh keeps its vertex-only usage.
      * @return A new GPU-resident Mesh.
      * @throws std::runtime_error if either array is empty.
      */
@@ -391,7 +397,8 @@ public:
                             memory::Allocator&          allocator,
                             const std::vector<Vertex>&  vertices,
                             const std::vector<uint32_t>& indices,
-                            uint32_t                    buffer_count = 1)
+                            uint32_t                    buffer_count = 1,
+                            bool                        compute_writable = false)
     {
         if (vertices.empty() || indices.empty()) {
             throw std::runtime_error("[Mesh] from_arrays() needs non-empty vertex and index arrays.");
@@ -404,7 +411,10 @@ public:
         std::vector<memory::Buffer> vbs;
         vbs.reserve(count);
         for (uint32_t i = 0; i < count; ++i) {
-            auto vb = memory::Buffer::vertex(device, allocator, vb_size);
+            auto vb = compute_writable
+                ? memory::Buffer(device, allocator, vb_size, BufferUsage::Vertex | BufferUsage::Storage,
+                                 MemoryResidency::CpuToGpu)   // Buffer::vertex()'s memory, plus Storage
+                : memory::Buffer::vertex(device, allocator, vb_size);
             vb.upload(vertices.data(), vb_size);   // seed every slot, so frame 0 draws correctly
             vbs.push_back(std::move(vb));           // whichever slot it happens to land on
         }
@@ -460,6 +470,28 @@ public:
         bounds_min_ = lo;
         bounds_max_ = hi;
     }
+
+    /**
+     * @brief The GPU-written counterpart of update_vertices(): a compute pass has written (or
+     * is about to write, in this frame's command buffer) `frame_slot`'s vertex buffer, so
+     * bind() uses that slot from now on. Nothing is uploaded; `bounds_min`/`bounds_max` are
+     * the caller's conservative object-space bounds for culling (e.g. grown from bone
+     * positions), since the CPU never sees the vertices.
+     */
+    void mark_gpu_written(uint32_t frame_slot, const glm::vec3& bounds_min, const glm::vec3& bounds_max) {
+        active_slot_ = frame_slot % static_cast<uint32_t>(vertex_buffers_.size());
+        bounds_min_  = bounds_min;
+        bounds_max_  = bounds_max;
+    }
+
+    /** @brief `frame_slot`'s vertex buffer (modulo the buffer count) -- what a compute pass
+     *         binds as a storage buffer on a compute_writable mesh. */
+    memory::Buffer&       vertex_buffer(uint32_t frame_slot)       { return vertex_buffers_[frame_slot % vertex_buffers_.size()]; }
+    const memory::Buffer& vertex_buffer(uint32_t frame_slot) const { return vertex_buffers_[frame_slot % vertex_buffers_.size()]; }
+    /** @brief Number of vertex buffers (1 static, frames-in-flight dynamic). */
+    uint32_t vertex_buffer_count() const { return static_cast<uint32_t>(vertex_buffers_.size()); }
+    /** @brief The slot bind() currently draws from. */
+    uint32_t active_slot() const { return active_slot_; }
 
     /** @brief True if this mesh has more than one vertex buffer, i.e. is safe to rewrite per frame. */
     bool is_dynamic() const { return vertex_buffers_.size() > 1; }

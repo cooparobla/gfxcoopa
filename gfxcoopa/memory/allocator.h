@@ -20,6 +20,7 @@
 
 #include <vma/vk_mem_alloc.h>
 #include <stdexcept>
+#include <vector>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/core/instance.h>
@@ -84,6 +85,43 @@ public:
      * @return Raw VmaAllocator.
      */
     VmaAllocator handle() const { return allocator_; }
+
+    /**
+     * @brief One heap's usage as VMA tracks it: what this allocator holds (`allocated` /
+     *        `reserved`, bytes in live allocations vs. device memory blocks) and the process-wide
+     *        `usage` / `budget` the driver reports (estimated, when VK_EXT_memory_budget is
+     *        absent -- VMA then derives them from its own blocks and the heap size).
+     */
+    struct HeapBudget {
+        uint64_t allocated = 0;   ///< Bytes in live allocations.
+        uint64_t reserved  = 0;   ///< Bytes in VkDeviceMemory blocks (>= allocated).
+        uint64_t usage     = 0;   ///< Process usage of the heap.
+        uint64_t budget    = 0;   ///< How much the process may use before trouble.
+        bool     device_local = false;
+    };
+
+    /**
+     * @brief Every memory heap's budget, via vmaGetHeapBudgets(). Cheap (no driver round
+     *        trip beyond VMA's own budget cache), so a debug overlay can call it per frame.
+     */
+    std::vector<HeapBudget> heap_budgets() const {
+        std::vector<HeapBudget> out;
+        if (allocator_ == VK_NULL_HANDLE) return out;
+        const VkPhysicalDeviceMemoryProperties* props = nullptr;
+        vmaGetMemoryProperties(allocator_, &props);
+        if (!props) return out;
+        VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+        vmaGetHeapBudgets(allocator_, budgets);
+        out.resize(props->memoryHeapCount);
+        for (uint32_t i = 0; i < props->memoryHeapCount; ++i) {
+            out[i].allocated    = budgets[i].statistics.allocationBytes;
+            out[i].reserved     = budgets[i].statistics.blockBytes;
+            out[i].usage        = budgets[i].usage;
+            out[i].budget       = budgets[i].budget;
+            out[i].device_local = (props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
+        }
+        return out;
+    }
 
 private:
     VmaAllocator allocator_ = VK_NULL_HANDLE; /**< The VMA allocator handle. */

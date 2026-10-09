@@ -40,7 +40,7 @@ namespace passes {
  * `bind` takes no VkPipelineLayout: every call site invokes it after the
  * pass's own cmd.bind_pipeline(), which already caches that pipeline's
  * layout on CommandBuffer for the sealed bind_descriptor_set()/
- * push_constants() overloads to use -- see command_buffer.h's bound_pipeline_.
+ * push_constants() overloads to use -- see command_buffer.h's bound_layout_.
  */
 struct ExtraSets {
     /// Appended in order after a pass's own layouts. Empty (the default)

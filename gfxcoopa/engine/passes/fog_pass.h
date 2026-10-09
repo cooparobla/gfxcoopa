@@ -1,13 +1,18 @@
 /**
  * @file fog_pass.h
- * @brief Fullscreen Unity-style fog composite (the caller supplies fog.frag; see
- *        toyengine's assets/shaders/fog.frag).
+ * @brief Fullscreen global-fog composite over the OPAQUE scene, in place (the caller supplies
+ *        fog.frag; see toyengine's assets/shaders/fog.frag).
  *
- * Follows PixelStylizePass's shape almost line for line -- the closest existing
- * pass (fullscreen triangle, reads scene colour + G-buffer, owns its own
- * descriptor layout/pool/set). Writes into its own target: pipeline::RenderPass's
- * hardcoded LOAD_OP_CLEAR (gfxcoopa/pipeline/render_pass.h) means the target it
- * reads scene colour from can't be reopened and composited onto in place.
+ * The Unreal/HDRP split: this pass fogs opaque geometry and sky by the G-buffer distance, and
+ * every forward (translucent) shader fogs its own fragment at its own distance afterwards.
+ * So it must run after lighting and BEFORE translucency is drawn.
+ *
+ * Draws in place: the fragment shader outputs premultiplied (in-scatter, 1 - transmittance) and
+ * the pipeline blends src + dst * (1 - srcA) = dst * T + in-scatter. That needs a render pass that
+ * LOADS the existing colour, which pipeline::RenderPass (hardcoded LOAD_OP_CLEAR) cannot give, so
+ * the stage is built against a caller-supplied raw VkRenderPass -- in toyengine,
+ * TransparentPass's own (LOAD on colour and depth), which is how the pass reopens the live HDR
+ * image with no extra target or copy.
  */
 
 #ifndef GFXCOOPA_ENGINE_PASSES_FOG_PASS_H
@@ -16,14 +21,12 @@
 #include <volk/volk.h>
 #include <glm/glm.hpp>
 
-#include <memory>
 #include <string>
-#include <vector>
 
 #include <gfxcoopa/core/device.h>
-#include <gfxcoopa/memory/buffer.h>
-#include <gfxcoopa/pipeline/render_pass.h>
+#include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/command/command_buffer.h>
+#include <gfxcoopa/detail/vk_convert.h>
 #include <gfxcoopa/engine/passes/fullscreen_stage.h>
 #include <gfxcoopa/types/texture_view.h>
 #include <gfxcoopa/engine/util/sampler.h>
@@ -35,64 +38,63 @@ namespace passes {
 
 /**
  * @class FogPass
- * @brief Composites Unity-style distance/height fog over a scene colour image.
+ * @brief Blends global fog in place over the opaque scene colour.
  *
- * Owns two descriptor sets: scene colour plus the G-buffer normal and position
- * at set 0, and the caller's FogData UBO at set 1, bound once at construction.
- * Writes into a target the caller begins and ends.
+ * Set 0 (owned): G-buffer normal and position. Set 1: the caller's light set, which carries
+ * the fog parameters (LightUBO's fog block) -- per frame-in-flight, so the fog never reads a
+ * stale camera or a half-written block. Push constants: the camera ray reconstruction.
  */
 class FogPass {
 public:
+    /// Fragment push constants: clip -> world for the per-pixel view ray, and the camera.
+    struct PushConstants {
+        glm::mat4 inv_view_proj = glm::mat4(1.0f);
+        glm::vec4 camera_pos    = glm::vec4(0.0f);  ///< xyz = world-space camera position.
+    };
+
     /**
-     * @brief Builds the fog pipeline and its two descriptor sets.
-     * @param device     Logical device.
-     * @param target_pass Render pass of the (separate) HDR target this pass writes into.
-     * @param fog_ubo    The FogData's uniform buffer (see engine/data/fog_data.h). Bound
-     *                   once here, at set 1 binding 0 -- like camera_set_/light_set_ in
-     *                   blendy's PbrRenderPipeline, the buffer's VkBuffer handle never changes
-     *                   after creation, so only its per-frame upload() needs repeating.
-     * @param vert_spv   Fullscreen-triangle vertex shader (e.g. toyengine's fullscreen.vert).
-     * @param frag_spv   fog.frag.
+     * @brief Builds the fog pipeline.
+     * @param device       Logical device.
+     * @param render_pass  A render pass that LOADS the HDR colour it draws into (one colour
+     *                     attachment; any depth attachment is ignored -- no depth test).
+     * @param light_layout Layout of the caller's light set, bound at set 1.
+     * @param vert_spv     Fullscreen-triangle vertex shader (e.g. toyengine's fullscreen.vert).
+     * @param frag_spv     fog.frag.
      */
     FogPass(coopa::gfx::core::Device& device,
-            coopa::gfx::pipeline::RenderPass& target_pass,
-            const coopa::gfx::memory::Buffer& fog_ubo,
+            VkRenderPass render_pass,
+            const coopa::gfx::pipeline::DescriptorSetLayout& light_layout,
             const std::string& vert_spv,
             const std::string& frag_spv)
         : nearest_sampler_(coopa::gfx::engine::util::Sampler::nearest(device)),
-          stage_(device, target_pass, describe(vert_spv, frag_spv))
-    {
-        stage_.set(1).bind_buffer(0, fog_ubo);
-    }
+          stage_(device, coopa::gfx::detail::RawRenderPass{render_pass}, describe(light_layout, vert_spv, frag_spv))
+    {}
 
     FogPass(const FogPass&) = delete;
     FogPass& operator=(const FogPass&) = delete;
 
     /**
-     * @brief Rebinds the three source images. Called every frame the pass runs, since
-     * scene_color may be a different view depending on whether SSR ran this frame
-     * (see blendy's PbrRenderPipeline's hdr_source_view).
-     *
-     * g_normal/g_position use the nearest sampler this pass owns, not linear: linear
-     * filtering would blend world positions across silhouette edges, producing a wrong
-     * fog distance at every object outline -- the same reasoning PixelStylizePass
-     * documents for its own depth/normal taps.
+     * @brief Binds the G-buffer normal (sky test) and world position (fog distance). Nearest,
+     * not linear: linear filtering would blend world positions across silhouette edges and
+     * produce a wrong fog distance at every object outline.
      */
-    void set_source_images(coopa::gfx::TextureView scene_color, coopa::gfx::TextureView g_normal,
-                           coopa::gfx::TextureView g_position, const coopa::gfx::engine::util::Sampler& linear_sampler) {
-        stage_.set(0).bind_image(0, scene_color, linear_sampler);
-        stage_.set(0).bind_image(1, g_normal, nearest_sampler_);
-        stage_.set(0).bind_image(2, g_position, nearest_sampler_);
+    void set_source_images(coopa::gfx::TextureView g_normal, coopa::gfx::TextureView g_position) {
+        stage_.set(0).bind_image(0, g_normal, nearest_sampler_);
+        stage_.set(0).bind_image(1, g_position, nearest_sampler_);
     }
 
-    void draw(coopa::gfx::command::CommandBuffer& cmd, uint32_t viewport_w, uint32_t viewport_h) const {
+    /// @brief Records the fog draw. Must be inside the render pass given at construction.
+    void draw(coopa::gfx::command::CommandBuffer& cmd, const coopa::gfx::pipeline::DescriptorSet& light_set,
+              const PushConstants& pc, uint32_t viewport_w, uint32_t viewport_h) const {
         stage_.bind(cmd, viewport_w, viewport_h);
+        cmd.bind_descriptor_set(light_set, 1);
+        cmd.push_constants(coopa::gfx::ShaderStage::Fragment, pc);
         stage_.draw(cmd);
     }
 
 private:
-    /// @brief Set 0: scene colour + G-buffer normal/position. Set 1: the pass's UBO.
-    static FullscreenStageDesc describe(const std::string& vert_spv, const std::string& frag_spv) {
+    static FullscreenStageDesc describe(const coopa::gfx::pipeline::DescriptorSetLayout& light_layout,
+                                        const std::string& vert_spv, const std::string& frag_spv) {
         using coopa::gfx::DescriptorType;
         using coopa::gfx::ShaderStage;
         FullscreenStageDesc d;
@@ -100,10 +102,11 @@ private:
         d.frag_spv = frag_spv;
         d.owned_sets = {
             {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
-             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
-             {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
-            {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
+             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
         };
+        d.extra_layouts  = {&light_layout};
+        d.push_constants = {{ShaderStage::Fragment, 0, static_cast<uint32_t>(sizeof(PushConstants))}};
+        d.blend          = coopa::gfx::pipeline::BlendMode::PremultipliedAlpha;
         return d;
     }
 

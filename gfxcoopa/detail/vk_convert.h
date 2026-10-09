@@ -339,6 +339,30 @@ inline VkBufferUsageFlags to_vk(BufferUsage u) {
     return f;
 }
 
+// --- BufferAccess (bitmask) -> barrier masks -------------------------------
+
+/// @brief The (access, stage) masks of one side of a buffer memory barrier. Reuses
+/// BarrierMasks; an empty set maps to TOP_OF_PIPE / no access, the "nothing to wait on"
+/// source.
+inline BarrierMasks barrier_masks_for(BufferAccess a) {
+    BarrierMasks m{ 0, 0 };
+    auto add = [&](BufferAccess bit, VkAccessFlags access, VkPipelineStageFlags stage) {
+        if (any(a, bit)) { m.access |= access; m.stage |= stage; }
+    };
+    add(BufferAccess::TransferRead,       VK_ACCESS_TRANSFER_READ_BIT,           VK_PIPELINE_STAGE_TRANSFER_BIT);
+    add(BufferAccess::TransferWrite,      VK_ACCESS_TRANSFER_WRITE_BIT,          VK_PIPELINE_STAGE_TRANSFER_BIT);
+    add(BufferAccess::ComputeRead,        VK_ACCESS_SHADER_READ_BIT,             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    add(BufferAccess::ComputeWrite,       VK_ACCESS_SHADER_WRITE_BIT,            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    add(BufferAccess::VertexAttribute,    VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,   VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
+    add(BufferAccess::Index,              VK_ACCESS_INDEX_READ_BIT,              VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
+    add(BufferAccess::Indirect,           VK_ACCESS_INDIRECT_COMMAND_READ_BIT,   VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT);
+    add(BufferAccess::VertexShaderRead,   VK_ACCESS_SHADER_READ_BIT,             VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
+    add(BufferAccess::FragmentShaderRead, VK_ACCESS_SHADER_READ_BIT,             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    add(BufferAccess::HostRead,           VK_ACCESS_HOST_READ_BIT,               VK_PIPELINE_STAGE_HOST_BIT);
+    if (m.stage == 0) m.stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    return m;
+}
+
 // --- MemoryResidency -> VMA -------------------------------------------------
 
 /// @brief A MemoryResidency split into the VMA usage + allocation flags pair it

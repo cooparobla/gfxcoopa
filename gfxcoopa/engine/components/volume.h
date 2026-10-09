@@ -35,7 +35,7 @@ enum class VolumeShape {
  * @brief Local, artist-placed, raymarched volume. Always bounded.
  *
  * The single local-volume concept in the engine. Fog is GLOBAL only and lives in
- * the renderer config (see fog_data.h); everything local -- including a static
+ * the renderer config (LightUBO's fog block, light_data.h); everything local -- including a static
  * fog pocket -- is one of these, raymarched by VolumetricsPass.
  *
  * `kind` selects the density function; every other field means the same thing for

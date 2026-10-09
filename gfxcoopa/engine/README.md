@@ -5,7 +5,7 @@ The `coopa::gfx::engine` module provides high-level rendering engine abstraction
 - **`coopa::gfx::engine::passes`** ([`passes`](passes)): Render pass execution and graphics pipelines (`FullscreenStage` — the shared scaffold most post-processing passes are built from — plus `DeferredLightingPass`, `GBufferPipeline`, `ShadowPipeline`, `TransparentPass`, `SsaoPass`, `SsrPass`, `HiZPass`, `SceneColorMipPass`, `TemporalHistoryPass`, `TaaPass`, `SmaaPass`, `FxaaPass`, `ExposurePass`, `PresentPass`, `FogPass`, `VolumetricsPass`, `FroxelVolumetricsPass`, `BloomPass`, `DofPass`, `TiltShiftPass`, `PixelStylizePass`, `EnvPrefilterPass`, `ProbeCapturePass`, `TexturedQuad2DPass`, the `Sdf*` passes).
 - **`coopa::gfx::engine::targets`** ([`targets`](targets)): Framebuffer and render target resource managers (`OffscreenTarget`, `GBufferTarget`, `ShadowMapTarget`, `CubemapTarget`).
 - **`coopa::gfx::engine::gi`** ([`gi`](gi)): Global Illumination system, CPU probe baking, and SH data structures (`GiSystem`, `GiBaker`, `GiData`, `BRDFLUT`).
-- **`coopa::gfx::engine::data`** ([`data`](data)): Mesh, texture and LUT data plus per-frame GPU buffers (`Mesh`, `Vertex`, `InstanceData`, `Texture`, `GradingLut`, `PaletteLut`, `CameraUBO`, `LightData`, `FogData`, `VolumetricsData`, `SdfData`, `SkinnedMeshSource`).
+- **`coopa::gfx::engine::data`** ([`data`](data)): Mesh, texture and LUT data plus per-frame GPU buffers (`Mesh`, `Vertex`, `InstanceData`, `Texture`, `GradingLut`, `PaletteLut`, `CameraUBO`, `LightData`, `VolumetricsData`, `SdfData`, `SkinnedMeshSource`).
 - **`coopa::gfx::engine::components`** ([`components`](components)): Scene components and `register_render_components()`, which adds their YAML parsers to libcoopa's `SceneLoader`.
 - **`coopa::gfx::engine::loaders`** ([`loaders`](loaders)): `AssetManager` loaders (`MeshLoader`, `TextureLoader`, `SkinnedMeshSourceLoader`).
 - **`coopa::gfx::engine::util`** ([`util`](util)): Rendering utility wrappers (`Sampler`, `MaterialTextureCache`, `InstanceBatcher`, `SmaaTextures`, `sh_math`).
@@ -85,11 +85,6 @@ A pass class owns its descriptor layouts, push-constant structs and pipelines, b
 #### [grading_lut.h](data/grading_lut.h) / [palette_lut.h](data/palette_lut.h)
 - **Role**: Colour-grading strip LUT (linear-sampled) and palette strip (nearest-sampled) loaded from PNGs.
 - **Key Classes / Structs**: `GradingLut`, `PaletteLut`.
-
-#### [fog_data.h](data/fog_data.h)
-- **Role**: Host-visible uniform buffer for GLOBAL Unity-style fog parameters. Fog is global-only; bounded volumes live in `volumetrics_data.h`.
-- **Key Classes / Structs**: `FogUBO`, `FogData`.
-- **Details**: Self-contained (own `inv_view_proj`/`camera_pos`) so it never touches CameraUBO/LightData's std140 layout; consumed by `FogPass`.
 
 #### [volumetrics_data.h](data/volumetrics_data.h)
 - **Role**: Per-frame uniform buffer for scene-placed local volumes.
@@ -228,9 +223,9 @@ Every pass below takes its shaders from the caller unless noted.
 - **Details**: Meters an HDR image into a 1x1 R16F exposure target that a tonemap multiplies by.
 
 #### [fog_pass.h](passes/fog_pass.h)
-- **Role**: Fullscreen Unity-style global fog composite (Linear/Exponential/Exp2 distance fog plus height fog).
+- **Role**: Global exponential height fog over the OPAQUE scene and sky, composited in place before translucency (forward shaders fog themselves).
 - **Key Classes / Structs**: `FogPass`.
-- **Details**: Reads scene colour plus the G-buffer's normal/world-position and the caller's `FogData`, and writes a fogged copy into a target the caller begins and ends.
+- **Details**: Reads the G-buffer's normal/world-position and the caller's light set (`LightUBO`'s fog block); outputs premultiplied (in-scatter, 1 - T) through a premultiplied blend, inside a caller-supplied raw render pass that loads the HDR image.
 
 #### [fullscreen_stage.h](passes/fullscreen_stage.h)
 - **Role**: The shared scaffold for a fullscreen-triangle render stage — its two shaders, its own descriptor set(s), and its pipeline.

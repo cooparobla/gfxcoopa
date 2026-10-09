@@ -24,6 +24,7 @@
 #include <gfxcoopa/memory/buffer.h>
 #include <gfxcoopa/memory/image.h>
 #include <gfxcoopa/pipeline/pipeline.h>
+#include <gfxcoopa/pipeline/compute_pipeline.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/util/error.h>
@@ -144,7 +145,22 @@ public:
      */
     void bind_pipeline(const pipeline::Pipeline& p) {
         vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, p.handle());
-        bound_pipeline_ = &p;
+        bound_layout_ = p.layout();
+        bound_point_  = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    }
+
+    /**
+     * @brief Binds a compute pipeline. Like the graphics overload it remembers the layout,
+     * and it also switches the sealed bind_descriptor_set()/push_constants() overloads to the
+     * compute bind point until the next bind_pipeline(). Graphics and compute bindings are
+     * separate in Vulkan, so binding a compute pipeline mid-frame leaves the bound graphics
+     * pipeline and its sets in place -- but record compute outside render passes.
+     * @param p The compute pipeline to bind.
+     */
+    void bind_pipeline(const pipeline::ComputePipeline& p) {
+        vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, p.handle());
+        bound_layout_ = p.layout();
+        bound_point_  = VK_PIPELINE_BIND_POINT_COMPUTE;
     }
 
     /**
@@ -224,7 +240,8 @@ public:
      */
     void bind_descriptor_set(const pipeline::DescriptorSet& set, uint32_t set_index = 0) {
         require_bound_pipeline("bind_descriptor_set");
-        bind_descriptor_set(bound_pipeline_->layout(), set, set_index);
+        VkDescriptorSet raw = set.handle();
+        vkCmdBindDescriptorSets(cmd_, bound_point_, bound_layout_, set_index, 1, &raw, 0, nullptr);
     }
 
     /**
@@ -258,7 +275,7 @@ public:
      */
     void push_constants(ShaderStage stages, uint32_t offset, uint32_t size, const void* data) {
         require_bound_pipeline("push_constants");
-        push_constants(bound_pipeline_->layout(), detail::to_vk(stages), offset, size, data);
+        push_constants(bound_layout_, detail::to_vk(stages), offset, size, data);
     }
 
     /**
@@ -310,6 +327,121 @@ public:
                       uint32_t first_instance = 0)
     {
         vkCmdDrawIndexed(cmd_, index_count, instance_count, first_index, vertex_offset, first_instance);
+    }
+
+    /**
+     * @brief Records a non-indexed draw whose arguments a buffer holds (vkCmdDrawIndirect) --
+     * a compute pass writes VkDrawIndirectCommand {vertexCount, instanceCount, firstVertex,
+     * firstInstance} (four uint32) and the draw consumes it without a CPU round trip. Put a
+     * buffer_barrier(ComputeWrite, Indirect | ...) between the two.
+     * @param args       Buffer created with BufferUsage::Indirect.
+     * @param offset     Byte offset of the first command (4-byte aligned).
+     * @param draw_count Commands to draw; > 1 needs ComputeCaps::multi_draw_indirect.
+     * @param stride     Bytes between commands (>= 16).
+     */
+    void draw_indirect(const memory::Buffer& args, uint64_t offset = 0,
+                       uint32_t draw_count = 1, uint32_t stride = 16)
+    {
+        vkCmdDrawIndirect(cmd_, args.handle(), offset, draw_count, stride);
+    }
+
+    /**
+     * @brief Indexed sibling of draw_indirect() (vkCmdDrawIndexedIndirect): each command is
+     * VkDrawIndexedIndirectCommand {indexCount, instanceCount, firstIndex, vertexOffset,
+     * firstInstance} (five 32-bit words).
+     */
+    void draw_indexed_indirect(const memory::Buffer& args, uint64_t offset = 0,
+                               uint32_t draw_count = 1, uint32_t stride = 20)
+    {
+        vkCmdDrawIndexedIndirect(cmd_, args.handle(), offset, draw_count, stride);
+    }
+
+    // --- Compute ---
+    //
+    // Record outside any render pass, after bind_pipeline(const ComputePipeline&). The
+    // command buffer's queue is the graphics queue (Device::supports_compute()).
+
+    /**
+     * @brief Dispatches `x * y * z` work groups of the bound compute pipeline
+     * (vkCmdDispatch). See ComputePipeline::groups_for() for the usual ceiling divide.
+     */
+    void dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) {
+        vkCmdDispatch(cmd_, x, y, z);
+    }
+
+    /**
+     * @brief Dispatches with group counts read from a buffer (vkCmdDispatchIndirect): three
+     * uint32 {x, y, z} at `offset`, typically written by an earlier dispatch. Separate the
+     * writer from this with buffer_barrier(ComputeWrite, Indirect | ComputeRead).
+     * @param args   Buffer created with BufferUsage::Indirect.
+     * @param offset Byte offset of the arguments (4-byte aligned).
+     */
+    void dispatch_indirect(const memory::Buffer& args, uint64_t offset = 0) {
+        vkCmdDispatchIndirect(cmd_, args.handle(), offset);
+    }
+
+    /**
+     * @brief Fills `size` bytes of a buffer with a repeated 32-bit word (vkCmdFillBuffer) --
+     * the cheap way to zero a counter or reset an indirect-args block before a dispatch. A
+     * transfer write: follow it with transfer_to_compute_barrier() (or a buffer_barrier from
+     * TransferWrite) before a shader reads it. Outside render passes only.
+     * @param buffer Destination; needs BufferUsage::TransferDst.
+     * @param value  The 32-bit pattern.
+     * @param offset Byte offset (4-byte aligned).
+     * @param size   Bytes to fill (multiple of 4), or 0 for "to the end of the buffer".
+     */
+    void fill_buffer(memory::Buffer& buffer, uint32_t value, uint64_t offset = 0, uint64_t size = 0) {
+        vkCmdFillBuffer(cmd_, buffer.handle(), offset, size == 0 ? VK_WHOLE_SIZE : size, value);
+    }
+
+    // --- Buffer memory barriers ---
+    //
+    // Global memory barriers (VkMemoryBarrier): they order every buffer written by `from`
+    // before every read in `to`, which is what a batch of dispatches feeding a batch of draws
+    // wants -- one barrier for all of them, rather than one per buffer. Images keep using
+    // transition().
+
+    /**
+     * @brief Makes writes of kind `from` visible to accesses of kind `to`. Both sides are
+     * bitmasks; each bit implies its pipeline stage (see BufferAccess).
+     * @code
+     * cmd.dispatch(groups);                                                  // writes vertices
+     * cmd.buffer_barrier(BufferAccess::ComputeWrite, BufferAccess::VertexAttribute);
+     * mesh.bind(cmd); mesh.draw(cmd);
+     * @endcode
+     */
+    void buffer_barrier(BufferAccess from, BufferAccess to) {
+        const detail::BarrierMasks src = detail::barrier_masks_for(from);
+        const detail::BarrierMasks dst = detail::barrier_masks_for(to);
+        VkMemoryBarrier barrier{};
+        barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = src.access;
+        barrier.dstAccessMask = dst.access;
+        vkCmdPipelineBarrier(cmd_, src.stage, dst.stage, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
+
+    /** @brief Compute wrote vertices, indices or indirect args that the next draws consume. */
+    void compute_to_draw_barrier() {
+        buffer_barrier(BufferAccess::ComputeWrite,
+                       BufferAccess::VertexAttribute | BufferAccess::Index | BufferAccess::Indirect);
+    }
+
+    /** @brief One dispatch's writes feed the next dispatch (reads, read-modify-writes, or
+     *  dispatch_indirect() arguments). */
+    void compute_to_compute_barrier() {
+        buffer_barrier(BufferAccess::ComputeWrite,
+                       BufferAccess::ComputeRead | BufferAccess::ComputeWrite | BufferAccess::Indirect);
+    }
+
+    /** @brief Compute wrote storage buffers that vertex or fragment shaders read. */
+    void compute_to_graphics_read_barrier() {
+        buffer_barrier(BufferAccess::ComputeWrite,
+                       BufferAccess::VertexShaderRead | BufferAccess::FragmentShaderRead);
+    }
+
+    /** @brief A copy or fill_buffer() wrote data that the next dispatches read or update. */
+    void transfer_to_compute_barrier() {
+        buffer_barrier(BufferAccess::TransferWrite, BufferAccess::ComputeRead | BufferAccess::ComputeWrite);
     }
 
     // --- Dynamic state ---
@@ -544,14 +676,16 @@ private:
     /// the sealed bind_descriptor_set(uint32_t, ...)/push_constants(ShaderStage, ...)
     /// overloads, which need a bound pipeline's layout.
     void require_bound_pipeline(const char* caller) const {
-        if (!bound_pipeline_) {
+        if (bound_layout_ == VK_NULL_HANDLE) {
             throw std::runtime_error(std::string("[gfxcoopa] CommandBuffer::") + caller +
                                      ": no pipeline bound (call bind_pipeline() first)");
         }
     }
 
     VkCommandBuffer cmd_ = VK_NULL_HANDLE; /**< The raw command buffer (not owned). */
-    const pipeline::Pipeline* bound_pipeline_ = nullptr; /**< Set by bind_pipeline(); backs the sealed overloads above. */
+    /** Set by bind_pipeline() (either overload); back the sealed overloads above. */
+    VkPipelineLayout    bound_layout_ = VK_NULL_HANDLE;
+    VkPipelineBindPoint bound_point_  = VK_PIPELINE_BIND_POINT_GRAPHICS;
 };
 
 } // namespace command

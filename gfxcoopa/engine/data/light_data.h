@@ -224,8 +224,44 @@ struct alignas(16) LightUBO {
                                         to blend two cascades across the transition band, 0 to
                                         dither between them for TAA to resolve, w reserved. */
 
-    // --- Point/spot shadows: the local-light shadow atlas (appended last) ---
+    // --- Point/spot shadows: the local-light shadow atlas ---
     LocalShadowBlock local_shadows;
+
+    // --- Physical sky (appended last per the append-only rule) ---
+    // Read by an app's sky drawing (toyengine's physical sky, sky_physical.glsl). The defaults
+    // (sky_params.x = 0) select the app's plain gradient sky.
+    glm::vec4 sky_sun    = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f); /**< xyz = unit direction TO the sun,
+                                        w = cos of the sun disc's angular radius. */
+    glm::vec4 sky_moon   = glm::vec4(0.0f, 0.0f, -1.0f, 1.0f); /**< xyz = unit direction TO the moon,
+                                        w = cos of the moon disc's angular radius. */
+    glm::vec4 sky_params = glm::vec4(0.0f); /**< x = 1 physical sky (0 = gradient), y = 1 clouds
+                                        composited, z = star visibility 0..1, w = sky illuminance
+                                        (scales the sky-view LUT). */
+    glm::vec4 sky_extra  = glm::vec4(0.0f); /**< x = sun disc radiance, y = moon disc radiance,
+                                        z = night-sky floor, w = time in seconds (star twinkle). */
+
+    // --- Global exponential height fog (appended last per the append-only rule) ---
+    // In the light UBO rather than a UBO of its own because every shader that fogs reads it:
+    // the opaque fog pass (FogPass) AND each forward shader (BLEND meshes, water, particles,
+    // SDF glass), which fogs its own fragment at its own distance. See toyengine's
+    // assets/shaders/gfx/fog.glsl for the model and GfxFogBlock (gfx/fog_types.glsl) for the
+    // GLSL mirror. fog_color.w = 0 (the default) disables fog everywhere.
+    glm::vec4 fog_color   = glm::vec4(0.0f); /**< rgb = in-scatter colour, w = 1 enabled / 0 off. */
+    glm::vec4 fog_density = glm::vec4(0.0f); /**< x = mode (0 Linear, 1 Exponential), y = density
+                                                  (extinction per metre at/below the height base),
+                                                  z = linear start, w = linear end. */
+    glm::vec4 fog_height  = glm::vec4(0.0f); /**< x = height base (world Z; constant density below),
+                                                  y = height falloff in metres (<= 0: flat fog),
+                                                  z = sky blend, w = max opacity. */
+    glm::vec4 fog_range   = glm::vec4(0.0f); /**< x = start distance, y = cutoff distance (0 = none),
+                                                  z = sky distance (sky pixels integrate to it), w unused. */
+    glm::vec4 fog_sun     = glm::vec4(0.0f); /**< rgb = sun colour * intensity * sun amount
+                                                  (directional in-scatter), w = HG anisotropy g. */
+    glm::vec4 fog_sun_dir = glm::vec4(0.0f, 0.0f, -1.0f, 0.0f); /**< xyz = direction the sunlight
+                                                  travels, w = directional in-scatter start distance. */
+    glm::vec4 fog_water   = glm::vec4(0.0f); /**< x = water surface level (world Z), y = 1 when the
+                                                  camera is under that surface: fog then integrates
+                                                  only the part of each ray above the water. */
 };
 
 // Pins the offset of sky_zenith -- where a shader LightUBO prefix with no spot support
@@ -246,6 +282,12 @@ static_assert(offsetof(LightUBO, dir_cascade_info) ==
                   offsetof(LightUBO, dir_cascade_matrix) + sizeof(glm::mat4) * MAX_DIR_CASCADES + sizeof(glm::vec4) * 3,
     "LightUBO's cascade block is packed tighter or looser than the std140 GLSL block in "
     "light_ubo_body.glsl expects (mat4[4] has a 64-byte stride there too).");
+
+static_assert(offsetof(LightUBO, sky_sun) == offsetof(LightUBO, local_shadows) + sizeof(LocalShadowBlock),
+    "LightUBO's physical-sky block must immediately follow local_shadows (append-only rule).");
+static_assert(offsetof(LightUBO, fog_color) == offsetof(LightUBO, sky_extra) + sizeof(glm::vec4),
+    "LightUBO's fog block must immediately follow sky_extra (append-only rule).");
+static_assert(sizeof(LocalShadowBlock) % 16 == 0, "LocalShadowBlock must keep std140's 16-byte stride.");
 
 /**
  * @class LightData

@@ -36,6 +36,9 @@
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/pipeline.h>
+#include <gfxcoopa/pipeline/compute_pipeline.h>
+#include <gfxcoopa/memory/storage_buffer.h>
+#include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/command/command_buffer.h>
 #include <gfxcoopa/command/sync.h>
@@ -116,10 +119,21 @@ static coopa::gfx::pipeline::RenderPass*         g_render_pass = nullptr;
 #ifdef GFX_TEST_SHADER_DIR
 static const char* VERT_SPV = GFX_TEST_SHADER_DIR "/test.vert.spv";
 static const char* FRAG_SPV = GFX_TEST_SHADER_DIR "/test.frag.spv";
+static const char* FILL_COMP_SPV = GFX_TEST_SHADER_DIR "/test_compute_fill.comp.spv";
+static const char* ARGS_COMP_SPV = GFX_TEST_SHADER_DIR "/test_compute_args.comp.spv";
 #else
 static const char* VERT_SPV = "assets/shaders/test.vert.spv";
 static const char* FRAG_SPV = "assets/shaders/test.frag.spv";
+static const char* FILL_COMP_SPV = "assets/shaders/test_compute_fill.comp.spv";
+static const char* ARGS_COMP_SPV = "assets/shaders/test_compute_args.comp.spv";
 #endif
+
+// HEADLESS=1 keeps every window this suite creates hidden (the swapchain still works on a
+// hidden window), so the suite can run without putting anything on screen.
+static bool headless_env() {
+    const char* v = std::getenv("HEADLESS");
+    return v && *v && std::strcmp(v, "0") != 0;
+}
 
 // ==========================================================================
 // Test cases
@@ -824,6 +838,7 @@ void test_context() {
     config.height     = 240;
     config.validation = true;
     config.max_frames = 3; // Bound the loop regardless of ONESHOT/MAX_FRAMES env.
+    config.visible    = !headless_env();
 
     app::Context ctx(config);
 
@@ -860,6 +875,169 @@ void test_context() {
     ctx.poll();
     bool presented = ctx.frame([](command::CommandBuffer&) {});
     ASSERT_TRUE(presented);
+}
+
+// --- pipeline/compute_pipeline.h + command_buffer.h compute recording ---
+//
+// Compute fixtures: one storage-buffer layout (binding 0) shared by both test kernels, and
+// the push block both use (two uints).
+
+struct ComputeTestPush { uint32_t a; uint32_t b; };
+
+void test_compute_caps() {
+    const auto& caps = g_device->compute_caps();
+    ASSERT_TRUE(g_device->supports_compute());
+    ASSERT_TRUE(caps.graphics_queue_compute);
+    // Spec minimums (Vulkan 1.0 required limits) -- anything lower means the query is broken.
+    ASSERT_TRUE(caps.max_storage_buffer_range >= (1u << 27));
+    ASSERT_TRUE(caps.max_per_stage_storage_buffers >= 4u);
+    ASSERT_TRUE(caps.max_work_group_invocations >= 128u);
+    ASSERT_TRUE(caps.max_work_group_size[0] >= 128u);
+    ASSERT_TRUE(caps.max_work_group_count[0] >= 65535u);
+    std::cout << "  storage range " << caps.max_storage_buffer_range
+              << ", per-stage SSBOs " << caps.max_per_stage_storage_buffers
+              << ", per-layout SSBOs " << caps.max_set_storage_buffers
+              << ", invocations " << caps.max_work_group_invocations
+              << ", size (" << caps.max_work_group_size[0] << ", " << caps.max_work_group_size[1]
+              << ", " << caps.max_work_group_size[2] << ")"
+              << ", count (" << caps.max_work_group_count[0] << ", " << caps.max_work_group_count[1]
+              << ", " << caps.max_work_group_count[2] << ")"
+              << ", shared " << caps.max_shared_memory
+              << ", ssbo align " << caps.min_storage_buffer_offset_alignment << std::endl;
+}
+
+// Dispatches a buffer fill; then writes indirect args from a compute pass and runs a
+// dispatch_indirect() that consumes them; reads all three buffers back and checks them.
+void test_compute_dispatch_and_indirect() {
+    using namespace coopa::gfx;
+
+    auto layout = pipeline::DescriptorLayoutBuilder().storage_buffer(0, ShaderStage::Compute).build(*g_device);
+    auto pool   = pipeline::DescriptorPoolBuilder().add_sets(layout, 3).build(*g_device);
+    const std::vector<pipeline::PushConstantRange> push = {{ShaderStage::Compute, 0, sizeof(ComputeTestPush)}};
+    pipeline::ComputePipeline fill(*g_device, FILL_COMP_SPV, {&layout}, push);
+    pipeline::ComputePipeline args_writer(*g_device, ARGS_COMP_SPV, {&layout}, push);
+    ASSERT_TRUE(fill.handle() != VK_NULL_HANDLE);
+    ASSERT_TRUE(fill.layout() != VK_NULL_HANDLE);
+
+    const uint32_t kCount = 1000, kLocal = 64, kIndirectItems = 150;  // 150 items -> 3 groups
+    const uint64_t bytes = kCount * sizeof(uint32_t);
+    auto direct   = memory::make_storage_buffer(*g_device, *g_allocator, bytes);
+    auto indirect = memory::make_storage_buffer(*g_device, *g_allocator, bytes);
+    auto args     = memory::make_storage_buffer(*g_device, *g_allocator, 8 * sizeof(uint32_t), BufferUsage::Indirect);
+    auto readback = memory::Buffer(*g_device, *g_allocator, 2 * bytes + 8 * sizeof(uint32_t),
+                                   BufferUsage::TransferDst, MemoryResidency::GpuToCpu);
+
+    pipeline::DescriptorSet set_direct(*g_device, pool, layout), set_indirect(*g_device, pool, layout),
+                            set_args(*g_device, pool, layout);
+    set_direct.bind_storage_buffer(0, direct);
+    set_indirect.bind_storage_buffer(0, indirect);
+    set_args.bind_storage_buffer(0, args);
+
+    g_cmd_pool->submit_once([&](command::CommandBuffer& cmd) {
+        cmd.fill_buffer(indirect, 0xFFFFFFFFu);   // sentinel: anything the indirect dispatch skips
+        cmd.fill_buffer(args, 0u);
+        cmd.transfer_to_compute_barrier();
+
+        // 1. A plain dispatch fills `direct`.
+        cmd.bind_pipeline(fill);
+        cmd.bind_descriptor_set(set_direct);
+        cmd.push_constants(ShaderStage::Compute, ComputeTestPush{kCount, 7u});
+        cmd.dispatch(pipeline::ComputePipeline::groups_for(kCount, kLocal));
+
+        // 2. A compute pass writes the group count; dispatch_indirect() consumes it. The fill
+        //    kernel is told the whole buffer is valid, so only the indirect group count limits
+        //    how much of `indirect` gets written.
+        cmd.bind_pipeline(args_writer);
+        cmd.bind_descriptor_set(set_args);
+        cmd.push_constants(ShaderStage::Compute, ComputeTestPush{kIndirectItems, kLocal});
+        cmd.dispatch(1);
+        cmd.compute_to_compute_barrier();
+
+        cmd.bind_pipeline(fill);
+        cmd.bind_descriptor_set(set_indirect);
+        cmd.push_constants(ShaderStage::Compute, ComputeTestPush{kCount, 100u});
+        cmd.dispatch_indirect(args);
+
+        cmd.buffer_barrier(BufferAccess::ComputeWrite, BufferAccess::TransferRead);
+        cmd.copy_buffer(direct, readback, bytes, 0, 0);
+        cmd.copy_buffer(indirect, readback, bytes, 0, bytes);
+        cmd.copy_buffer(args, readback, 8 * sizeof(uint32_t), 0, 2 * bytes);
+        cmd.buffer_barrier(BufferAccess::TransferWrite, BufferAccess::HostRead);
+    });
+
+    std::vector<uint32_t> out(2 * kCount + 8);
+    readback.download(out.data(), out.size() * sizeof(uint32_t));
+
+    uint32_t direct_bad = 0, indirect_bad = 0;
+    for (uint32_t i = 0; i < kCount; ++i) {
+        if (out[i] != i * 3u + 7u) ++direct_bad;
+        const uint32_t want = i < 3u * kLocal ? i * 3u + 100u : 0xFFFFFFFFu;
+        if (out[kCount + i] != want) ++indirect_bad;
+    }
+    ASSERT_EQ(direct_bad, 0u);
+    ASSERT_EQ(indirect_bad, 0u);
+    const uint32_t* a = out.data() + 2 * kCount;
+    ASSERT_EQ(a[0], 3u);
+    ASSERT_EQ(a[1], 1u);
+    ASSERT_EQ(a[2], 1u);
+    ASSERT_EQ(a[4], kIndirectItems);   // the draw-indirect command written beside it
+    ASSERT_EQ(a[5], 1u);
+}
+
+// The GPU-skinning shape: a compute_writable dynamic Mesh's per-slot vertex buffer written in
+// place by a dispatch, then read back through its host mapping. Plus StorageBufferRing's
+// slot arithmetic.
+void test_compute_writes_mesh_vertex_buffer() {
+    using namespace coopa::gfx;
+    using engine::data::Mesh;
+    using engine::data::Vertex;
+
+    std::vector<Vertex> verts(37, Vertex{glm::vec3(0.0f), glm::vec3(0, 1, 0), glm::vec2(0.0f), glm::vec4(1, 0, 0, 1)});
+    std::vector<uint32_t> indices = {0, 1, 2};
+    Mesh mesh = Mesh::from_arrays(*g_device, *g_allocator, verts, indices, 2, /*compute_writable=*/true);
+    ASSERT_EQ(mesh.vertex_buffer_count(), 2u);
+
+    auto layout = pipeline::DescriptorLayoutBuilder().storage_buffer(0, ShaderStage::Compute).build(*g_device);
+    auto pool   = pipeline::DescriptorPoolBuilder().add_sets(layout, 1).build(*g_device);
+    pipeline::ComputePipeline fill(*g_device, FILL_COMP_SPV, {&layout},
+                                   {{ShaderStage::Compute, 0, sizeof(ComputeTestPush)}});
+    pipeline::DescriptorSet set(*g_device, pool, layout);
+    set.bind_storage_buffer(0, mesh.vertex_buffer(1));
+
+    const uint32_t words = static_cast<uint32_t>(verts.size() * sizeof(Vertex) / sizeof(uint32_t));
+    g_cmd_pool->submit_once([&](command::CommandBuffer& cmd) {
+        cmd.bind_pipeline(fill);
+        cmd.bind_descriptor_set(set);
+        cmd.push_constants(ShaderStage::Compute, ComputeTestPush{words, 5u});
+        cmd.dispatch(pipeline::ComputePipeline::groups_for(words, 64));
+        cmd.compute_to_draw_barrier();
+        cmd.buffer_barrier(BufferAccess::ComputeWrite, BufferAccess::HostRead);
+    });
+    mesh.mark_gpu_written(1, glm::vec3(-1.0f), glm::vec3(1.0f));
+    ASSERT_EQ(mesh.active_slot(), 1u);
+    ASSERT_TRUE(mesh.bounds_max() == glm::vec3(1.0f));
+
+    std::vector<uint32_t> got(words);
+    mesh.vertex_buffer(1).download(got.data(), words * sizeof(uint32_t));
+    uint32_t bad = 0;
+    for (uint32_t i = 0; i < words; ++i) if (got[i] != i * 3u + 5u) ++bad;
+    ASSERT_EQ(bad, 0u);
+
+    // Slot 0 was never dispatched to: it still holds the seeded vertices.
+    Vertex v0{};
+    mesh.vertex_buffer(0).download(&v0, sizeof(Vertex));
+    ASSERT_TRUE(v0.normal == glm::vec3(0, 1, 0));
+
+    memory::StorageBufferRing ring(*g_device, *g_allocator, 64, 2, BufferUsage::None, MemoryResidency::CpuToGpu);
+    ASSERT_EQ(ring.slot_count(), 2u);
+    ASSERT_TRUE(&ring.current(0) == &ring.current(2));
+    ASSERT_TRUE(&ring.previous(1) == &ring.current(0));
+    ASSERT_TRUE(&ring.previous(0) == &ring.current(1));
+    const uint32_t word = 0xC0FFEEu;
+    ring.upload(1, &word, sizeof(word));
+    uint32_t back = 0;
+    ring.current(1).download(&back, sizeof(back));
+    ASSERT_EQ(back, word);
 }
 
 // --- presentation/renderer.h (frame cycle) ---
@@ -930,7 +1108,7 @@ int main() {
               << "Initializing Vulkan fixtures..." << std::endl;
 
     try {
-        g_window      = new coopa::gfx::presentation::Window("gfxcoopa test", 800, 600, false);
+        g_window      = new coopa::gfx::presentation::Window("gfxcoopa test", 800, 600, false, !headless_env());
         g_instance    = new coopa::gfx::core::Instance("gfxcoopa_test", /*validation=*/true);
         g_surface     = new coopa::gfx::core::Surface(*g_instance, *g_window);
         g_device      = new coopa::gfx::core::Device(*g_instance, *g_surface);
@@ -971,6 +1149,9 @@ int main() {
     RUN_TEST(test_sync_primitives);
     RUN_TEST(test_descriptor_set);
     RUN_TEST(test_sealed_api);
+    RUN_TEST(test_compute_caps);
+    RUN_TEST(test_compute_dispatch_and_indirect);
+    RUN_TEST(test_compute_writes_mesh_vertex_buffer);
     RUN_TEST(test_image_readback);
     RUN_TEST(test_context);
     RUN_TEST(test_renderer_frame);

@@ -3,45 +3,23 @@
  * @brief Per-frame-in-flight GPU buffers describing every SdfRenderer/SdfShape
  *        in the scene.
  *
- * Modeled on FogData (fog_data.h), with two differences forced by the SDF
- * system's open-ended counts: shapes and renderers live in storage buffers
- * (SSBOs, via memory::Buffer::storage()) rather than a fixed-size UBO array,
- * and -- because a raymarching pass is recorded into the SAME overlapping
- * command buffer InstanceStream already has to defend against (see
- * toyengine/render/instance_stream.h's file doc) -- the buffers themselves
- * are duplicated per frame-in-flight slot, not shared.
+ * Shapes and renderers live in storage buffers (SSBOs, via memory::Buffer::storage())
+ * rather than a fixed-size UBO array, since their counts are open-ended. And because a
+ * raymarching pass is recorded into the SAME overlapping command buffer InstanceStream
+ * already has to defend against (see toyengine/render/instance_stream.h's file doc), the
+ * buffers are duplicated per frame-in-flight slot, not shared.
  *
- * That per-slot duplication is the load-bearing difference from FogData:
- * FogData's one buffer is safe to reupload every frame because nothing else
- * in this pipeline overlaps two frames' G-buffer/shadow/forward passes
- * against the SAME buffer contents simultaneously in a way that matters --
- * for its TUNING fields (color, density, falloff). FogData::inv_view_proj is
- * a camera matrix, though, and is the same hazard class as this file's own
- * SdfGlobals.inv_view_proj below: a stale one-frame-old copy under fast
- * camera motion, currently unexercised only because no shipped scene enables
- * fog_enabled (see toyengine's PixelRenderPipeline::render(), the
- * fog.inv_view_proj fill site). An SDF renderer's clip_rect
- * and shape range, by contrast, feed a scissor rect and a loop bound that
- * must exactly match what CPU-side record_*() calls compute for THIS frame's
- * draws -- reusing one buffer across overlapping frames would let frame N's
- * upload race frame N-1's still-in-flight raymarch reading stale indices.
- * Per-slot buffers plus binding one descriptor set per slot ONCE at
- * construction (see set()) keeps every write going to a slot the GPU is
- * provably not reading, with no per-frame device_.wait_idle() -- the same
- * policy toyengine's InstanceStream follows (see
- * toyengine/render/instance_stream.h), and that PixelRenderPipeline also
- * applies to its CAMERA uniform by owning one CameraUBO plus one descriptor
- * set per frame-in-flight slot rather than sharing one (see that file's
- * camera_ubos_/camera_sets_ and their synchronization doc) -- an earlier
- * version shared a single CameraUBO, which put mesh rasterization one frame
- * out of step with this file's own per-slot SdfGlobals.inv_view_proj under
- * fast camera motion. The CameraUBO/LightData/FogData *classes* themselves
- * are still single-buffered: per-slot-ness is a property of a consumer's
- * frame-overlap model, not of the type -- GiSystem's own capture camera
- * (gfxcoopa/engine/gi/gi_system.h) submit-and-waits per cube face and
- * genuinely wants one buffer. LightData/FogData have no per-slot consumer
- * yet; see FogData's own file doc for why its inv_view_proj is the same
- * hazard class as this file's, currently unexercised.
+ * An SDF renderer's clip_rect and shape range feed a scissor rect and a loop bound that must
+ * exactly match what CPU-side record_*() calls compute for THIS frame's draws -- reusing one
+ * buffer across overlapping frames would let frame N's upload race frame N-1's still-in-flight
+ * raymarch reading stale indices. Per-slot buffers plus binding one descriptor set per slot
+ * ONCE at construction (see set()) keeps every write going to a slot the GPU is provably not
+ * reading, with no per-frame device_.wait_idle() -- the same policy toyengine's InstanceStream
+ * follows, and that PixelRenderPipeline applies to its camera and light uniforms by owning one
+ * buffer plus one descriptor set per frame-in-flight slot. The CameraUBO/LightData *classes*
+ * themselves are single-buffered: per-slot-ness is a property of a consumer's frame-overlap
+ * model, not of the type -- GiSystem's own capture camera (gfxcoopa/engine/gi/gi_system.h)
+ * submit-and-waits per cube face and genuinely wants one buffer.
  */
 
 #ifndef GFXCOOPA_ENGINE_DATA_SDF_DATA_H
@@ -114,9 +92,7 @@ struct alignas(16) SdfRendererGPU {
  * Lives in a UBO rather than piggybacking on CameraUBO/LightData: those are
  * shared by every pass in the pipeline and adding SDF-only fields to them
  * would force every OTHER consumer's shader to declare bindings it never
- * reads. Kept separate for the same reason FogData keeps its own
- * inv_view_proj/camera_pos instead of extending CameraUBO (see fog_data.h's
- * file doc).
+ * reads.
  */
 struct alignas(16) SdfGlobals {
     glm::mat4 inv_view_proj = glm::mat4(1.0f); /**< Clip -> world; drives gfx_sdf_ray_from_clip().

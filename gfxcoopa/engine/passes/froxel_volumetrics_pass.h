@@ -13,7 +13,7 @@
  *                 in two passes (within groups of 8 slices, then across groups) so each
  *                 froxel reads ~9 entries instead of walking its whole column
  *   3. apply      per pixel: one lookup at the pixel's ray distance, composited over the
- *                 scene (plus the merged global fog), into the caller's HDR target
+ *                 scene, into the caller's HDR target
  *
  * Cost scales with the grid (~W*H*D froxels, D accumulation taps per froxel), not with the
  * screen or a step count. gfxcoopa has no compute pipelines or 3D images, so every stage is
@@ -73,11 +73,10 @@ public:
      * @param composite_pass Render pass of the caller's full-resolution HDR target that the
      *                       apply stage draws into (the same one VolumetricsPass's composite uses).
      * @param vol_ubo        VolumetricsData's uniform buffer (with its froxel fields filled).
-     * @param fog_ubo        FogData's uniform buffer, for the merged global-fog path.
      */
     FroxelVolumetricsPass(core::Device& device, memory::Allocator& allocator, const Desc& desc,
                           pipeline::RenderPass& composite_pass,
-                          const memory::Buffer& vol_ubo, const memory::Buffer& fog_ubo)
+                          const memory::Buffer& vol_ubo)
         : grid_w_(std::max(1u, (desc.render_width  + desc.tile - 1) / std::max(1u, desc.tile))),
           grid_h_(std::max(1u, (desc.render_height + desc.tile - 1) / std::max(1u, desc.tile))),
           slices_(std::max(1u, desc.slices)),
@@ -117,7 +116,6 @@ public:
         integrate_->set(1).bind_buffer(0, vol_ubo);
         apply_->set(0).bind_image(3, integrated_->color_view_typed(), linear_sampler_);
         apply_->set(1).bind_buffer(0, vol_ubo);
-        apply_->set(2).bind_buffer(0, fog_ubo);
     }
 
     FroxelVolumetricsPass(const FroxelVolumetricsPass&) = delete;
@@ -225,7 +223,6 @@ private:
              {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
              {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
              {3, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
-            {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
             {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
         };
         return d;

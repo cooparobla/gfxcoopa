@@ -120,6 +120,35 @@ The lit passes (`DeferredLightingPass`, `TransparentPass`, `SdfForwardPass`) sha
 
 ---
 
+## Compute
+
+Compute runs **in-line on the graphics queue**, recorded into the frame's command buffer outside any render pass and before the passes that consume it. There is no async compute queue. Gate every compute path on `Device::supports_compute()`. On MoltenVK the graphics family supports compute, storage buffers can be up to 4 GiB, a stage can bind 31 of them, and a work group can have up to 1024 invocations.
+
+```cpp
+auto layout = DescriptorLayoutBuilder().storage_buffer(0, ShaderStage::Compute).build(device);
+ComputePipeline sim(device, library.resolve("particles_sim.comp"), {&layout},
+                    {{ShaderStage::Compute, 0, sizeof(SimPush)}});
+auto particles = memory::make_storage_buffer(device, allocator, bytes, BufferUsage::Vertex);
+auto args      = memory::make_storage_buffer(device, allocator, 16, BufferUsage::Indirect);
+
+cmd.fill_buffer(args, 0);                         // reset a counter / indirect args
+cmd.transfer_to_compute_barrier();
+cmd.bind_pipeline(sim);                           // sealed bind/push now target the compute bind point
+cmd.bind_descriptor_set(set);
+cmd.push_constants(ShaderStage::Compute, push);
+cmd.dispatch(ComputePipeline::groups_for(count, 64));
+cmd.compute_to_draw_barrier();                    // vertex attributes + index + indirect args
+// ... render pass ...
+cmd.draw_indirect(args);                          // VkDrawIndirectCommand written by the shader
+```
+
+- **Recording**: `bind_pipeline(const ComputePipeline&)`, `dispatch(x, y, z)`, `dispatch_indirect(buffer, offset)` (three uint32 group counts), `fill_buffer()`, and `draw_indirect()` / `draw_indexed_indirect()` for draws whose arguments compute wrote.
+- **Barriers**: `buffer_barrier(BufferAccess from, BufferAccess to)` records one global memory barrier. Each `BufferAccess` bit implies its stage. The named shortcuts are `compute_to_draw_barrier()`, `compute_to_compute_barrier()` (which also covers indirect args for a following `dispatch_indirect()`), `compute_to_graphics_read_barrier()` (vertex/fragment storage reads) and `transfer_to_compute_barrier()`.
+- **Compute-written vertices**: `Mesh::from_arrays(..., buffer_count, /*compute_writable=*/true)` adds Storage usage to a dynamic mesh's per-slot vertex buffers. A compute pass binds `vertex_buffer(slot)` as an SSBO (a `Vertex` is 12 floats: position, normal, uv, tangent, tightly packed), and `mark_gpu_written(slot, bounds_min, bounds_max)` replaces `update_vertices()`.
+- **Shaders**: `cmake/GfxShaders.cmake` compiles `*.comp` next to `*.vert`/`*.frag`, flat per shader directory.
+
+---
+
 ## File Breakdown
 
 ### App Submodule (`coopa::gfx::app`)
@@ -136,7 +165,7 @@ The lit passes (`DeferredLightingPass`, `TransparentPass`, `SdfForwardPass`) sha
 #### [command_buffer.h](command/command_buffer.h)
 - **Role**: Non-owning wrapper around `VkCommandBuffer` with named recording methods.
 - **Key Classes / Structs**: `CommandBuffer`.
-- **Details**: Render pass begin/end, pipeline and descriptor-set binding, vertex/index buffers, viewport/scissor, typed push constants, draws, copies, and `transition()` for `memory::Image` layout changes.
+- **Details**: Render pass begin/end, pipeline and descriptor-set binding (graphics or compute), vertex/index buffers, viewport/scissor, typed push constants, draws and indirect draws, compute `dispatch()`/`dispatch_indirect()`, `fill_buffer()`, buffer barriers, copies, and `transition()` for `memory::Image` layout changes. See [Compute](#compute).
 
 #### [command_pool.h](command/command_pool.h)
 - **Role**: RAII manager for `VkCommandPool`.
@@ -155,7 +184,7 @@ The lit passes (`DeferredLightingPass`, `TransparentPass`, `SdfForwardPass`) sha
 #### [device.h](core/device.h)
 - **Role**: Physical GPU selection and logical `VkDevice` creation.
 - **Key Classes / Structs**: `Device`, `QueueFamilyIndices`.
-- **Details**: Scores physical devices (discrete GPUs preferred), finds graphics and present queue families, enables `VK_KHR_swapchain` (and `VK_KHR_portability_subset` on MoltenVK), and waits idle on teardown.
+- **Details**: Scores physical devices (discrete GPUs preferred), finds graphics and present queue families, enables `VK_KHR_swapchain` (and `VK_KHR_portability_subset` on MoltenVK), and waits idle on teardown. `supports_compute()` / `compute_caps()` (`ComputeCaps`) report whether the graphics queue runs compute and the storage-buffer and work-group limits, logged once per process.
 
 #### [instance.h](core/instance.h)
 - **Role**: Vulkan instance lifecycle (`VkInstance`).
@@ -186,6 +215,11 @@ The lit passes (`DeferredLightingPass`, `TransparentPass`, `SdfForwardPass`) sha
 - **Key Classes / Structs**: `Buffer`.
 - **Details**: Factories `vertex()`, `index()`, `uniform()`, `staging()` and `storage()`; `upload()` and `download()` copy through a mapping (or a temporary staging buffer for device-local memory).
 
+#### [storage_buffer.h](memory/storage_buffer.h)
+- **Role**: Storage buffers for compute.
+- **Key Classes / Structs**: `make_storage_buffer()`, `StorageBufferRing`.
+- **Details**: `make_storage_buffer()` is Storage + transfer usage plus optional Vertex/Index/Indirect usage, so compute output can be drawn from directly. `StorageBufferRing` keeps one buffer per frame in flight (`current(slot)`, `previous(slot)`, `upload(slot, ...)`).
+
 #### [image.h](memory/image.h)
 - **Role**: RAII 2D GPU image (`VkImage`, `VkImageView`, `VmaAllocation`).
 - **Key Classes / Structs**: `Image`.
@@ -209,6 +243,11 @@ The lit passes (`DeferredLightingPass`, `TransparentPass`, `SdfForwardPass`) sha
 - **Role**: RAII graphics pipeline (`VkPipeline`, `VkPipelineLayout`).
 - **Key Classes / Structs**: `Pipeline`, `PipelineDesc`, `RasterState`, `DepthState`, `BlendState`, `BlendMode`, `PushConstantRange`, `PipelineConfig`.
 - **Details**: `PipelineDesc` is the sealed description (shaders, `VertexLayout`, raster/depth/blend state, descriptor layouts, push constants) with GL-like defaults; `PipelineConfig` is the Vk-typed rasterization config the raw-binding constructors take. Viewport and scissor are always dynamic.
+
+#### [compute_pipeline.h](pipeline/compute_pipeline.h)
+- **Role**: RAII compute pipeline (`VkPipeline`, `VkPipelineLayout`).
+- **Key Classes / Structs**: `ComputePipeline`, `ComputePipelineDesc`.
+- **Details**: Built from one compute `Shader` (or a `.spv` path), descriptor set layouts and `PushConstantRange`s. `groups_for(count, local_size)` is the ceiling divide for `dispatch()`.
 
 #### [render_pass.h](pipeline/render_pass.h)
 - **Role**: RAII wrapper for `VkRenderPass`.
@@ -311,11 +350,7 @@ Vulkan-free headers that compile against the `coopa::gfx_pure` target; `types.h`
 ##### [light_data.h](engine/data/light_data.h)
 - **Role**: Per-frame light uniform buffer.
 - **Key Classes / Structs**: `LightUBO`, `PointLightGPU`, `SpotLightGPU`, `LocalShadowGPU`, `LocalShadowBlock`, `LightData`.
-- **Details**: One directional light with up to 4 shadow cascades, up to 16 point and 8 spot lights, sky gradient colours, and the local-light shadow atlas records.
-
-##### [fog_data.h](engine/data/fog_data.h)
-- **Role**: Global fog uniform buffer for `FogPass`.
-- **Key Classes / Structs**: `FogUBO`, `FogData`.
+- **Details**: One directional light with up to 4 shadow cascades, up to 16 point and 8 spot lights, sky gradient colours, the local-light shadow atlas records, and the global fog block (`fog_color` .. `fog_water`).
 
 ##### [volumetrics_data.h](engine/data/volumetrics_data.h)
 - **Role**: Uniform buffer for the local-volume passes.
@@ -424,7 +459,7 @@ Every pass takes its `.spv` paths from the caller and documents the push-constan
 - **[ssr_pass.h](engine/passes/ssr_pass.h)**: `SsrPass` — Hi-Z raymarch (optionally half resolution), ping-ponged temporal resolve, bilateral blur, optional traced SSGI bounce, and a BRDF composite into the HDR frame.
 
 ##### Volumetrics and fog
-- **[fog_pass.h](engine/passes/fog_pass.h)**: `FogPass` — distance/height fog composite reading the G-buffer and a `FogData` UBO.
+- **[fog_pass.h](engine/passes/fog_pass.h)**: `FogPass` — global height fog blended in place over the opaque scene (premultiplied, inside a caller's LOAD render pass); parameters come from the light UBO's fog block.
 - **[volumetrics_pass.h](engine/passes/volumetrics_pass.h)**: `VolumetricsPass` — reduced-resolution raymarch of local volumes, then a full-resolution composite.
 - **[froxel_volumetrics_pass.h](engine/passes/froxel_volumetrics_pass.h)**: `FroxelVolumetricsPass` — the froxel-grid alternative: inject, two-pass integrate, then a per-pixel apply, all as fragment passes over a 2D atlas.
 

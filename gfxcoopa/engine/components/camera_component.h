@@ -53,6 +53,8 @@ enum class CameraType {
  *                 focus; non-empty puts THIS camera in object-focus mode regardless of the
  *                 render config's dof_focus_mode, and overrides focus_distance above --
  *                 see PixelRenderPipeline::resolve_dof_focus_() for the resolution order
+ *   motion_blur:  false keeps this camera's image free of motion blur even when the render
+ *                 config turns it on (default true)
  *
  * For isometric rendering, use CameraType::Orthographic. The isometric
  * viewing angle is baked into the scene object's Transform, not the projection.
@@ -86,6 +88,7 @@ public:
     float aperture              = 0.0f;    /**< f-stop; <= 0 inherits the render config's dof_aperture. */
     float focus_distance        = 0.0f;    /**< Metres to the sharp plane; <= 0 inherits dof_focus_distance. */
     std::string focus_object    = "";      /**< ':'-separated scene path to keep in focus; empty inherits the render config (see class doc). */
+    bool motion_blur            = true;    /**< false opts this camera out of the renderer's motion blur (an editor viewport camera, a UI camera). */
     bool is_main                = false;   /**< Claims the main-camera singleton in start() (alias: main). */
 
     // Alias expressing orthographic size as a full height rather than a half-height.

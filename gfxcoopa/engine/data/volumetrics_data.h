@@ -3,10 +3,10 @@
  * @brief Per-frame uniform buffer for the raymarched local volume pass.
  *
  * Self-contained (own inv_view_proj/camera_pos rather than extending CameraData
- * in camera_ubo.h) for the same reason FogData is: adding it never touches the
+ * in camera_ubo.h): adding it never touches the
  * std140 layout ~10 existing shaders already share via CameraUBO/LightData.
  *
- * There is deliberately NO global term here. Fog (fog_data.h) is the global,
+ * There is deliberately NO global term here. Fog (LightUBO's fog block) is the global,
  * analytic, config-driven atmosphere; everything in this buffer is a BOUNDED,
  * scene-placed volume. That split is why a "layer" and a "volume" are the same
  * object in this design -- each volume carries its own complete field
@@ -100,7 +100,7 @@ struct alignas(16) VolumeGPU {
  * @brief std140-aligned shared march state plus up to MAX_VOLUMES local volumes.
  *
  * Must match gfx/volumetrics_ubo.glsl's VolumetricsUBO block field for field. Scalars are
- * packed into vec4s alongside related fields, matching FogUBO/LightUBO.
+ * packed into vec4s alongside related fields, matching LightUBO.
  */
 struct alignas(16) VolumetricsUBO {
     glm::mat4 inv_view_proj = glm::mat4(1.0f); /**< Clip -> world, for reconstructing per-pixel view rays.
@@ -171,10 +171,10 @@ struct alignas(16) VolumetricsUBO {
  * @class VolumetricsData
  * @brief Manages the per-frame volumetrics uniform buffer.
  *
- * Mirrors FogData's shape: a host-visible, persistently-mapped uniform buffer,
+ * A host-visible, persistently-mapped uniform buffer,
  * re-uploaded once per frame. Fill data()'s fields directly, then upload().
  *
- * CAVEAT, inherited from FogData deliberately: SINGLE-buffered (one UBO, not one
+ * CAVEAT: SINGLE-buffered (one UBO, not one
  * per frame in flight), so inv_view_proj can be one frame stale under fast camera
  * motion. VolumetricsPass binds its descriptor set once at construction, so making
  * this per-slot needs an additive API change for a hazard a low-frequency

@@ -38,7 +38,7 @@ find_program(GLSLC glslc HINTS $ENV{VULKAN_SDK}/bin)
 set(GFX_SHADERS_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 # gfx_add_shader_target(<target-name>
-#   SHADER_DIR  <dir containing *.vert/*.frag to compile>
+#   SHADER_DIR  <dir containing *.vert/*.frag/*.tesc/*.tese/*.comp to compile>
 #   [INCLUDE_DIR <dir passed to glslc -I, for a consumer's OWN #include <...>
 #                headers>]
 # )
@@ -77,12 +77,13 @@ function(gfx_add_shader_target TARGET_NAME)
     # CONFIGURE_DEPENDS re-globs at build time so a newly added shader source
     # doesn't require a manual re-configure. It does NOT see .glsl includes --
     # that's the depfile's job below, not the glob's; gfx/*.glsl bodies are
-    # deliberately never globbed here (only *.vert/*.frag entry points are).
+    # deliberately never globbed here (only the *.vert/*.frag/*.tesc/*.tese/*.comp entry points are).
     file(GLOB SHADER_SRCS CONFIGURE_DEPENDS
         "${ARG_SHADER_DIR}/*.vert"
         "${ARG_SHADER_DIR}/*.frag"
         "${ARG_SHADER_DIR}/*.tesc"
-        "${ARG_SHADER_DIR}/*.tese")
+        "${ARG_SHADER_DIR}/*.tese"
+        "${ARG_SHADER_DIR}/*.comp")
 
     if(ARG_OUTPUT_DIR)
         file(MAKE_DIRECTORY "${ARG_OUTPUT_DIR}")

@@ -458,6 +458,7 @@ inline void register_render_components(core::Device& device,
             if (node.contains("aperture"))       cam->aperture       = node.at("aperture").get_value<float>();
             if (node.contains("focus_distance")) cam->focus_distance = node.at("focus_distance").get_value<float>();
             if (node.contains("focus_object"))   cam->focus_object   = node.at("focus_object").get_value<std::string>();
+            if (node.contains("motion_blur"))    cam->motion_blur    = node.at("motion_blur").get_value<bool>();
 
             if (node.contains("main")) {
                 cam->is_main = node.at("main").get_value<bool>();

@@ -6,9 +6,9 @@
  * Two fullscreen stages. The MARCH integrates the medium into a low-resolution
  * target (rgb = in-scatter, a = transmittance) -- the expensive part, so it runs at
  * a fraction of the render resolution. The COMPOSITE then upsamples that over the
- * full-resolution scene colour with a depth-aware (joint-bilateral) filter, and
- * applies the global fog term on the merged path. Like FogPass, the composite writes
- * into its own target: pipeline::RenderPass's hardcoded LOAD_OP_CLEAR
+ * full-resolution scene colour with a depth-aware (joint-bilateral) filter. The global
+ * fog is not applied here (see FogPass, which fogs the opaque scene before translucency).
+ * The composite writes into its own target: pipeline::RenderPass's hardcoded LOAD_OP_CLEAR
  * (gfxcoopa/pipeline/render_pass.h) means the target it reads scene colour from
  * can't be reopened and composited onto in place.
  */
@@ -56,11 +56,6 @@ public:
      * @param vol_ubo        The VolumetricsData uniform buffer (engine/data/volumetrics_data.h).
      *                       Bound once here -- its VkBuffer never changes, only its
      *                       per-frame upload() repeats.
-     * @param fog_ubo        The FogData uniform buffer (engine/data/fog_data.h), for the
-     *                       MERGED path where the composite also applies the global fog
-     *                       term -- see volumetrics_composite.frag. Bound unconditionally,
-     *                       so the pipeline layout never depends on the runtime flag; the
-     *                       caller selects the path through VolumetricsUBO::counts.w.
      * @param vert_spv       Fullscreen-triangle vertex shader (the shared fullscreen.vert).
      * @param march_frag_spv     volumetrics_march.frag.
      * @param composite_frag_spv volumetrics_composite.frag.
@@ -69,7 +64,6 @@ public:
              coopa::gfx::pipeline::RenderPass& march_pass,
              coopa::gfx::pipeline::RenderPass& composite_pass,
              const coopa::gfx::memory::Buffer& vol_ubo,
-             const coopa::gfx::memory::Buffer& fog_ubo,
              const std::string& vert_spv,
              const std::string& march_frag_spv,
              const std::string& composite_frag_spv)
@@ -79,7 +73,6 @@ public:
     {
         march_.set(1).bind_buffer(0, vol_ubo);
         composite_.set(1).bind_buffer(0, vol_ubo);
-        composite_.set(2).bind_buffer(0, fog_ubo);
     }
 
     VolumetricsPass(const VolumetricsPass&) = delete;
@@ -183,7 +176,7 @@ private:
     }
 
     /// @brief Set 0: scene colour, G-buffer normal/position, march result.
-    ///        Set 1: the volumetrics UBO. Set 2: the fog UBO, for the merged global-fog path.
+    ///        Set 1: the volumetrics UBO.
     static FullscreenStageDesc describe_composite(const std::string& vert_spv, const std::string& frag_spv) {
         using coopa::gfx::DescriptorType;
         using coopa::gfx::ShaderStage;
@@ -195,7 +188,6 @@ private:
              {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
              {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
              {3, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
-            {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
             {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
         };
         return d;

@@ -311,6 +311,38 @@ enum class MemoryResidency {
                ///< writes the CPU reads back (readback/staging-from-GPU).
 };
 
+/**
+ * @enum BufferAccess
+ * @brief How a buffer is touched on one side of a buffer memory barrier (see
+ * command::CommandBuffer::buffer_barrier()). A bitmask -- combine with
+ * operator|() to make a write visible to several consumers in one barrier,
+ * e.g. `ComputeWrite -> VertexAttribute | Indirect`. Each value implies its
+ * pipeline stage, so a barrier never names a stage mask separately.
+ */
+enum class BufferAccess : uint32_t {
+    None             = 0,
+    TransferRead     = 1u << 0,  ///< Copy source (copy_buffer / readback).
+    TransferWrite    = 1u << 1,  ///< Copy or fill destination (copy_buffer, fill_buffer).
+    ComputeRead      = 1u << 2,  ///< Storage/uniform read in a compute shader.
+    ComputeWrite     = 1u << 3,  ///< Storage write (or atomic) in a compute shader.
+    VertexAttribute  = 1u << 4,  ///< Bound as a vertex buffer.
+    Index            = 1u << 5,  ///< Bound as an index buffer.
+    Indirect         = 1u << 6,  ///< Read as draw/dispatch indirect arguments.
+    VertexShaderRead = 1u << 7,  ///< Storage/uniform read in a vertex shader.
+    FragmentShaderRead = 1u << 8, ///< Storage/uniform read in a fragment shader.
+    HostRead         = 1u << 9,  ///< Read by the CPU through a mapping after a fence.
+};
+
+/// @brief Combines two buffer-access masks.
+constexpr BufferAccess operator|(BufferAccess a, BufferAccess b) {
+    return static_cast<BufferAccess>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
+/// @brief True if `set` contains any bit set in `m`.
+constexpr bool any(BufferAccess set, BufferAccess m) {
+    return (static_cast<uint32_t>(set) & static_cast<uint32_t>(m)) != 0;
+}
+
 } // namespace gfx
 } // namespace coopa
 
