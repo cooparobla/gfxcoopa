@@ -124,7 +124,7 @@ struct Vertex {
 /**
  * @struct InstanceData
  * @brief Per-instance vertex stream at binding 1: this frame's and last frame's world
- *        matrix per instance (128 bytes).
+ *        matrix per instance, plus its snow anchor (192 bytes).
  *
  * normal_matrix is deliberately NOT streamed — every consuming shader derives
  * it as transpose(inverse(mat3(in_model))) in-shader instead, keeping a
@@ -137,10 +137,17 @@ struct Vertex {
  * that only read locations 4-7 (shadows, transparent, probes) simply leave 8-11
  * unconsumed, which Vulkan permits. A static or newly-seen object streams
  * prev_model == model.
+ *
+ * snow_anchor (locations 12-15) is the world matrix the object's snow pattern is laid out in:
+ * equal to model for anything that has not moved (so the world's lying snow is one continuous
+ * pattern across tiles and chunks), frozen at the pose it had when it first moved for anything
+ * that has -- so a moving object carries its snow with it instead of sliding under a pattern
+ * fixed in the world (which TAA would smear). Read by the G-buffer backbone's snow cover only.
  */
 struct InstanceData {
     glm::mat4 model      = glm::mat4(1.0f); /**< Object-to-world; consumed as locations 4..7, one vec4 per column. */
     glm::mat4 prev_model = glm::mat4(1.0f); /**< Last frame's object-to-world; locations 8..11. */
+    glm::mat4 snow_anchor = glm::mat4(1.0f); /**< Where the snow pattern is laid out; locations 12..15. */
 
     /** @brief Binding 1, per-instance rate. Binding 0 stays Vertex's per-vertex stream. */
     static VkVertexInputBindingDescription binding_description() {
@@ -152,18 +159,19 @@ struct InstanceData {
     }
 
     /**
-     * @brief Returns the VkVertexInputAttributeDescriptions for locations 4-7 (model) and
-     *        8-11 (prev_model), one mat4 each.
+     * @brief Returns the VkVertexInputAttributeDescriptions for locations 4-7 (model),
+     *        8-11 (prev_model) and 12-15 (snow_anchor), one mat4 each.
      *
      * A mat4 attribute occupies four consecutive vec4 locations. These
      * locations are used uniformly by every pipeline that consumes instance
      * data (including the shadow pipelines, whose binding-0 attributes only
      * use location 0), so this one array serves all of them.
      */
-    static std::array<VkVertexInputAttributeDescription, 8> attribute_descriptions() {
-        std::array<VkVertexInputAttributeDescription, 8> attrs{};
-        for (uint32_t i = 0; i < 8; ++i) {
-            const size_t base = (i < 4) ? offsetof(InstanceData, model) : offsetof(InstanceData, prev_model);
+    static std::array<VkVertexInputAttributeDescription, 12> attribute_descriptions() {
+        std::array<VkVertexInputAttributeDescription, 12> attrs{};
+        for (uint32_t i = 0; i < 12; ++i) {
+            const size_t base = (i < 4) ? offsetof(InstanceData, model)
+                              : (i < 8) ? offsetof(InstanceData, prev_model) : offsetof(InstanceData, snow_anchor);
             attrs[i].binding  = 1;
             attrs[i].location = 4 + i;
             attrs[i].format   = VK_FORMAT_R32G32B32A32_SFLOAT;
@@ -189,6 +197,10 @@ struct InstanceData {
         for (uint32_t i = 0; i < 4; ++i) {
             vl.attribute(8 + i, Format::RGBA32_Sfloat,
                         static_cast<uint32_t>(offsetof(InstanceData, prev_model) + i * sizeof(glm::vec4)));
+        }
+        for (uint32_t i = 0; i < 4; ++i) {
+            vl.attribute(12 + i, Format::RGBA32_Sfloat,
+                        static_cast<uint32_t>(offsetof(InstanceData, snow_anchor) + i * sizeof(glm::vec4)));
         }
         return vl;
     }
