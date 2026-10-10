@@ -15,7 +15,7 @@
  * raymarch reading stale indices. Per-slot buffers plus binding one descriptor set per slot
  * ONCE at construction (see set()) keeps every write going to a slot the GPU is provably not
  * reading, with no per-frame device_.wait_idle() -- the same policy toyengine's InstanceStream
- * follows, and that PixelRenderPipeline applies to its camera and light uniforms by owning one
+ * follows, and that ToyRenderPipeline applies to its camera and light uniforms by owning one
  * buffer plus one descriptor set per frame-in-flight slot. The CameraUBO/LightData *classes*
  * themselves are single-buffered: per-slot-ness is a property of a consumer's frame-overlap
  * model, not of the type -- GiSystem's own capture camera (gfxcoopa/engine/gi/gi_system.h)
@@ -60,7 +60,7 @@ struct alignas(16) SdfShapeGPU {
     glm::vec4 params_round = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f); /**< xyz = SdfShape::params, w = rounding. */
     glm::vec4 type_op_blend = glm::vec4(0.0f); /**< x = SdfGpuShapeType, y = SdfGpuOp, z = blend k,
                                                 w = approximate uniform scale of the shape's world
-                                                matrix (see PixelRenderPipeline's fill site), used
+                                                matrix (see ToyRenderPipeline's fill site), used
                                                 to rescale the local-space distance back to world
                                                 units -- true SDFs don't support non-uniform scale
                                                 exactly, so this is the same approximation every

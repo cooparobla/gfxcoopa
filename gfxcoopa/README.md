@@ -82,7 +82,7 @@ The `engine` module provides the building blocks of a deferred Physically-Based 
         │
   ExposurePass · BloomPass · DofPass · TiltShiftPass
         │
-  TaaPass · SmaaPass · FxaaPass · PixelStylizePass
+  TaaPass · SmaaPass · FxaaPass · StylizePass
         │
   PresentPass            final LDR image ──► swapchain
 ```
@@ -471,7 +471,7 @@ Every pass takes its `.spv` paths from the caller and documents the push-constan
 - **[fxaa_pass.h](engine/passes/fxaa_pass.h)**: `FxaaPass` — standalone FXAA 3.11 over an already-tonemapped image.
 - **[taa_pass.h](engine/passes/taa_pass.h)**: `TaaPass` — ping-ponged RGBA16F accumulation, reprojected by the G-buffer velocity (or depth and camera motion), copied into an RGBA8 output.
 - **[smaa_pass.h](engine/passes/smaa_pass.h)**: `SmaaPass` — Jimenez SMAA 1x: edge detection, blend weights, neighbourhood blend, using gfxcoopa's `smaa_*` shaders and the reference area/search textures.
-- **[pixel_stylize_pass.h](engine/passes/pixel_stylize_pass.h)**: `PixelStylizePass` — optional bloom, tonemap, depth/normal outlines, ordered dither and palette quantization in one draw.
+- **[stylize_pass.h](engine/passes/stylize_pass.h)**: `StylizePass` — optional bloom, tonemap, depth/normal outlines, ordered dither and palette quantization in one draw.
 - **[present_pass.h](engine/passes/present_pass.h)**: `PresentPass` — writes the final LDR image to the swapchain unmodified.
 
 ##### 2D

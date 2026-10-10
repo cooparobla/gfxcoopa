@@ -181,7 +181,7 @@ public:
      *        range) -- only the shader modules and rasterization cull mode differ.
      *
      * Called once per SurfaceShaderDesc of SurfaceShaderDomain::Opaque at construction
-     * time (see PixelRenderPipeline's ctor), never mid-frame -- an unresolvable or
+     * time (see ToyRenderPipeline's ctor), never mid-frame -- an unresolvable or
      * duplicate name is a startup error via the Shader ctor / std::map's behaviour, not a
      * runtime one, matching this codebase's startup-vs-runtime tier policy
      * (render_features.h).

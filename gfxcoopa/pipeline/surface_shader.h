@@ -37,7 +37,7 @@ enum class SurfaceShaderDomain {
  *        passes should resolve instead of the stock ones.
  *
  * Every field below is a *logical* shader name (e.g. "foliage.vert", no ".spv", no
- * directory) exactly like the strings already passed to PixelRenderConfig::shaders() --
+ * directory) exactly like the strings already passed to ToyRenderConfig::shaders() --
  * the caller resolves each one through its own ShaderLibrary before handing the resolved
  * .spv path to a pass's add_variant(). An empty field means "this shader doesn't override
  * that entry point" -- for the shadow entry points that's a real gap, not a convenience:

@@ -111,7 +111,7 @@ struct alignas(16) LightUBO {
      * toyengine's and blendy's) must byte-match this layout, so moving it shifts every later field.
      *   x = directional shadow intensity, 0..1 (DirectionalLightComponent::shadow_intensity)
      *   y = point-light PCF disk radius, as a tangent-space offset on a unit sample
-     *       direction (toyengine converts this from PixelRenderConfig::point_shadow_softness
+     *       direction (toyengine converts this from ToyRenderConfig::point_shadow_softness
      *       texels each frame, the same way dir_shadow_params.y below converts
      *       shadow_softness from world units); 0 = single hard compare
      *   z = directional PCF tap count (float; int()-cast in the shader)
@@ -130,7 +130,7 @@ struct alignas(16) LightUBO {
                                                    z = num_spot_lights, w = index into spot_lights[] of
                                                    the one spot that owns the shadow map, or 0xFFFFFFFF
                                                    if none does (see find_first_shadow_casting_spot_light_
-                                                   in pixel_render_pipeline.h) */
+                                                   in toy_render_pipeline.h) */
     PointLightGPU point_lights[MAX_POINT_LIGHTS];
 
     // Configurable sky/ambient colour (see IndirectParams in render_features.h).
@@ -147,7 +147,7 @@ struct alignas(16) LightUBO {
     // (one whose block stops at sky_ground) keeps compiling against the shorter prefix
     // unchanged.
     glm::mat4     spot_light_space_matrix = glm::mat4(1.0f); /**< Light projection * view matrix for the one shadow-casting spot (see light_counts.w). */
-    glm::vec4     spot_shadow_params      = glm::vec4(0.005f, 0.0f, 0.0f, 0.05f); /**< x=bias, y=PCF penumbra scale K in texels*distance -- the shader divides by the fragment's light-space depth for a constant world-width penumbra; 0=hard (see calc_spot_shadow in pixel_shadow_body.glsl), z=shadow_enabled (1 or 0), w=normal_bias */
+    glm::vec4     spot_shadow_params      = glm::vec4(0.005f, 0.0f, 0.0f, 0.05f); /**< x=bias, y=PCF penumbra scale K in texels*distance -- the shader divides by the fragment's light-space depth for a constant world-width penumbra; 0=hard (see calc_spot_shadow in toy_shadow_body.glsl), z=shadow_enabled (1 or 0), w=normal_bias */
     SpotLightGPU  spot_lights[MAX_SPOT_LIGHTS];
 
     // Appended after spot_lights per this struct's own append-only rule: consumers
@@ -159,10 +159,10 @@ struct alignas(16) LightUBO {
                                         w=blocker search tap count (the quality dial -- the search runs on
                                         every shadowed pixel). */
     glm::vec4     contact_params = glm::vec4(0.0f, 0.5f, 0.15f, 8.0f); /**< Screen-space contact shadows
-                                        (pixel_lighting.frag): x=strength (0 disables), y=march length in
+                                        (toy_lighting.frag): x=strength (0 disables), y=march length in
                                         world units, z=thickness tolerance in world units, w=step count. */
     glm::vec4     contact_soft_params = glm::vec4(0.0f); /**< Soft contact-shadow penumbra
-                                        (pixel_lighting.frag): x=cone half-angle tangent (the sun's angular
+                                        (toy_lighting.frag): x=cone half-angle tangent (the sun's angular
                                         size, shadow_pcss_light_size, when soft_shadows is on; 0 selects the
                                         hard single-ray march). y = per-frame step-phase rotation (frame
                                         index while the contact resolve accumulates, else 0). z/w reserved. */
@@ -262,6 +262,15 @@ struct alignas(16) LightUBO {
     glm::vec4 fog_water   = glm::vec4(0.0f); /**< x = water surface level (world Z), y = 1 when the
                                                   camera is under that surface: fog then integrates
                                                   only the part of each ray above the water. */
+
+    // --- An app's cloud shadow map (appended last per the append-only rule) ---
+    // toyengine's cloud layer shadows the directional light through a map of the light's
+    // transmittance on the layer's base plane (its assets/shaders/cloud_shadow.glsl).
+    // cloud_shadow.w = 0 (the default) disables it.
+    glm::vec4 cloud_shadow       = glm::vec4(0.0f); /**< xy = the map's corner (world), z = 1 / its side,
+                                                         w = strength (0 = off). */
+    glm::vec4 cloud_shadow_layer = glm::vec4(0.0f); /**< x = the layer's base height (world z),
+                                                         y = its thickness, z = low-light fade 0..1, w unused. */
 };
 
 // Pins the offset of sky_zenith -- where a shader LightUBO prefix with no spot support
@@ -287,6 +296,8 @@ static_assert(offsetof(LightUBO, sky_sun) == offsetof(LightUBO, local_shadows) +
     "LightUBO's physical-sky block must immediately follow local_shadows (append-only rule).");
 static_assert(offsetof(LightUBO, fog_color) == offsetof(LightUBO, sky_extra) + sizeof(glm::vec4),
     "LightUBO's fog block must immediately follow sky_extra (append-only rule).");
+static_assert(offsetof(LightUBO, cloud_shadow) == offsetof(LightUBO, fog_water) + sizeof(glm::vec4),
+    "LightUBO's cloud shadow block must immediately follow the fog block (append-only rule).");
 static_assert(sizeof(LocalShadowBlock) % 16 == 0, "LocalShadowBlock must keep std140's 16-byte stride.");
 
 /**

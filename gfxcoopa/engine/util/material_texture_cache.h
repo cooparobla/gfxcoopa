@@ -50,7 +50,7 @@ namespace util {
  * immediate vkUpdateDescriptorSets) the first time a given material's texture combination is
  * seen, never re-written after that. This is what makes lazy allocation safe under
  * MAX_FRAMES_IN_FLIGHT-overlapped command buffers, the same hazard
- * PixelRenderPipeline's own construction-time comments describe for ssao_pass_: a *newly
+ * ToyRenderPipeline's own construction-time comments describe for ssao_pass_: a *newly
  * allocated* descriptor set is by construction referenced by no in-flight command buffer, and
  * an already-cached set is never rebound, so no command buffer ever observes a set update while
  * still executing.
@@ -108,7 +108,7 @@ public:
         // Tangent-space "no bump" normal: (0, 0, 1) encoded as unsigned [0,1] -> (0.5, 0.5, 1.0)
         // -> (128, 128, 255). Decodes to (0.0039, 0.0039, 1.0) rather than exactly (0, 0, 1) -- a
         // 0.32-degree tilt from 128/255 vs. the mathematically exact 127.5, far below the width
-        // of a lighting band in toyengine's pixel_lighting.frag. Documented, not branched around.
+        // of a lighting band in toyengine's toy_lighting.frag. Documented, not branched around.
         const uint8_t flat_normal_pixel[4] = {128, 128, 255, 255};
         flat_normal_texture_ = std::make_unique<coopa::gfx::engine::data::Texture>(
             coopa::gfx::engine::data::Texture::upload(

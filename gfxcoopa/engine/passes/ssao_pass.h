@@ -149,7 +149,7 @@ public:
         glm::mat4 reproject       = glm::mat4(1.0f);
         bool      reproject_valid = false;
         // True once the camera and the scene have been still long enough to freeze the
-        // accumulated image (the caller counts still frames -- see PixelRenderPipeline's
+        // accumulated image (the caller counts still frames -- see ToyRenderPipeline's
         // camera_frames_still_ / scene_moved_).
         bool      frozen               = false;
         // Camera rotation between consecutive frames, in screen-centre pixels -- drives the

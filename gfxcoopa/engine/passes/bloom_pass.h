@@ -6,7 +6,7 @@
  * Storage is a chain of owned OffscreenTargets, each stage reading the previous
  * one's output, with no manual barriers (see execute()'s doc) -- not a single
  * mip-mapped image with per-mip views, framebuffers and barriers the way
- * SceneColorMipPass does it. Bloom's consumer (PixelStylizePass) reads exactly
+ * SceneColorMipPass does it. Bloom's consumer (StylizePass) reads exactly
  * ONE final image at one resolution, so the mip-mapped layout's advantage (one
  * allocation, one maxLod sampler) buys nothing, and a dual-filter pyramid needs
  * a parallel "up" chain either way (see up_targets_'s own doc).
@@ -302,7 +302,7 @@ private:
     /// a fullscreen-triangle pass's output vertically. This pyramid has an odd
     /// number of stages (1 + N + (N-1)), so relying on begin()'s viewport would ship
     /// an upside-down bloom overlay. Every other fullscreen pass in this engine
-    /// overrides it the same way -- see SmaaPass::draw() and PixelStylizePass::draw().
+    /// overrides it the same way -- see SmaaPass::draw() and StylizePass::draw().
     void begin_stage_(coopa::gfx::command::CommandBuffer& cmd, targets::OffscreenTarget& target,
                       VkClearColorValue clear, const FullscreenStage& stage,
                       uint32_t instance) const {

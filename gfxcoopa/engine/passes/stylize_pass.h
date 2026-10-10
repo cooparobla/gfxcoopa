@@ -1,7 +1,7 @@
 /**
- * @file pixel_stylize_pass.h
+ * @file stylize_pass.h
  * @brief Optional bloom + tonemap + outline + ordered dither + palette
- *        quantization overlay (the caller's pixel_stylize.frag, e.g. toyengine's).
+ *        quantization overlay (the caller's stylize.frag, e.g. toyengine's).
  *
  * The tonemap step is optional (PushConstants::exposure <= 0 disables it):
  * a full PBR renderer with its own tonemap/AA chain (e.g. blendy) feeds
@@ -20,8 +20,8 @@
  * means the target it reads from can't be reopened and composited onto in place.
  */
 
-#ifndef GFXCOOPA_ENGINE_PASSES_PIXEL_STYLIZE_PASS_H
-#define GFXCOOPA_ENGINE_PASSES_PIXEL_STYLIZE_PASS_H
+#ifndef GFXCOOPA_ENGINE_PASSES_STYLIZE_PASS_H
+#define GFXCOOPA_ENGINE_PASSES_STYLIZE_PASS_H
 
 #include <volk/volk.h>
 #include <glm/glm.hpp>
@@ -42,7 +42,7 @@ namespace engine {
 namespace passes {
 
 /**
- * @class PixelStylizePass
+ * @class StylizePass
  * @brief Composites bloom, an optional tonemap, depth/normal outlines, ordered
  *        dither and palette quantization in one fullscreen draw.
  *
@@ -50,10 +50,10 @@ namespace passes {
  * optional pre-blurred bloom image. Set PushConstants::exposure <= 0 when the
  * source is already tonemapped.
  */
-class PixelStylizePass {
+class StylizePass {
 public:
     /**
-     * @brief Matches pixel_stylize.frag's StylizePushConstants block.
+     * @brief Matches stylize.frag's StylizePushConstants block.
      *
      * outline_color (vec4) is listed first so its GLSL std430 16-byte
      * alignment lands at offset 0 for free -- everywhere else in gfxcoopa
@@ -92,17 +92,17 @@ public:
         float     grading_size           = 0.0f;
     };
     static_assert(sizeof(PushConstants) == 72,
-                 "PushConstants must match pixel_stylize.frag's StylizePushConstants byte-for-byte");
+                 "PushConstants must match stylize.frag's StylizePushConstants byte-for-byte");
 
-    PixelStylizePass(coopa::gfx::core::Device& device,
+    StylizePass(coopa::gfx::core::Device& device,
                      coopa::gfx::pipeline::RenderPass& target_pass,
                      const std::string& vert_spv,
                      const std::string& frag_spv)
         : stage_(device, target_pass, describe(vert_spv, frag_spv))
     {}
 
-    PixelStylizePass(const PixelStylizePass&) = delete;
-    PixelStylizePass& operator=(const PixelStylizePass&) = delete;
+    StylizePass(const StylizePass&) = delete;
+    StylizePass& operator=(const StylizePass&) = delete;
 
     void set_source_images(coopa::gfx::TextureView scene_color, coopa::gfx::TextureView scene_depth,
                            coopa::gfx::TextureView scene_normal, coopa::gfx::TextureView palette_lut,
@@ -172,4 +172,4 @@ private:
 } // namespace gfx
 } // namespace coopa
 
-#endif // GFXCOOPA_ENGINE_PASSES_PIXEL_STYLIZE_PASS_H
+#endif // GFXCOOPA_ENGINE_PASSES_STYLIZE_PASS_H

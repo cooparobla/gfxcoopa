@@ -26,7 +26,7 @@
  * of the lens forming the image, not a filter over the already-formed pixel-art
  * frame, and depth is only available at render resolution anyway (GBufferTarget
  * never allocates it at display resolution). It is inserted after fog and before
- * BloomPass in PixelRenderPipeline's chain, so defocused HDR highlights bloom
+ * BloomPass in ToyRenderPipeline's chain, so defocused HDR highlights bloom
  * into real bokeh instead of DOF blurring an already-tonemapped, already-bloomed
  * image.
  */
@@ -83,7 +83,7 @@ public:
         /// focus distance, which no aperture or focal length can compensate for -- a subject
         /// framed sharp at 11 m is ~90% defocused at 3 m. Set this to the subject's own
         /// depth half-extent to keep it sharp at any distance (see toyengine's
-        /// PixelRenderPipeline::resolve_dof_focus_(), which fits it to the focus object's
+        /// ToyRenderPipeline::resolve_dof_focus_(), which fits it to the focus object's
         /// bounds). The falloff OUTSIDE the band stays exactly physical -- see
         /// gfx/dof_common.glsl's dof_signed_coc() for why it slides the depth rather than
         /// widening a threshold.
@@ -126,7 +126,7 @@ public:
      *                        filtering of D32_Sfloat is an optional Vulkan format feature
      *                        this engine never queries, and would blend across the very
      *                        discontinuities the CoC formula is measuring (see
-     *                        pixel_stylize_pass.h's identical reasoning for its own outline).
+     *                        stylize_pass.h's identical reasoning for its own outline).
      * @param vert_spv        Fullscreen-triangle vertex shader.
      * @param coc_frag_spv    dof_coc.frag.
      * @param bokeh_frag_spv  dof_bokeh.frag.

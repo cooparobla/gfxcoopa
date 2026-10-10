@@ -3,7 +3,7 @@
  * @brief Raymarches every OPAQUE/MASK SdfRenderer into the opaque G-buffer.
  *
  * Drawn inside GBufferTarget's existing begin()/end() bracket, right after
- * the mesh loop -- see PixelRenderPipeline::record_gbuffer_(). Each draw is a
+ * the mesh loop -- see ToyRenderPipeline::record_gbuffer_(). Each draw is a
  * single 6-vertex, vertex-buffer-less quad (VertexLayout::none(), see
  * sdf_quad.vert) scissored to the renderer's screen-space (pre-upscale)
  * rectangle by the caller (cmd.set_scissor(), a plain dynamic pipeline

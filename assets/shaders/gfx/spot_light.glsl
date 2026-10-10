@@ -13,7 +13,7 @@
 // look on all of them. Each spot loop instead reuses whichever distance curve
 // its own file's point-light loop uses immediately above it, so a spot light
 // always falls off consistently with the point lights in the same pass -- see
-// probe_capture.frag's spot loop, or toyengine's pixel_forward_shading.glsl.
+// probe_capture.frag's spot loop, or toyengine's toy_forward_shading.glsl.
 
 struct SpotLight {
     vec4 position_range;   // xyz = world position, w = range
@@ -28,7 +28,7 @@ struct SpotLight {
 // travel, which is what compares against the light's aim (direction_cone.xyz).
 //
 // Squared (not linear) so the ramp reads as a soft-but-bounded ring under this engine's
-// banded/cel shading (band() in toyengine's pixel_lighting.frag) rather than a visible linear gradient
+// banded/cel shading (band() in toyengine's toy_lighting.frag) rather than a visible linear gradient
 // competing with the discrete N.L steps.
 float gfx_spot_cone(vec3 L, vec3 spot_dir, float cos_outer, float cos_inner) {
     float cd = dot(-L, spot_dir);

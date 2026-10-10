@@ -40,7 +40,7 @@ namespace targets {
  * one-cascade target is bit-identical to a plain single shadow map.
  *
  * The tiles share one image, one VkRenderPass and one framebuffer: the cascade loop
- * (record_directional_shadow_() in toyengine's pixel_render_pipeline.h) calls
+ * (record_directional_shadow_() in toyengine's toy_render_pipeline.h) calls
  * set_cascade_viewport() between draws rather than beginning a pass per cascade. That keeps
  * the sampler a plain sampler2D/sampler2DShadow, so every shadow-sampling kernel
  * (toyengine's gfx/shadow_sampling.glsl) works on a cascade unchanged -- only the uv remap
@@ -313,7 +313,7 @@ public:
      */
     static glm::mat4 get_spot_matrix(const glm::vec3& pos, const glm::vec3& dir,
                                      float outer_degrees, float range) {
-        // Same degenerate-up guard as compute_dir_shadow_fit() (pixel_math.h) --
+        // Same degenerate-up guard as compute_dir_shadow_fit() (toy_render_math.h) --
         // this engine is Z-up, so a near-vertical aim needs a different up axis to
         // keep lookAt() from degenerating.
         const glm::vec3 up = (std::abs(dir.z) < 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f)

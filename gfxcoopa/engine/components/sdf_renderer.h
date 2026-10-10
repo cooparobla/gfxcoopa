@@ -71,7 +71,7 @@ public:
     /// MeshRenderer's implicit shadow-casting (always true there); explicit
     /// here since a raymarch is comparatively expensive to repeat in every
     /// shadow pass. A BLEND material only casts a shadow at alpha == 1.0,
-    /// same binary rule as MeshRenderer -- see PixelRenderPipeline's shadow
+    /// same binary rule as MeshRenderer -- see ToyRenderPipeline's shadow
     /// recording for why (a single hard depth compare can't express a
     /// partial shadow).
     bool cast_shadows = true;

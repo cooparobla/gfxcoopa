@@ -141,7 +141,7 @@ public:
         }
 
         // 2c. Material texture cache (albedo/normal/metallic-roughness/alpha-mask), shared
-        //     with PixelRenderPipeline's G-buffer/shadow/transparent passes in spirit but a
+        //     with ToyRenderPipeline's G-buffer/shadow/transparent passes in spirit but a
         //     private instance here -- this bake runs once, early, self-contained like every
         //     other cap_*_ resource above, not per-frame.
         material_cache_ = std::make_unique<MaterialTextureCache>(device, allocator, cmd_pool);

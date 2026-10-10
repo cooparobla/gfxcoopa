@@ -91,15 +91,15 @@ struct PBRMaterial {
     bool      refraction           = false;
 
     /// Negative (the default) means "not set by this material" -- the consumer (toyengine's
-    /// record_transparent_()) falls back to its own engine-wide default (PixelRenderConfig::
+    /// record_transparent_()) falls back to its own engine-wide default (ToyRenderConfig::
     /// refraction_ior) in that case. A real IOR is never negative, so this sentinel can't
     /// collide with an authored value. Kept negative rather than defaulting to, say, 1.45
     /// directly so a scene author's choice and "the engine picked something" stay
     /// distinguishable -- changing the engine-wide default in config.yaml then actually
     /// changes every object that didn't override it, instead of only new ones.
-    float     ior                  = -1.0f; /**< < 0 => use PixelRenderConfig::refraction_ior; else the IOR (glass ~1.45, water ~1.33). */
-    float     refraction_thickness = -1.0f; /**< < 0 => use PixelRenderConfig::refraction_thickness; else world-space ray distance through the object. */
-    glm::vec3 refraction_tint      = {-1.0f, -1.0f, -1.0f}; /**< Any component < 0 => use PixelRenderConfig::refraction_tint; else the Beer-Lambert absorption tint. */
+    float     ior                  = -1.0f; /**< < 0 => use ToyRenderConfig::refraction_ior; else the IOR (glass ~1.45, water ~1.33). */
+    float     refraction_thickness = -1.0f; /**< < 0 => use ToyRenderConfig::refraction_thickness; else world-space ray distance through the object. */
+    glm::vec3 refraction_tint      = {-1.0f, -1.0f, -1.0f}; /**< Any component < 0 => use ToyRenderConfig::refraction_tint; else the Beer-Lambert absorption tint. */
 
     std::string texture_albedo             = "";
     std::string texture_normal             = "";

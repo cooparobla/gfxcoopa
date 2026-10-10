@@ -58,7 +58,7 @@ built on it.
   volumetric fog pass.
 - **Post-processing.** Bloom, auto exposure, ACES tone mapping, colour-grading LUTs,
   thin-lens depth of field, tilt-shift, and TAA, SMAA or FXAA.
-- **Optional stylisation.** `PixelStylizePass` adds outlines, ordered dithering and palette
+- **Optional stylisation.** `StylizePass` adds outlines, ordered dithering and palette
   quantisation for projects that want them.
 
 ### Scenes and assets

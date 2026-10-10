@@ -8,7 +8,7 @@
  * -- render passes only need to be attachment-COMPATIBLE to share a
  * VkPipeline, and drawing both a BLEND mesh's pipeline and this one inside
  * the SAME begin()/end() bracket is what lets
- * PixelRenderPipeline::record_transparent_() walk one merged back-to-front
+ * ToyRenderPipeline::record_transparent_() walk one merged back-to-front
  * list of meshes and SDFs, switching pipelines per item, instead of drawing
  * all SDFs in a separate pass that would always land in front of or behind
  * every BLEND mesh regardless of true depth order.
@@ -16,7 +16,7 @@
  * Shading matches TransparentPass's transparent.frag exactly (same direct
  * lighting formula, same gfx_ssr_trace() call against the same Hi-Z/scene-
  * colour chain via the same ExtraSets mechanism) -- see toyengine's
- * sdf_forward.frag, which includes the same pixel_forward_shading.glsl
+ * sdf_forward.frag, which includes the same toy_forward_shading.glsl
  * body transparent.frag includes, so the two can never silently diverge.
  */
 

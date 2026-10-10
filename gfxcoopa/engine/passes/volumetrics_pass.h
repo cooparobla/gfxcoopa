@@ -87,7 +87,7 @@ public:
      * g_normal/g_position use the nearest sampler this pass owns, not linear:
      * linear filtering would blend world positions across silhouette edges,
      * producing a wrong ray-termination distance at every object outline -- the
-     * same reasoning FogPass and PixelStylizePass both document. The composite's
+     * same reasoning FogPass and StylizePass both document. The composite's
      * upsample also depends on it: it re-reads G2 at the march's texel centres to
      * recover each low-res sample's exact depth.
      */
@@ -134,6 +134,16 @@ public:
     }
 
     /**
+     * @brief Binds an app's cloud shadow map at set 2, binding 4 (a plain sampler2D of the sun's
+     *        transmittance -- toyengine's cloud layer; VolumetricsUBO::cloud_shadow says where it
+     *        lies). Call ONCE, at construction time, when the march shader samples it; a shader
+     *        that does not leaves the binding unused.
+     */
+    void set_cloud_shadow_image(coopa::gfx::TextureView cloud_shadow, const coopa::gfx::engine::util::Sampler& sampler) {
+        march_.set(2).bind_image(4, cloud_shadow, sampler);
+    }
+
+    /**
      * @brief Records the low-resolution march into the caller's open render pass
      *        (the march target's). Sizes are the MARCH target's.
      *
@@ -158,7 +168,8 @@ public:
 
 private:
     /// @brief Set 0: G-buffer normal/position. Set 1: the volumetrics UBO.
-    ///        Set 2: directional map + local-light shadow atlas (see set_shadow_images).
+    ///        Set 2: directional map + local-light shadow atlas (see set_shadow_images), and
+    ///        an app's cloud shadow map at binding 4 (set_cloud_shadow_image).
     static FullscreenStageDesc describe_march(const std::string& vert_spv, const std::string& frag_spv) {
         using coopa::gfx::DescriptorType;
         using coopa::gfx::ShaderStage;
@@ -170,7 +181,8 @@ private:
              {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
             {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},
             {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
-             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
+             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
+             {4, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
         };
         return d;
     }

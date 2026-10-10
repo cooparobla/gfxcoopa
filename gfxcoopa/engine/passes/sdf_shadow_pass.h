@@ -6,7 +6,7 @@
  * Mirrors ShadowPipeline's shape (shadow_pipeline.h): two pipelines, drawn
  * inside ShadowMapTarget's existing begin_directional_pass()/
  * begin_cube_face_pass() brackets, right after the mesh loop -- see
- * PixelRenderPipeline::record_directional_shadow_()/record_point_shadow_().
+ * ToyRenderPipeline::record_directional_shadow_()/record_point_shadow_().
  *
  * Unlike the main G-buffer/forward draws, a shadow draw is NOT scissored to
  * a light-space-projected rectangle -- computing one would need a second,
@@ -49,7 +49,7 @@ struct SdfDirectionalShadowPushConstants {
     glm::mat4 light_space_matrix;
     uint32_t  renderer_index = 0;
     /// Caps the depth-only march below the renderer's own (main-pass) step
-    /// budget -- see PixelRenderConfig::sdf_shadow_max_steps. A cheaper
+    /// budget -- see ToyRenderConfig::sdf_shadow_max_steps. A cheaper
     /// budget is safe here: the shadow map only needs a correct silhouette,
     /// not the fine surface detail the main G-buffer/forward draw does.
     uint32_t  shadow_max_steps = 32;

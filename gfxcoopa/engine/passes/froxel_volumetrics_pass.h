@@ -143,6 +143,12 @@ public:
         }
     }
 
+    /// An app's cloud shadow map at set 2, binding 4 (VolumetricsPass::set_cloud_shadow_image),
+    /// for both parities' inject sets. Call ONCE, at construction time.
+    void set_cloud_shadow_image(TextureView cloud_shadow, const util::Sampler& sampler) {
+        for (uint32_t p = 0; p < 2; ++p) inject_->set(2, p).bind_image(4, cloud_shadow, sampler);
+    }
+
     /// Optional callback after each grid stage (e.g. a GPU timestamp), between render passes.
     void set_stage_hook(std::function<void(command::CommandBuffer&, Stage)> hook) { stage_hook_ = std::move(hook); }
 
@@ -193,7 +199,8 @@ private:
             {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},   // history grid
             {{0, DescriptorType::UniformBuffer, ShaderStage::Fragment, 1}},          // volumetrics UBO
             {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},    // dir shadow
-             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},   // spot shadow
+             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},    // spot shadow
+             {4, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},   // an app's cloud shadow
         };
         d.instances = 2;
         return d;

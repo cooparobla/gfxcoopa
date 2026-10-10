@@ -52,7 +52,7 @@ enum class CameraType {
  *   focus_object: ':'-separated scene path (e.g. "sdf_blob:sdf_blob_sphere") to keep in
  *                 focus; non-empty puts THIS camera in object-focus mode regardless of the
  *                 render config's dof_focus_mode, and overrides focus_distance above --
- *                 see PixelRenderPipeline::resolve_dof_focus_() for the resolution order
+ *                 see ToyRenderPipeline::resolve_dof_focus_() for the resolution order
  *   motion_blur:  false keeps this camera's image free of motion blur even when the render
  *                 config turns it on (default true)
  *

@@ -6,8 +6,8 @@
  * order) matches coopixel's own `extract_palette_from_image()`
  * (coopixel/ui/color_panel.py), so a palette authored or exported from
  * coopixel's swatch picker (e.g. coopixel/src/coopixel/default-palette.png,
- * PICO-8-style) loads directly. Pairs with PixelStylizePass/pixel_stylize.frag
- * (or toyengine's own pixel_post.frag) for palette quantization.
+ * PICO-8-style) loads directly. Pairs with StylizePass/stylize.frag
+ * (or toyengine's own stylize.frag) for palette quantization.
  */
 
 #ifndef GFXCOOPA_ENGINE_DATA_PALETTE_LUT_H

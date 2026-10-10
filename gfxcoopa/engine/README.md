@@ -2,7 +2,7 @@
 
 The `coopa::gfx::engine` module provides high-level rendering engine abstractions built on top of `gfxcoopa` lower-level Vulkan modules. It is structured into 7 specialized submodules plus `render_features.h`:
 
-- **`coopa::gfx::engine::passes`** ([`passes`](passes)): Render pass execution and graphics pipelines (`FullscreenStage` — the shared scaffold most post-processing passes are built from — plus `DeferredLightingPass`, `GBufferPipeline`, `ShadowPipeline`, `TransparentPass`, `SsaoPass`, `SsrPass`, `HiZPass`, `SceneColorMipPass`, `TemporalHistoryPass`, `TaaPass`, `SmaaPass`, `FxaaPass`, `ExposurePass`, `PresentPass`, `FogPass`, `VolumetricsPass`, `FroxelVolumetricsPass`, `BloomPass`, `DofPass`, `TiltShiftPass`, `PixelStylizePass`, `EnvPrefilterPass`, `ProbeCapturePass`, `TexturedQuad2DPass`, the `Sdf*` passes).
+- **`coopa::gfx::engine::passes`** ([`passes`](passes)): Render pass execution and graphics pipelines (`FullscreenStage` — the shared scaffold most post-processing passes are built from — plus `DeferredLightingPass`, `GBufferPipeline`, `ShadowPipeline`, `TransparentPass`, `SsaoPass`, `SsrPass`, `HiZPass`, `SceneColorMipPass`, `TemporalHistoryPass`, `TaaPass`, `SmaaPass`, `FxaaPass`, `ExposurePass`, `PresentPass`, `FogPass`, `VolumetricsPass`, `FroxelVolumetricsPass`, `BloomPass`, `DofPass`, `TiltShiftPass`, `StylizePass`, `EnvPrefilterPass`, `ProbeCapturePass`, `TexturedQuad2DPass`, the `Sdf*` passes).
 - **`coopa::gfx::engine::targets`** ([`targets`](targets)): Framebuffer and render target resource managers (`OffscreenTarget`, `GBufferTarget`, `ShadowMapTarget`, `CubemapTarget`).
 - **`coopa::gfx::engine::gi`** ([`gi`](gi)): Global Illumination system, CPU probe baking, and SH data structures (`GiSystem`, `GiBaker`, `GiData`, `BRDFLUT`).
 - **`coopa::gfx::engine::data`** ([`data`](data)): Mesh, texture and LUT data plus per-frame GPU buffers (`Mesh`, `Vertex`, `InstanceData`, `Texture`, `GradingLut`, `PaletteLut`, `CameraUBO`, `LightData`, `VolumetricsData`, `SdfData`, `SkinnedMeshSource`).
@@ -243,7 +243,7 @@ Every pass below takes its shaders from the caller unless noted.
 - [tilt_shift_pass.h](passes/tilt_shift_pass.h) (`TiltShiftPass`) — separable horizontal/vertical band blur, folded with the upscale.
 - [volumetrics_pass.h](passes/volumetrics_pass.h) (`VolumetricsPass`) — raymarched local volumes: reduced-resolution march + depth-aware full-resolution composite.
 - [froxel_volumetrics_pass.h](passes/froxel_volumetrics_pass.h) (`FroxelVolumetricsPass`) — the froxel-grid alternative for local volumes: inject, integrate along each column, apply.
-- [pixel_stylize_pass.h](passes/pixel_stylize_pass.h) (`PixelStylizePass`) — optional tonemap plus outline, palette quantization, dither and bloom composite.
+- [stylize_pass.h](passes/stylize_pass.h) (`StylizePass`) — optional tonemap plus outline, palette quantization, dither and bloom composite.
 
 #### Geometry and transparency passes
 - [transparent_pass.h](passes/transparent_pass.h) (`TransparentPass`) — forward BLEND pass, depth-tested against the G-buffer, with per-surface-shader variants.

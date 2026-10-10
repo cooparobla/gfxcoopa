@@ -330,7 +330,7 @@ private:
     };
 
     /// Raster state for a shadow pipeline. Shadow targets render with a POSITIVE-height
-    /// viewport and unflipped light matrices (ShadowMapTarget; pixel_math.h's
+    /// viewport and unflipped light matrices (ShadowMapTarget; toy_render_math.h's
     /// compute_dir_shadow_fit_slice explains why), unlike the main passes' negative-height
     /// viewport -- so a triangle that is counter-clockwise (front-facing) in the main view
     /// lands CLOCKWISE in a shadow map's framebuffer. The culled variant therefore names

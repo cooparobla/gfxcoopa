@@ -203,7 +203,7 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
     // Derived surface shader (see PBRMaterial::shader's doc and the layered-shaders plan's
     // gfx/surface/*.glsl backbones). Registered-name validation happens later, once a
     // SurfaceShaderRegistry is available (register_render_components() itself has no
-    // renderer/pipeline context to validate against) -- see PixelRenderPipeline's ctor,
+    // renderer/pipeline context to validate against) -- see ToyRenderPipeline's ctor,
     // which calls SurfaceShaderRegistry::require() for every parsed material before
     // building any pipeline. shader_params is a plain 4-element list, not named keys, to
     // avoid threading the registry's per-shader param-name table into this free function;

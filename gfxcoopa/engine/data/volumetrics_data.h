@@ -165,6 +165,10 @@ struct alignas(16) VolumetricsUBO {
     /** Point/spot shadows -- LightUBO::local_shadows' copy, so a scatter light whose slot is set
      *  is shadowed from the same local-light atlas the lighting pass samples. */
     LocalShadowBlock local_shadows;
+    /** An app's cloud shadow map over the sun's in-scatter -- LightUBO::cloud_shadow /
+     *  cloud_shadow_layer's copy (toyengine's cloud_shadow.glsl). cloud_shadow.w = 0: off. */
+    glm::vec4 cloud_shadow       = glm::vec4(0.0f);
+    glm::vec4 cloud_shadow_layer = glm::vec4(0.0f);
 };
 
 /**

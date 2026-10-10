@@ -74,7 +74,7 @@ public:
     // <= 128 on its own (a caller's extra_pc_bytes adds on top -- see the ctor's own doc --
     // so this alone doesn't guarantee the combined size fits; a caller declaring
     // extra_pc_bytes should static_assert sizeof(PushConstants) + extra_pc_bytes <= 128
-    // itself, e.g. toyengine's pixel_render_pipeline.h does for TransparentRefractionPushConstants).
+    // itself, e.g. toyengine's toy_render_pipeline.h does for TransparentRefractionPushConstants).
     static_assert(sizeof(PushConstants) <= 128,
                  "TransparentPass::PushConstants exceeds Vulkan's guaranteed "
                  "maxPushConstantsSize (128 bytes) -- see the layered-shaders plan's "
@@ -366,7 +366,7 @@ public:
     /// @brief The hand-built render pass this pass owns -- for a sibling pass
     /// (e.g. SdfForwardPass) that needs to build its own Pipeline against the
     /// SAME render pass instance, so both can draw into the same open
-    /// begin()/end() bracket (see PixelRenderPipeline's merged back-to-front
+    /// begin()/end() bracket (see ToyRenderPipeline's merged back-to-front
     /// BLEND draw list, which switches between this pass and SdfForwardPass
     /// per item without ever closing and reopening the render pass).
     VkRenderPass render_pass() const { return render_pass_; }
@@ -444,7 +444,7 @@ private:
         // G-Buffer depth came back as mostly zeroes (with scattered blocks of surviving real
         // depth, at compression-block granularity) for every LATER pass in the frame that
         // samples it. Those consumers exist and are the whole reason this attachment is
-        // preserved across the pass: toyengine's PixelStylizePass outline edge detector and
+        // preserved across the pass: toyengine's StylizePass outline edge detector and
         // DofPass, which re-linearizes it into a thin-lens circle of confusion. With the depth
         // reading ~0, DofPass computed a large negative (near-field) CoC across the entire
         // frame, so the focus subject was blurred and the actual background was not -- the exact
