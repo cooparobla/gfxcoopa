@@ -182,15 +182,22 @@ work.
 ## Testing
 
 ```bash
-ctest --test-dir build          # or run ./build/gfxcoopa from the repo root
+ctest --test-dir build                 # every suite, in parallel (labels: unit, gpu)
+ctest --test-dir build -L unit         # only the suites that need no Vulkan device
+./build/gfxcoopa --suite compute       # one suite, run from the repo root
 ```
 
-The `gfxcoopa` executable is the test suite (`test.cpp`). It runs the CPU-only tests first,
-then brings up a Vulkan device and checks every core wrapper: buffers, images, shaders,
-render passes, pipelines, descriptors, sync, readback, `Context` and swapchain resize. It
-loads shaders by relative path, so run it from the repository root. It opens a small window
-while it runs and enables the Khronos validation layer (install it so validation errors
-surface).
+The tests live in `tests/`, one suite per system in `tests/<suite>_test.cpp`, written against
+libcoopa's `coopa/testing/test.h` framework and linked into the `gfxcoopa` executable; each
+suite is its own ctest entry (`gfxcoopa_<suite>`). `vk_util`, `camera`, `material` and
+`surface_shader_registry` need no device (label `unit`). `resource_transfer`, `compute`,
+`textured_quad_pass` and `presentation` bring up a Vulkan device per test through
+`tests/support/gpu_fixture.h` (label `gpu`): buffer/image transfers and readback, compute and
+indirect dispatch, the descriptor cache, `Context`, the renderer and swapchain resize. They load
+the `assets/shaders/test*` shaders by relative path, so run them from the repository root (ctest
+does). Every window they create is hidden, and the Khronos validation layer is enabled (install
+it so validation errors surface). The tests are only built when gfxcoopa is the top-level
+project, not when another repo pulls it in with `add_subdirectory()`.
 
 ## Project layout
 
@@ -218,7 +225,7 @@ cmake/           GfxShaders.cmake (gfx_add_shader_target)
 includes/        vendored volk (submodule), VMA, stb_image
 src/             gfx_impl.cpp: the single TU that compiles volk/VMA/stb implementations
 tools/           check_no_vulkan.sh
-test.cpp         the test suite
+tests/           test suites (<suite>_test.cpp) and the shared GPU fixture (support/)
 ```
 
 ## Platform notes
