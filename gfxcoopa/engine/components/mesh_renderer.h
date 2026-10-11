@@ -334,6 +334,15 @@ public:
     /// dynamic objects rely on SSR alone.
     bool affects_reflection_probes = true;
 
+    /// False keeps this renderer out of every shadow pass (it still receives shadows) -- grass,
+    /// small clutter, anything whose shadow costs more than it shows.
+    bool cast_shadows = true;
+
+    /// > 0: cast shadows only while within this many metres of the main camera (bounds to
+    /// eye). 0: always. A large surface split into pieces (terrain chunks) drops its distant
+    /// pieces from the shadow passes this way.
+    float shadow_max_distance = 0.0f;
+
     /// Multiplies this renderer's projected screen size before LOD selection: > 1 keeps
     /// detail longer (a hero prop), < 1 drops it sooner. The mesh's own LOD table (its
     /// `lods` block or `.lod.yaml` sidecar -- see data::Mesh::build_cpu) sets the levels.

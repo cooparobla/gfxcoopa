@@ -68,6 +68,9 @@ public:
     // --- Field ---
     glm::vec3 direction      = glm::vec3(1.0f, 0.3f, 0.0f); ///< World-space advection direction (Z-up); normalized on upload.
     float     speed          = 2.0f;   ///< World units/sec the field is advected. 0 freezes it in place.
+    /// How much the scene's weather wind (if the host engine has one) adds to the drift: the
+    /// field moves at direction * speed + wind * wind_influence. 0 = only the authored drift.
+    float     wind_influence = 0.0f;
     float     density        = 0.30f;  ///< Peak extinction per world unit.
     float     noise_scale    = 0.45f;  ///< Feature frequency; for Wind this sets ribbon THICKNESS as well as spacing.
     float     streak         = 8.0f;   ///< Elongation along `direction`; 1 = isotropic.

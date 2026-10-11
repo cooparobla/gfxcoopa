@@ -349,6 +349,10 @@ inline void register_render_components(core::Device& device,
                 mr->lod_bias = node.at("lod_bias").get_value<float>();
             if (node.contains("lods_enabled"))
                 mr->lods_enabled = node.at("lods_enabled").get_value<bool>();
+            if (node.contains("cast_shadows"))
+                mr->cast_shadows = node.at("cast_shadows").get_value<bool>();
+            if (node.contains("shadow_max_distance"))
+                mr->shadow_max_distance = node.at("shadow_max_distance").get_value<float>();
             // `tessellation: true` with flat `tess_edge_pixels` / `tess_max_factor` /
             // `tess_max_distance` (the editor's spelling), or one block
             // `tessellation: {enabled, edge_pixels, max_factor, max_distance}`.
@@ -636,6 +640,7 @@ inline void register_render_components(core::Device& device,
             }
             if (node.contains("falloff"))        vol->falloff        = node.at("falloff").get_value<float>();
             if (node.contains("speed"))          vol->speed          = node.at("speed").get_value<float>();
+            if (node.contains("wind_influence")) vol->wind_influence = node.at("wind_influence").get_value<float>();
             if (node.contains("density"))        vol->density        = node.at("density").get_value<float>();
             if (node.contains("noise_scale"))    vol->noise_scale    = node.at("noise_scale").get_value<float>();
             if (node.contains("streak"))         vol->streak         = node.at("streak").get_value<float>();
