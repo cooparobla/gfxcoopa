@@ -215,7 +215,8 @@ public:
                      const std::string& dir_vert_spv, const std::string& dir_frag_spv,
                      const std::string& cube_vert_spv, const std::string& cube_frag_spv,
                      coopa::gfx::CullMode cull = coopa::gfx::CullMode::None,
-                     const std::string& dir_tese_spv = {}, const std::string& cube_tese_spv = {}) {
+                     const std::string& dir_tese_spv = {}, const std::string& cube_tese_spv = {},
+                     const std::string& dir_tesc_spv = {}, const std::string& cube_tesc_spv = {}) {
         Variant v;
         v.dir_vert  = std::make_unique<pipeline::Shader>(device_, dir_vert_spv, VK_SHADER_STAGE_VERTEX_BIT);
         v.dir_frag  = std::make_unique<pipeline::Shader>(device_, dir_frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -235,8 +236,17 @@ public:
         if (tess_vert_ && !dir_tese_spv.empty() && !cube_tese_spv.empty()) {
             v.dir_tese  = std::make_unique<pipeline::Shader>(device_, dir_tese_spv, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
             v.cube_tese = std::make_unique<pipeline::Shader>(device_, cube_tese_spv, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
-            v.dir_tess_pipeline  = create_dir_pipeline_(*tess_vert_, *v.dir_frag, false, dir_tesc_.get(), v.dir_tese.get());
-            v.cube_tess_pipeline = create_cube_pipeline_(*tess_vert_, *v.cube_frag, false, cube_tesc_.get(), v.cube_tese.get());
+            // A variant may bring its own control stages (edge factors from displaced endpoints).
+            if (!dir_tesc_spv.empty()) {
+                v.dir_tesc = std::make_unique<pipeline::Shader>(device_, dir_tesc_spv, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT);
+            }
+            if (!cube_tesc_spv.empty()) {
+                v.cube_tesc = std::make_unique<pipeline::Shader>(device_, cube_tesc_spv, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT);
+            }
+            v.dir_tess_pipeline  = create_dir_pipeline_(*tess_vert_, *v.dir_frag, false,
+                                                        v.dir_tesc ? v.dir_tesc.get() : dir_tesc_.get(), v.dir_tese.get());
+            v.cube_tess_pipeline = create_cube_pipeline_(*tess_vert_, *v.cube_frag, false,
+                                                         v.cube_tesc ? v.cube_tesc.get() : cube_tesc_.get(), v.cube_tese.get());
         }
 
         variants_.emplace(name, std::move(v));
@@ -325,6 +335,7 @@ private:
         std::unique_ptr<pipeline::Pipeline> cube_pipeline;
         std::unique_ptr<pipeline::Pipeline> cube_pipeline_culled;   // null: variant is two-sided
         std::unique_ptr<pipeline::Shader>   dir_tese, cube_tese;
+        std::unique_ptr<pipeline::Shader>   dir_tesc, cube_tesc;    // null: the shared control stages
         std::unique_ptr<pipeline::Pipeline> dir_tess_pipeline;      // null: no tessellated twin
         std::unique_ptr<pipeline::Pipeline> cube_tess_pipeline;
     };

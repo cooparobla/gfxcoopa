@@ -21,10 +21,12 @@
 #define GFXCOOPA_ENGINE_UTIL_MATERIAL_TEXTURE_CACHE_H
 
 #include <volk/volk.h>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <vector>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
@@ -81,11 +83,15 @@ public:
                          coopa::gfx::command::CommandPool& cmd_pool)
         : device_(device)
     {
-        // The displacement map is the evaluation stage's; on a device without tessellation
-        // nothing samples it, but the binding stays so every layout matches.
+        // The displacement map is the evaluation stage's -- and, for surfaces that displace a
+        // whole grid from it (toyengine's heightmap terrain), the vertex and control stages'
+        // too: an untessellated draw displaces per vertex, and the control stage sizes edges
+        // from the displaced endpoints. On a device without tessellation only the vertex and
+        // fragment stages exist, but the binding stays so every layout matches.
         const coopa::gfx::ShaderStage disp_stages = device.supports_tessellation()
-            ? coopa::gfx::ShaderStage::TessEval | coopa::gfx::ShaderStage::Fragment
-            : coopa::gfx::ShaderStage::Fragment;
+            ? coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::TessControl |
+              coopa::gfx::ShaderStage::TessEval | coopa::gfx::ShaderStage::Fragment
+            : coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment;
         layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
                 .combined_sampler(kAlphaMaskBinding, coopa::gfx::ShaderStage::Fragment)
@@ -169,8 +175,49 @@ public:
         });
     }
 
+    /**
+     * @brief Forgets every set that references `texture`, which its owner is about to destroy.
+     *
+     * Sets are keyed by Texture ADDRESS, so a texture freed and a new one later allocated at the
+     * same address would otherwise be handed the old set -- with a dangling image view. A
+     * released set may still be referenced by command buffers in flight, so it is parked and
+     * freed only after kRetireFrames further tick() calls. Call this while `texture` is still
+     * alive (the address must not have been reused yet).
+     */
+    void release(const coopa::gfx::engine::data::Texture* texture) {
+        if (texture == nullptr) return;
+        for (auto it = sets_.begin(); it != sets_.end();) {
+            if (std::find(it->first.begin(), it->first.end(), texture) != it->first.end()) {
+                graveyard_.push_back({kRetireFrames, std::move(it->second)});
+                it = sets_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    /** @brief Advances the release() grace period; call once per rendered frame. */
+    void tick() {
+        for (auto it = graveyard_.begin(); it != graveyard_.end();) {
+            if (it->frames_left == 0) {
+                it = graveyard_.erase(it);
+            } else {
+                --it->frames_left;
+                ++it;
+            }
+        }
+    }
+
+    /** @brief Frames a released set outlives its release() (frames in flight, with margin). */
+    static constexpr uint32_t kRetireFrames = 4;
+
 private:
     using Key = std::array<const coopa::gfx::engine::data::Texture*, kBindingCount>;
+
+    struct Retired {
+        uint32_t frames_left = 0;
+        std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> set;
+    };
 
     const coopa::gfx::pipeline::DescriptorSet& set_for_key_(const Key& key) {
         if (key[0] == nullptr && key[1] == nullptr && key[2] == nullptr && key[3] == nullptr && key[4] == nullptr) {
@@ -208,6 +255,7 @@ private:
     std::unique_ptr<coopa::gfx::engine::data::Texture>         black_texture_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       fallback_set_;
     std::map<Key, std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> sets_;
+    std::vector<Retired> graveyard_;
 };
 
 } // namespace util

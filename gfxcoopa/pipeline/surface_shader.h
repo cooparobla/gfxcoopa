@@ -74,6 +74,11 @@ struct SurfaceShaderDesc {
     std::string tese;              ///< G-buffer / transparent tessellation evaluation.
     std::string shadow_tese;       ///< Directional shadow tessellation evaluation (Opaque domain).
     std::string shadow_cube_tese;  ///< Cube shadow tessellation evaluation (Opaque domain).
+    /// Shadow tessellation control overrides (optional; empty = the stock control stages).
+    /// Needed when the edge factors must come from displaced endpoints the stock stage cannot
+    /// see -- the camera and the shadow passes must agree on how each caster is subdivided.
+    std::string shadow_tesc;       ///< Directional shadow tessellation control.
+    std::string shadow_cube_tesc;  ///< Cube shadow tessellation control.
 };
 
 /**
