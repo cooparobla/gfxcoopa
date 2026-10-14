@@ -106,7 +106,10 @@ public:
     VkImageView g4_view() const { return g4_image_->view(); }
     VkImageView depth_view() const { return depth_image_->view(); }
     VkImage depth_image_handle() const { return depth_image_->handle(); }
-    /// @brief G2 (world position + roughness, RGBA16F) as a raw image, for texel copies. Left in
+    /// @brief G2 (world position + roughness, RGBA32F) as a raw image, for texel copies. Left in
+    /// 32-bit floats deliberately: world position is consumed by shadow lookups, and a half
+    /// float's quantum at a few hundred metres from the origin is a quarter of a METRE --
+    /// every shadow silhouette in an open world snapped to that grid until this widened.
     ///        SHADER_READ_ONLY_OPTIMAL by the render pass; a copier transitions it and back.
     VkImage g2_image_handle() const { return g2_image_->handle(); }
 
@@ -149,7 +152,7 @@ private:
 
         g2_image_ = std::make_unique<coopa::gfx::memory::Image>(
             device_, allocator_, width_, height_,
-            VK_FORMAT_R16G16B16A16_SFLOAT, color_flags,
+            VK_FORMAT_R32G32B32A32_SFLOAT, color_flags,
             VK_IMAGE_ASPECT_COLOR_BIT, VMA_MEMORY_USAGE_AUTO
         );
 
@@ -198,7 +201,7 @@ private:
         attachments[1].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         // G2 (Position + Roughness)
-        attachments[2].format         = VK_FORMAT_R16G16B16A16_SFLOAT;
+        attachments[2].format         = VK_FORMAT_R32G32B32A32_SFLOAT;
         attachments[2].samples        = VK_SAMPLE_COUNT_1_BIT;
         attachments[2].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
         attachments[2].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
