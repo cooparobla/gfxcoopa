@@ -235,6 +235,26 @@ private:
         }
 
         physical_device_ = best;
+
+        // Name what was picked -- when the lag question comes, the log should answer it.
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(best, &props);
+        static const char* const type_names[] = {"other", "integrated GPU", "discrete GPU",
+                                                 "virtual GPU", "CPU (software rasterizer)"};
+        const unsigned type = static_cast<unsigned>(props.deviceType);
+        std::printf("[gfxcoopa] device: %s (%s)\n", props.deviceName,
+                    type < 5u ? type_names[type] : "unknown");
+        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
+            // Hardware always outscores a CPU rasterizer (rate_device), so landing here means
+            // no hardware device enumerated at all -- on a machine that has one, its Vulkan
+            // driver is down (commonly after a suspend/resume or a driver update under a
+            // still-loaded module). Every frame will be rasterized on the CPU.
+            std::printf("[gfxcoopa] WARNING: software Vulkan rasterizer '%s' selected -- no "
+                        "hardware GPU enumerated. Rendering will be extremely slow. If this "
+                        "machine has a GPU, its driver failed to load (check vulkaninfo, "
+                        "reboot or reload the driver).\n",
+                        props.deviceName);
+        }
     }
 
     /**
