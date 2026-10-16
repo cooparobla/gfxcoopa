@@ -72,8 +72,11 @@ public:
         glm::vec4 gfx_params   = {0.0f, 0.0f, 0.0f, 0.0f}; // 16 bytes; four author-defined floats
         // 16 bytes: x = packHalf2x16(tess edge_pixels, tess max_factor), y = packHalf2x16(tess
         // max_distance, displacement_scale) -- both 0 for an untessellated draw; z = surface
-        // flags (bit 0: no snow cover); w reserved. Read by every stage (gfx/surface/tess_common.glsl,
-        // gfx/surface/snow.glsl).
+        // flags (bit 0: no snow cover); w = the material's packed toon code
+        // (PBRMaterial::gpu_toon_code(), 0 for a plain PBR material), which the fragment
+        // backbone forwards into the G-buffer's emissive alpha for the deferred lighting pass
+        // to unpack. Read by every stage (gfx/surface/tess_common.glsl, gfx/surface/snow.glsl,
+        // gfx/surface/gbuffer_fs.glsl).
         glm::uvec4 surface_ext = {0u, 0u, 0u, 0u};
     };
     static_assert(sizeof(PushConstants) <= 128,

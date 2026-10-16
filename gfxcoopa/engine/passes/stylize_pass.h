@@ -90,8 +90,13 @@ public:
         /// lookup, matching the same "off at its neutral value" convention every other
         /// field in this block follows.
         float     grading_size           = 0.0f;
+        /// Which surfaces the outline draws on. 0 (the default) outlines every depth/normal
+        /// discontinuity in the frame. 1 outlines only where the per-material mask at
+        /// binding 7 says so -- see set_source_images()'s outline_mask param. Unread when
+        /// outline_thickness <= 0, like every other outline field here.
+        float     outline_mode           = 0.0f;
     };
-    static_assert(sizeof(PushConstants) == 72,
+    static_assert(sizeof(PushConstants) == 76,
                  "PushConstants must match stylize.frag's StylizePushConstants byte-for-byte");
 
     StylizePass(coopa::gfx::core::Device& device,
@@ -113,7 +118,9 @@ public:
                            coopa::gfx::TextureView exposure_result = {},
                            const coopa::gfx::engine::util::Sampler* exposure_sampler = nullptr,
                            coopa::gfx::TextureView grading_lut = {},
-                           const coopa::gfx::engine::util::Sampler* grading_sampler = nullptr) {
+                           const coopa::gfx::engine::util::Sampler* grading_sampler = nullptr,
+                           coopa::gfx::TextureView outline_mask = {},
+                           const coopa::gfx::engine::util::Sampler* outline_mask_sampler = nullptr) {
         // scene_depth/scene_normal use the nearest sampler, not linear: the outline edge
         // detector's taps need exact texel values (linear filtering would blend across the
         // very discontinuities it's looking for), and linear filtering of a D32_SFLOAT depth
@@ -141,6 +148,16 @@ public:
                               exposure_sampler ? *exposure_sampler : linear_sampler);
         stage_.set().bind_image(6, grading_sampler ? grading_lut : scene_color,
                               grading_sampler ? *grading_sampler : linear_sampler);
+        // outline_mask: a per-surface mask the outline can be restricted to, read only when
+        // PushConstants::outline_mode selects it. Same optional-with-harmless-fallback
+        // contract as the three above. toyengine binds the G-buffer's emissive attachment,
+        // whose alpha carries each material's packed toon code (PBRMaterial::gpu_toon_code()
+        // -- bit 10 is "outline this material"); a consumer with a mask of its own binds
+        // whatever single-channel image encodes the same decision. NEAREST, for the same
+        // reason depth/normal above are: this is a packed integer code, and blending one
+        // across a material boundary produces a value neither material asked for.
+        stage_.set().bind_image(7, outline_mask_sampler ? outline_mask : scene_color,
+                              outline_mask_sampler ? *outline_mask_sampler : nearest_sampler);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd, const PushConstants& params,
@@ -149,14 +166,15 @@ public:
     }
 
 private:
-    /// @brief Seven sampled images at bindings 0..6 (scene colour, depth, normal,
-    /// palette LUT, bloom, auto-exposure, grading LUT), plus the fragment push constants.
+    /// @brief Eight sampled images at bindings 0..7 (scene colour, depth, normal,
+    /// palette LUT, bloom, auto-exposure, grading LUT, outline mask), plus the fragment
+    /// push constants.
     static FullscreenStageDesc describe(const std::string& vert_spv, const std::string& frag_spv) {
         FullscreenStageDesc d;
         d.vert_spv = vert_spv;
         d.frag_spv = frag_spv;
         d.owned_sets.emplace_back();
-        for (uint32_t i = 0; i < 7; ++i) {
+        for (uint32_t i = 0; i < 8; ++i) {
             d.owned_sets[0].push_back({i, coopa::gfx::DescriptorType::CombinedImageSampler,
                                        coopa::gfx::ShaderStage::Fragment, 1});
         }

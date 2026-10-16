@@ -39,6 +39,19 @@ enum class AlphaMode {
 };
 
 /**
+ * @brief How a toon material's specular highlight is shaped -- see PBRMaterial::toon_specular.
+ *
+ * Every mode keeps the Cook-Torrance lobe's own position and width (so the highlight still
+ * grows with roughness and still takes its colour from F0/metallic); only its *edge* changes.
+ */
+enum class ToonSpecular {
+    Pbr,     /**< Untouched smooth Cook-Torrance highlight. */
+    Hard,    /**< One hard-edged step cut out of the GGX lobe. */
+    TwoStep, /**< A hard bright core plus a dimmer outer step. */
+    Off      /**< No specular at all -- diffuse bands only. */
+};
+
+/**
  * @struct PBRMaterial
  * @brief A mesh's surface parameters, as authored in scene YAML.
  *
@@ -122,6 +135,44 @@ struct PBRMaterial {
     /// backbone's snow layer, toyengine's gfx/surface/snow.glsl). False opts out -- emissive
     /// panels, interiors the occlusion map misses, anything snow must never whiten.
     bool        snow                       = true;
+
+    // --- Toon (cel) shading ---------------------------------------------------------------
+    // Layered ON TOP of this material's PBR inputs rather than replacing them: albedo,
+    // metallic, roughness, normal maps, the indirect/ambient term, screen-space AO and SSR all
+    // keep working exactly as they do for a PBR material, and the bands follow the real light
+    // visibility the scene produces (N.L folded with the cascaded shadow map's PCSS penumbra,
+    // the screen-space contact-shadow march and the cloud-shadow map). See
+    // assets/shaders/gfx/toon.glsl for the shading math and gpu_toon_code() for the encoding.
+    //
+    // DEFERRED (opaque G-buffer) PATH ONLY, the same restriction `emissive` above documents:
+    // the forward BLEND transparent pass and the probe-capture path don't carry these fields,
+    // so a BLEND material with toon_* set shades as plain PBR.
+
+    /// Number of discrete bands the light's visibility is quantized into. 0 or 1 (the default)
+    /// leaves this material fully PBR, and then every other toon_* field below except
+    /// toon_outline does nothing. Clamped to [2, 8] -- past that the steps stop reading as
+    /// bands at all.
+    int toon_bands = 0;
+
+    /// Shape of the specular highlight's edge. Meaningless unless toon_bands > 1.
+    ToonSpecular toon_specular = ToonSpecular::Pbr;
+
+    /// Fresnel-shaped silhouette accent, per light: it appears on the side the light is on,
+    /// takes that light's colour, and goes away in shadow. 0 disables it. Quantized to 0.25
+    /// steps and clamped to 1.75. Unrelated to the engine-wide `rim_strength` render setting,
+    /// which is a flat view-space accent applied to every surface.
+    float toon_rim = 0.0f;
+
+    /// How soft each band's edge is, as a share of one band's width: 0 is a hard cel
+    /// terminator, 1 would smear a band into its neighbour. Snapped to one of
+    /// {0.0, 0.15, 0.35, 0.70}. Edge antialiasing happens regardless of this value.
+    float toon_softness = 0.0f;
+
+    /// Draw the stylize pass's outline on this material. Needs the `outline_enabled` render
+    /// setting on and `outline_mode: toon`; with `outline_mode: all` every surface is outlined
+    /// and this flag is ignored. Independent of toon_bands, so a plain PBR material can be
+    /// outlined too.
+    bool toon_outline = false;
 
     /// Empty (the default) selects the stock surface shader for this material's
     /// alpha_mode. Otherwise the name of a shader registered
@@ -228,6 +279,56 @@ struct PBRMaterial {
      */
     glm::vec4 gpu_emissive() const {
         return glm::vec4(glm::max(emissive, glm::vec3(0.0f)) * glm::max(emissive_strength, 0.0f), 0.0f);
+    }
+
+    /** @brief Returns true when this material's diffuse is banded (cel-shaded). */
+    bool is_toon() const { return toon_bands > 1; }
+
+    /// The four band-edge softness values toon_softness snaps to. Mirrored by
+    /// GFX_TOON_SOFTNESS in assets/shaders/gfx/toon.glsl, which decodes the index this
+    /// table's position becomes -- the two must stay in step.
+    static constexpr float kToonSoftness[4] = {0.0f, 0.15f, 0.35f, 0.70f};
+
+    /**
+     * @brief Returns the toon settings packed as the GPU shader sees them.
+     *
+     * The deferred lighting pass sees only the G-buffer, so these per-material settings
+     * travel as one integer in the G-buffer's emissive alpha channel (a half float, which
+     * represents integers up to 2048 exactly). This is the single place the packing --
+     * and the quantization it imposes -- lives, for the same reason gpu_emissive() and
+     * gpu_alpha_cutoff() exist: the batching predicates then compare what actually reaches
+     * the GPU, so two materials differing only below a quantization step correctly merge
+     * into one batch.
+     *
+     * | bits | field                                                     |
+     * |------|-----------------------------------------------------------|
+     * | 0-2  | bands: 0 = PBR shading, else 1..7 for 2..8 bands           |
+     * | 3-4  | ToonSpecular                                              |
+     * | 5-7  | toon_rim / 0.25, 0..7                                     |
+     * | 8-9  | index into kToonSoftness                                  |
+     * | 10   | toon_outline                                              |
+     *
+     * @return 0 for a material that is neither banded nor outlined, which is what every
+     *         non-toon material writes and what the shader tests for to skip the toon path
+     *         entirely.
+     */
+    uint32_t gpu_toon_code() const {
+        // Outline is independent of banding: an un-banded PBR material may still be outlined.
+        uint32_t code = toon_outline ? (1u << 10) : 0u;
+        if (!is_toon()) return code;
+
+        code |= static_cast<uint32_t>(glm::clamp(toon_bands, 2, 8) - 1);
+        code |= (static_cast<uint32_t>(toon_specular) & 3u) << 3;
+        code |= static_cast<uint32_t>(glm::round(glm::clamp(toon_rim, 0.0f, 1.75f) / 0.25f)) << 5;
+
+        uint32_t soft = 0u;
+        float    best = 1e9f;
+        for (uint32_t i = 0; i < 4; ++i) {
+            const float d = glm::abs(glm::clamp(toon_softness, 0.0f, 1.0f) - kToonSoftness[i]);
+            if (d < best) { best = d; soft = i; }
+        }
+        code |= soft << 8;
+        return code;
     }
 };
 

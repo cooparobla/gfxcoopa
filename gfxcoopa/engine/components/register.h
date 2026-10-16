@@ -85,6 +85,17 @@ namespace components {
  * @param mode The raw `alpha_mode` string from scene YAML.
  * @return The decoded AlphaMode.
  */
+inline ToonSpecular parse_toon_specular_(const std::string& mode) {
+    if (mode == "hard") {
+        return ToonSpecular::Hard;
+    } else if (mode == "twostep" || mode == "two_step") {
+        return ToonSpecular::TwoStep;
+    } else if (mode == "off" || mode == "none") {
+        return ToonSpecular::Off;
+    }
+    return ToonSpecular::Pbr;
+}
+
 inline AlphaMode parse_alpha_mode_(const std::string& mode) {
     if (mode == "BLEND") {
         return AlphaMode::Blend;
@@ -199,6 +210,24 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
         material.displacement_scale = d.is_integer() ? static_cast<float>(d.get_value<int64_t>()) : d.get_value<float>();
     }
     if (mat_node.contains("snow") && mat_node.at("snow").is_boolean()) material.snow = mat_node.at("snow").get_value<bool>();
+
+    // Toon (cel) shading, layered on this material's PBR inputs -- see PBRMaterial's own
+    // toon_* docs for what each one means and gpu_toon_code() for how they reach the GPU.
+    // Parsed here for every renderer type, like refraction above, but consumed by the
+    // deferred opaque path only.
+    if (mat_node.contains("toon_bands")) {
+        const fkyaml::node& b = mat_node.at("toon_bands");
+        material.toon_bands = b.is_integer() ? static_cast<int>(b.get_value<int64_t>())
+                                             : static_cast<int>(b.get_value<float>());
+    }
+    if (mat_node.contains("toon_specular")) {
+        material.toon_specular = parse_toon_specular_(mat_node.at("toon_specular").get_value<std::string>());
+    }
+    if (mat_node.contains("toon_rim"))      material.toon_rim      = mat_node.at("toon_rim").get_value<float>();
+    if (mat_node.contains("toon_softness")) material.toon_softness = mat_node.at("toon_softness").get_value<float>();
+    if (mat_node.contains("toon_outline") && mat_node.at("toon_outline").is_boolean()) {
+        material.toon_outline = mat_node.at("toon_outline").get_value<bool>();
+    }
 
     // Derived surface shader (see PBRMaterial::shader's doc and the layered-shaders plan's
     // gfx/surface/*.glsl backbones). Registered-name validation happens later, once a

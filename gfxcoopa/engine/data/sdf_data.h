@@ -79,7 +79,11 @@ struct alignas(16) SdfRendererGPU {
     glm::vec4  bounds_max = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);    /**< World AABB max (xyz); w unused. */
     glm::vec4  albedo_alpha = glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);  /**< rgb = albedo, a = alpha. */
     glm::vec4  mr_ao_cutoff = glm::vec4(0.0f, 0.5f, 1.0f, 0.0f);  /**< x = metallic, y = roughness, z = ao, w = alpha_cutoff. */
-    glm::vec4  emissive     = glm::vec4(0.0f);                    /**< xyz = pre-multiplied emissive radiance, w reserved. */
+    glm::vec4  emissive     = glm::vec4(0.0f);                    /**< xyz = pre-multiplied emissive radiance,
+                                                                       w = PBRMaterial::gpu_toon_code(), which
+                                                                       sdf_gbuffer.frag forwards into the G-buffer's
+                                                                       emissive alpha exactly as the mesh backbone
+                                                                       does (0 for a plain PBR material). */
     glm::uvec4 range        = glm::uvec4(0, 0, 64, 0);            /**< x = first shape index, y = shape count, z = max_steps, w unused. */
     glm::vec4  march        = glm::vec4(0.001f, 0.002f, 0.0f, 0.0f); /**< x = surface_epsilon, y = normal_epsilon, zw unused. */
 };

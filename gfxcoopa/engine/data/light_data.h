@@ -271,6 +271,21 @@ struct alignas(16) LightUBO {
                                                          w = strength (0 = off). */
     glm::vec4 cloud_shadow_layer = glm::vec4(0.0f); /**< x = the layer's base height (world z),
                                                          y = its thickness, z = low-light fade 0..1, w unused. */
+
+    // --- Per-material toon shading, scene-wide tuning (appended last per the append-only rule) ---
+    // The per-material part (how many bands, which specular shape, how much rim) rides the
+    // G-buffer's emissive alpha as a packed code -- see PBRMaterial::gpu_toon_code(). These are
+    // the continuous knobs that would not survive that packing, shared by every band in the
+    // frame so a scene can retune the whole look without re-authoring materials. See toyengine's
+    // assets/shaders/gfx/toon.glsl. All zero (toon_params0.w = 0) makes every toon material
+    // shade as plain PBR, whatever its own code says.
+    glm::vec4 toon_params0 = glm::vec4(0.0f); /**< x = specular step threshold as a fraction of the
+                                                   GGX lobe's own peak, y = that step's edge width,
+                                                   z = rim falloff exponent, w = master strength
+                                                   (0 disables toon shading frame-wide). */
+    glm::vec4 toon_params1 = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f); /**< rgb = shadow tint the darkest
+                                                   bands are pulled toward (white = no tint),
+                                                   w = 1 bands point/spot distance falloff too. */
 };
 
 // Pins the offset of sky_zenith -- where a shader LightUBO prefix with no spot support
