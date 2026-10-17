@@ -241,6 +241,20 @@ struct MeshLod {
 };
 
 /**
+ * @struct LodRequest
+ * @brief One simplified level to build: how much of the mesh to keep, and when to draw it.
+ *
+ * The argument form of Mesh::simplify_levels(), for geometry built in code (a terrain chunk)
+ * rather than authored in YAML -- where the same three numbers are the `lods:` block's
+ * `ratio` / `screen_size` / `error`.
+ */
+struct LodRequest {
+    float ratio       = 0.5f;  ///< Triangles to keep, as a fraction of the full mesh.
+    float screen_size = 0.0f;  ///< Drawn while the object covers less of the screen's height than this.
+    float error       = 1.0f;  ///< Relative error cap; the simplifier stops early once it is reached.
+};
+
+/**
  * @struct MeshCpuData
  * @brief A mesh fully prepared on the CPU (Mesh::build_cpu), awaiting upload (Mesh::from_cpu).
  */
@@ -402,6 +416,11 @@ public:
      *        CommandBuffer::compute_to_draw_barrier() before the draws. The buffers stay
      *        host-visible, so update_vertices() (the CPU fallback) keeps working on the same
      *        mesh. Off by default: every existing mesh keeps its vertex-only usage.
+     * @param lods         The LOD table `indices` carries (Mesh::simplify_levels()), or null for a
+     *                     single-level mesh. Entry 0 must be the full mesh; every level indexes
+     *                     into the SAME buffers, so this adds no allocation of its own.
+     * @param cull_screen_size Below this projected height (a fraction of the screen's), no view
+     *                     draws the mesh at all; 0 never culls.
      * @return A new GPU-resident Mesh.
      * @throws std::runtime_error if either array is empty.
      */
@@ -410,7 +429,9 @@ public:
                             const std::vector<Vertex>&  vertices,
                             const std::vector<uint32_t>& indices,
                             uint32_t                    buffer_count = 1,
-                            bool                        compute_writable = false)
+                            bool                        compute_writable = false,
+                            const std::vector<MeshLod>* lods = nullptr,
+                            float                       cull_screen_size = 0.0f)
     {
         if (vertices.empty() || indices.empty()) {
             throw std::runtime_error("[Mesh] from_arrays() needs non-empty vertex and index arrays.");
@@ -441,10 +462,17 @@ public:
             bounds_max = glm::max(bounds_max, v.position);
         }
 
-        return Mesh(std::move(vbs), std::move(ib),
-                    static_cast<uint32_t>(indices.size()),
-                    static_cast<uint32_t>(vertices.size()),
-                    bounds_min, bounds_max);
+        // index_count() is LOD 0's, not the buffer's: the coarser levels live in the same index
+        // buffer behind it, and a draw that takes no level (Mesh::draw()) means the full mesh.
+        // Same split from_cpu() makes for an authored `lods:` block.
+        const bool has_lods = lods != nullptr && !lods->empty();
+        Mesh mesh(std::move(vbs), std::move(ib),
+                  has_lods ? (*lods)[0].index_count : static_cast<uint32_t>(indices.size()),
+                  static_cast<uint32_t>(vertices.size()),
+                  bounds_min, bounds_max);
+        if (has_lods) mesh.lods_ = *lods;
+        mesh.cull_screen_size_ = cull_screen_size;
+        return mesh;
     }
 
     /**
@@ -813,6 +841,221 @@ public:
         weld_and_optimize_(vertices, indices);
     }
 
+    /**
+     * @brief Appends simplified levels of `indices` to it, and returns the LOD table describing
+     *        them -- entry 0 being the full mesh the levels were built from.
+     *
+     * The code-built counterpart to a mesh file's `lods:` block, for geometry that never passes
+     * through build_cpu(): a terrain chunk meshed on a worker, a tool's generated mesh. Every
+     * level shares LOD 0's VERTICES and adds only its own indices, which is what makes switching
+     * level a change of index range rather than a buffer bind (see MeshLod) -- and what makes
+     * the levels cheap: a table of 0.4 / 0.15 / 0.05 costs 60% of LOD 0's indices, and no
+     * vertices at all.
+     *
+     * `vertex_lock` pins named vertices into every level. That is how a grid of independently
+     * simplified patches -- terrain chunks -- can sit at DIFFERENT levels side by side without
+     * cracking: lock the vertices on each patch's seam and every level still meets its
+     * neighbours on exactly those vertices. Note that this is NOT what `lock_border` does:
+     * meshopt's own border flag holds the *topological* boundary of the welded surface, which
+     * on a terrain chunk is not the seam (a chunk's edge wall carries the surface over the
+     * seam and on down, so the simplifier sees no boundary there and collapses it).
+     *
+     * A level that simplified to nothing, to no fewer triangles than the level before it, or to
+     * one that LOST a locked vertex is dropped rather than stored -- the first two would cost
+     * memory and draw the same geometry, the third would open the seam the lock was there to
+     * protect (a lock stops a vertex moving, not its last triangle collapsing out from under
+     * it). So every level this returns carries all of `vertex_lock`'s vertices.
+     *
+     * @param vertices    LOD 0's vertices; read for positions and normals, never modified.
+     * @param indices     In: LOD 0's indices. Out: those, followed by each level's.
+     * @param levels      What to build, coarsening in order (`screen_size` decreasing).
+     * @param lock_border Also hold the surface's topological boundary (meshopt's own flag).
+     * @param vertex_lock One flag per entry of `vertices`, 1 pinning that vertex; null locks none.
+     * @return The LOD table, [0] being the full mesh. Pass it to from_arrays().
+     */
+    static std::vector<MeshLod> simplify_levels(const std::vector<Vertex>& vertices,
+                                                std::vector<uint32_t>& indices,
+                                                const std::vector<LodRequest>& levels,
+                                                bool lock_border = false,
+                                                const std::vector<uint8_t>* vertex_lock = nullptr) {
+        const uint32_t base_count = static_cast<uint32_t>(indices.size());
+        std::vector<MeshLod> table{MeshLod{0u, base_count, 0, 0.0f}};
+        if (vertices.empty() || base_count < 3 || levels.empty()) return table;
+
+        const std::vector<uint32_t> base(indices.begin(), indices.begin() + base_count);
+        const SimplifyTopology topo(vertices, base);
+        const std::vector<unsigned char> locks = topo.compact_locks(vertex_lock);
+        for (const LodRequest& level : levels) {
+            if (level.ratio <= 0.0f || level.ratio >= 1.0f) continue;
+            const std::vector<uint32_t> simplified =
+                topo.simplify(0u, base_count, level.ratio, level.error, lock_border,
+                              locks.empty() ? nullptr : locks.data());
+            if (simplified.size() < 3 || simplified.size() >= table.back().index_count) continue;
+            // A level that lost a locked vertex is no level: it is a hole where something else
+            // was going to meet this mesh. Dropping it leaves the next-finer level to cover
+            // that range of sizes, which is a few more triangles and no seam.
+            if (!topo.locks_survived(simplified, locks)) continue;
+            table.push_back(MeshLod{static_cast<uint32_t>(indices.size()),
+                                    static_cast<uint32_t>(simplified.size()), 0, level.screen_size});
+            indices.insert(indices.end(), simplified.begin(), simplified.end());
+        }
+        return table;
+    }
+
+private:
+    /**
+     * @struct SimplifyTopology
+     * @brief The position-only view of a mesh that edge-collapse simplification needs, built
+     *        once and reused by every level.
+     *
+     * A hard-edged mesh (a flat-shaded sphere, a cube, a terrace of tiles) welds into islands --
+     * its corners differ in normal, so no two triangles share a vertex -- and a simplifier
+     * cannot collapse an island's border, which is every edge there is. So the mesh is
+     * presented to it by POSITION: a shadow index buffer points every corner at one canonical
+     * vertex per position, joining the islands into one surface, and the simplifier is handed
+     * ONLY the distinct positions, compacted. Compaction matters as much as the shadow buffer:
+     * an array that still holds the unreferenced split copies of each position reads to
+     * meshopt_simplify as a pile of complex seams and locks nearly every vertex.
+     *
+     * Coming back, each simplified triangle picks, for every corner, the real vertex at that
+     * position whose normal best matches the triangle's own -- so a corner shared by a top and
+     * a wall keeps the right normal, UV chart and hard-edge side for the face it ended up in.
+     */
+    struct SimplifyTopology {
+        const std::vector<Vertex>&         vertices;
+        std::size_t                        vertex_count = 0;
+        std::vector<uint32_t>              compact_indices;    ///< One per base index.
+        std::vector<uint32_t>              canonical_of;       ///< Compact id -> a vertex at that position.
+        std::vector<glm::vec3>             compact_positions;  ///< The distinct positions.
+        std::vector<std::vector<uint32_t>> at_position;        ///< Canonical vertex -> every vertex there.
+        std::vector<uint32_t>              canonical_at;       ///< Vertex -> the canonical vertex at its position.
+
+        SimplifyTopology(const std::vector<Vertex>& verts, const std::vector<uint32_t>& base)
+            : vertices(verts), vertex_count(verts.size()) {
+            const uint32_t base_count = static_cast<uint32_t>(base.size());
+            if (vertex_count == 0 || base_count == 0) return;
+            std::vector<uint32_t> shadow(base_count);
+            meshopt_generateShadowIndexBuffer(shadow.data(), base.data(), base_count,
+                                              &verts[0].position.x, vertex_count,
+                                              sizeof(glm::vec3), sizeof(Vertex));
+            at_position.assign(vertex_count, {});
+            canonical_at.assign(vertex_count, UINT32_MAX);
+            std::vector<uint8_t> seen(vertex_count, 0);
+            for (uint32_t k = 0; k < base_count; ++k) {
+                const uint32_t v = base[k];
+                canonical_at[v] = shadow[k];
+                if (seen[v]) continue;
+                seen[v] = 1;
+                at_position[shadow[k]].push_back(v);
+            }
+            std::vector<uint32_t> compact_of(vertex_count, UINT32_MAX);
+            compact_indices.resize(base_count);
+            for (uint32_t k = 0; k < base_count; ++k) {
+                const uint32_t v = shadow[k];
+                if (compact_of[v] == UINT32_MAX) {
+                    compact_of[v] = static_cast<uint32_t>(compact_positions.size());
+                    compact_positions.push_back(verts[v].position);
+                    canonical_of.push_back(v);
+                }
+                compact_indices[k] = compact_of[v];
+            }
+        }
+
+        /** @brief Every corner of `tri_indices` moved to the vertex whose normal suits its triangle. */
+        void resolve_corners(std::vector<uint32_t>& tri_indices) const {
+            for (std::size_t t = 0; t + 2 < tri_indices.size(); t += 3) {
+                const glm::vec3& p0 = vertices[tri_indices[t]].position;
+                const glm::vec3& p1 = vertices[tri_indices[t + 1]].position;
+                const glm::vec3& p2 = vertices[tri_indices[t + 2]].position;
+                glm::vec3 n = glm::cross(p1 - p0, p2 - p0);
+                const float len = glm::length(n);
+                if (len > 0.0f) n /= len;
+                for (int c = 0; c < 3; ++c) {
+                    const auto& candidates = at_position[tri_indices[t + c]];
+                    uint32_t best = tri_indices[t + c];
+                    float best_dot = -2.0f;
+                    for (uint32_t v : candidates) {
+                        const float d = glm::dot(vertices[v].normal, n);
+                        if (d > best_dot) { best_dot = d; best = v; }
+                    }
+                    tri_indices[t + c] = best;
+                }
+            }
+        }
+
+        /**
+         * @brief A per-POSITION lock array from a per-vertex one: a position is pinned when any
+         *        of the vertices sharing it is. Empty when nothing is locked.
+         *
+         * The simplifier sees the compacted positions, not the real vertices, and its contract
+         * asks for one consistent flag per position -- which is exactly what collapsing the
+         * split copies of a position into one entry gives.
+         */
+        std::vector<unsigned char> compact_locks(const std::vector<uint8_t>* per_vertex) const {
+            if (per_vertex == nullptr || per_vertex->empty() || canonical_of.empty()) return {};
+            std::vector<unsigned char> locks(canonical_of.size(), 0);
+            for (std::size_t c = 0; c < canonical_of.size(); ++c) {
+                for (uint32_t v : at_position[canonical_of[c]]) {
+                    if (v < per_vertex->size() && (*per_vertex)[v]) { locks[c] = 1; break; }
+                }
+            }
+            return locks;
+        }
+
+        /**
+         * @brief Whether every locked position still has a vertex in `level_indices`.
+         *
+         * A lock stops the simplifier MOVING a vertex; it does not stop the last triangle
+         * touching one from collapsing away under it, which at aggressive targets does happen
+         * and would leave a hole exactly where the lock was protecting a seam. Cheaper to
+         * detect than to repair -- see simplify_levels(), which drops such a level.
+         */
+        bool locks_survived(const std::vector<uint32_t>& level_indices,
+                            const std::vector<unsigned char>& compact_lock) const {
+            if (compact_lock.empty()) return true;
+            std::vector<uint8_t> present(vertex_count, 0);
+            for (uint32_t idx : level_indices) {
+                const uint32_t canonical = idx < canonical_at.size() ? canonical_at[idx] : UINT32_MAX;
+                if (canonical != UINT32_MAX) present[canonical] = 1;
+            }
+            for (std::size_t c = 0; c < compact_lock.size(); ++c) {
+                if (compact_lock[c] && !present[canonical_of[c]]) return false;
+            }
+            return true;
+        }
+
+        /**
+         * @brief One level of `[first_index, first_index + index_count)` of the base indices,
+         *        simplified to about `ratio` of its triangles, in real vertex indices.
+         */
+        std::vector<uint32_t> simplify(uint32_t first_index, uint32_t index_count,
+                                       float ratio, float error, bool lock_border,
+                                       const unsigned char* compact_lock = nullptr) const {
+            if (index_count < 3 || compact_positions.empty()) return {};
+            const std::size_t target = std::max<std::size_t>(3, static_cast<std::size_t>(index_count * ratio) / 3 * 3);
+            std::vector<uint32_t> simplified(index_count);
+            float result_error = 0.0f;
+            const unsigned int options = lock_border ? meshopt_SimplifyLockBorder : 0u;
+            // The lock array is the only reason for the WithAttributes entry point here: with no
+            // attributes and no weights it is meshopt_simplify, plus the per-vertex pins.
+            const std::size_t count = compact_lock != nullptr
+                ? meshopt_simplifyWithAttributes(
+                      simplified.data(), compact_indices.data() + first_index, index_count,
+                      &compact_positions[0].x, compact_positions.size(), sizeof(glm::vec3),
+                      nullptr, 0, nullptr, 0, compact_lock, target, error, options, &result_error)
+                : meshopt_simplify(
+                      simplified.data(), compact_indices.data() + first_index, index_count,
+                      &compact_positions[0].x, compact_positions.size(), sizeof(glm::vec3),
+                      target, error, options, &result_error);
+            simplified.resize(count);
+            if (count == 0) return simplified;
+            for (uint32_t& idx : simplified) idx = canonical_of[idx];   // back to real vertices
+            resolve_corners(simplified);
+            meshopt_optimizeVertexCache(simplified.data(), simplified.data(), count, vertex_count);
+            return simplified;
+        }
+    };
+
 private:
     static void weld_and_optimize_(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices,
                                    const std::vector<MeshPart>& parts = {}) {
@@ -851,69 +1094,9 @@ private:
         const std::vector<MeshPart> base_parts = out.lods[0].parts.empty()
             ? std::vector<MeshPart>{MeshPart{0u, base_count}} : out.lods[0].parts;
         const uint32_t base_slot_count = static_cast<uint32_t>(base_parts.size());
-        const std::vector<uint32_t> base(out.indices.begin(), out.indices.begin() + base_count);
-        const size_t base_vertices = out.vertices.size();
-
-        // Simplify on POSITION topology. A hard-edged mesh (a flat-shaded sphere, a cube) welds
-        // into islands -- its corners differ in normal, so no two triangles share a vertex --
-        // and an edge-collapse simplifier cannot collapse an island's border. The shadow index
-        // buffer points every corner at the first vertex with the same position, joining the
-        // islands into one surface for the simplifier.
-        std::vector<uint32_t> shadow(base_count);
-        meshopt_generateShadowIndexBuffer(shadow.data(), base.data(), base_count,
-                                          &out.vertices[0].position.x, base_vertices,
-                                          sizeof(glm::vec3), sizeof(Vertex));
-        // ...and the way back: every real vertex sharing each canonical position, so a
-        // simplified triangle's corner can pick the one whose normal (and so whose UV chart
-        // and hard-edge side) suits that triangle best.
-        std::vector<std::vector<uint32_t>> at_position(base_vertices);
-        {
-            std::vector<uint8_t> seen(base_vertices, 0);
-            for (uint32_t k = 0; k < base_count; ++k) {
-                const uint32_t v = base[k];
-                if (seen[v]) continue;
-                seen[v] = 1;
-                at_position[shadow[k]].push_back(v);
-            }
-        }
-        // The simplifier is given ONLY the distinct positions, compacted. meshopt_simplify does
-        // its own position matching too, and a vertex array that still holds unreferenced
-        // copies of each position (corners split by normal/UV/tangent) reads to it as a pile
-        // of complex seams and locks nearly every vertex -- it simplifies nothing.
-        std::vector<uint32_t>  compact_of(base_vertices, UINT32_MAX);
-        std::vector<uint32_t>  canonical_of;          // compact id -> canonical vertex
-        std::vector<glm::vec3> compact_positions;
-        std::vector<uint32_t>  compact_indices(base_count);
-        for (uint32_t k = 0; k < base_count; ++k) {
-            const uint32_t v = shadow[k];
-            if (compact_of[v] == UINT32_MAX) {
-                compact_of[v] = static_cast<uint32_t>(compact_positions.size());
-                compact_positions.push_back(out.vertices[v].position);
-                canonical_of.push_back(v);
-            }
-            compact_indices[k] = compact_of[v];
-        }
-
-        auto resolve_corners = [&](std::vector<uint32_t>& tri_indices) {
-            for (size_t t = 0; t + 2 < tri_indices.size(); t += 3) {
-                const glm::vec3& p0 = out.vertices[tri_indices[t]].position;
-                const glm::vec3& p1 = out.vertices[tri_indices[t + 1]].position;
-                const glm::vec3& p2 = out.vertices[tri_indices[t + 2]].position;
-                glm::vec3 n = glm::cross(p1 - p0, p2 - p0);
-                const float len = glm::length(n);
-                if (len > 0.0f) n /= len;
-                for (int c = 0; c < 3; ++c) {
-                    const auto& candidates = at_position[tri_indices[t + c]];
-                    uint32_t best = tri_indices[t + c];
-                    float best_dot = -2.0f;
-                    for (uint32_t v : candidates) {
-                        const float d = glm::dot(out.vertices[v].normal, n);
-                        if (d > best_dot) { best_dot = d; best = v; }
-                    }
-                    tri_indices[t + c] = best;
-                }
-            }
-        };
+        // Built from LOD 0 once, and reused by every simplified level below.
+        const SimplifyTopology topo(out.vertices,
+                                    std::vector<uint32_t>(out.indices.begin(), out.indices.begin() + base_count));
 
         for (const auto& level : lods) {
             const float screen_size = level.contains("screen_size")
@@ -958,20 +1141,13 @@ private:
                 // part's border when there are several so neighbouring parts stay stitched.
                 std::vector<uint32_t> level_indices;
                 std::vector<MeshPart> level_parts;
-                const unsigned int options = base_parts.size() > 1 ? meshopt_SimplifyLockBorder : 0u;
+                const bool lock_border = base_parts.size() > 1;
                 for (const MeshPart& bp : base_parts) {
                     const uint32_t start = static_cast<uint32_t>(level_indices.size());
                     if (bp.index_count < 3) { level_parts.push_back({lod.first_index + start, 0u}); continue; }
-                    const size_t target = std::max<size_t>(3, static_cast<size_t>(bp.index_count * ratio) / 3 * 3);
-                    std::vector<uint32_t> simplified(bp.index_count);
-                    float result_error = 0.0f;
-                    size_t count = meshopt_simplify(simplified.data(), compact_indices.data() + bp.first_index, bp.index_count,
-                                                    &compact_positions[0].x, compact_positions.size(),
-                                                    sizeof(glm::vec3), target, error, options, &result_error);
-                    simplified.resize(count);
-                    for (uint32_t& idx : simplified) idx = canonical_of[idx];   // back to real vertices
-                    resolve_corners(simplified);
-                    if (count > 0) meshopt_optimizeVertexCache(simplified.data(), simplified.data(), count, base_vertices);
+                    const std::vector<uint32_t> simplified =
+                        topo.simplify(bp.first_index, bp.index_count, ratio, error, lock_border);
+                    const size_t count = simplified.size();
                     level_indices.insert(level_indices.end(), simplified.begin(), simplified.end());
                     level_parts.push_back({lod.first_index + start, static_cast<uint32_t>(count)});
                 }
