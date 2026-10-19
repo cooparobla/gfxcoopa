@@ -58,13 +58,14 @@ public:
      * GLFW_CLIENT_API is set to GLFW_NO_API so no implicit OpenGL context
      * is created. The window is non-resizable unless `resizable` is true.
      *
-     * A `visible = false` window is never mapped by the window system, so it
-     * can neither appear on screen nor take input focus -- but it still owns a
+     * A `visible = false` window is not mapped by the window system, so it
+     * neither appears on screen nor takes input focus -- but it still owns a
      * real, correctly-sized surface that Vulkan presents to normally, which is
      * what makes it the right shape for an automated render test: the frames
-     * are genuine, and nothing interrupts whoever is using the desktop. There
-     * is no way to un-hide it afterwards; construct it visible if you want to
-     * see it.
+     * are genuine, and nothing interrupts whoever is using the desktop. It
+     * stays unmapped until show() is called, which is also how an app maps a
+     * window only once it has a frame to show in it (see
+     * gfx::app::ContextConfig::show_when_ready).
      *
      * @param title Window title bar string.
      * @param width Window width in pixels.
@@ -200,6 +201,21 @@ public:
      * Must be called once per frame on the main thread.
      */
     void poll_events() { glfwPollEvents(); }
+
+    /**
+     * @brief Maps a window created with `visible = false`, and focuses it.
+     *
+     * Presenting a frame BEFORE this call is what keeps a newly mapped window from showing
+     * whatever the window system had behind it: the surface already holds an image when the
+     * compositor first samples it.
+     */
+    void show() {
+        glfwShowWindow(window_);
+        visible_ = true;
+    }
+
+    /** @brief True once the window is mapped (false for a headless run, or before show()). */
+    bool visible() const { return visible_; }
 
     /**
      * @brief Blocks until at least one OS event arrives, then processes it.

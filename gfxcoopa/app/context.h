@@ -67,6 +67,17 @@ struct ContextConfig {
      * still using.
      */
     bool        visible    = true;
+    /**
+     * @brief True creates a `visible` window UNMAPPED, for Context::show_window() to map once
+     * the caller has presented something into it.
+     *
+     * A window the window system maps before anything has been presented shows whatever was
+     * on that part of the screen before -- the whole duration of an app's startup, which for a
+     * renderer is pipeline creation plus asset loading. An app that paints a loading screen
+     * first sets this and calls show_window() right after its first present. No effect when
+     * `visible` is false: that window is never mapped at all.
+     */
+    bool        show_when_ready = false;
     bool        vsync      = true;
     bool        validation = true;
     Format      depth_format = Format::D32_Sfloat;
@@ -151,7 +162,9 @@ public:
     explicit Context(const ContextConfig& config = {})
         : config_(config)
     {
-        window_   = std::make_unique<presentation::Window>(config.title, config.width, config.height, config.resizable, config.visible);
+        window_   = std::make_unique<presentation::Window>(config.title, config.width, config.height,
+                                                          config.resizable,
+                                                          config.visible && !config.show_when_ready);
         instance_ = std::make_unique<core::Instance>(config.title, config.validation);
         surface_  = std::make_unique<core::Surface>(*instance_, *window_);
         device_   = std::make_unique<core::Device>(*instance_, *surface_);
@@ -220,6 +233,17 @@ public:
 
     // --- Loop driving ---
     bool should_close() const { return window_->should_close(); }
+
+    /**
+     * @brief Maps a window held back by ContextConfig::show_when_ready.
+     *
+     * A no-op for a window that is already mapped, and for an invisible (headless) one -- so a
+     * caller can call it unconditionally once its first frame is on the surface.
+     */
+    void show_window() {
+        if (!config_.visible || window_->visible()) return;
+        window_->show();
+    }
 
     /// @brief Clears per-frame input state, polls OS events, and advances
     /// the frame timer. Call once per iteration before frame().
