@@ -505,7 +505,10 @@ public:
         barrier.dstAccessMask       = dst.access;
         barrier.subresourceRange.aspectMask     = detail::aspect_mask_for(fmt);
         barrier.subresourceRange.baseMipLevel   = 0;
-        barrier.subresourceRange.levelCount     = 1;
+        // Every level together: the Image tracks ONE usage for the whole image, so a partial
+        // transition would make that record a lie. Code that stages levels through different
+        // layouts (mip generation) records raw barriers and calls mark_transitioned() once done.
+        barrier.subresourceRange.levelCount     = image.mip_levels();
         barrier.subresourceRange.baseArrayLayer = 0;
         barrier.subresourceRange.layerCount     = 1;
 

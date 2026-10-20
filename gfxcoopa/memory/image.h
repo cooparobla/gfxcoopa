@@ -42,8 +42,9 @@ namespace memory {
  * Wraps VkImage + VmaAllocation + VkImageView into a single object, and
  * tracks the TextureUsage it was last transitioned to (see current_usage()).
  *
- * Single-mip, single-layer, 2D only. Mip chains, cube faces and array layers
- * are built directly against Vulkan by the engine targets that need them.
+ * Single-layer 2D, with an optional mip chain (`mip_levels` at construction; the view covers
+ * every level and transition() moves them together). Cube faces and array layers are built
+ * directly against Vulkan by the engine targets that need them.
  */
 class Image {
 public:
@@ -67,9 +68,11 @@ public:
           VkImageUsageFlags  usage,
           VkImageAspectFlags aspect_mask  = VK_IMAGE_ASPECT_COLOR_BIT,
           VmaMemoryUsage     memory_usage = VMA_MEMORY_USAGE_AUTO,
-          VkSampleCountFlagBits samples   = VK_SAMPLE_COUNT_1_BIT)
+          VkSampleCountFlagBits samples   = VK_SAMPLE_COUNT_1_BIT,
+          uint32_t           mip_levels   = 1)
         : device_(device), allocator_(allocator.handle()),
-          width_(width), height_(height), format_(format)
+          width_(width), height_(height), format_(format),
+          mip_levels_(mip_levels > 0 ? mip_levels : 1)
     {
         create_image(usage, memory_usage, samples);
         create_view(aspect_mask);
@@ -156,6 +159,21 @@ public:
      */
     uint32_t height() const { return height_; }
 
+    /** @brief Number of mip levels (1 for the single-mip common case). */
+    uint32_t mip_levels() const { return mip_levels_; }
+
+    /**
+     * @brief The full mip chain length for a `width` x `height` image: every level down to 1x1.
+     * @param width  Level-0 width in pixels.
+     * @param height Level-0 height in pixels.
+     * @return floor(log2(max(width, height))) + 1.
+     */
+    static uint32_t full_mip_count(uint32_t width, uint32_t height) {
+        uint32_t levels = 1;
+        for (uint32_t extent = width > height ? width : height; extent > 1; extent >>= 1) ++levels;
+        return levels;
+    }
+
     /**
      * @brief Returns the TextureUsage this image was last transitioned to,
      * or TextureUsage::Undefined if it has never been transitioned.
@@ -199,7 +217,7 @@ private:
         image_info.extent.width  = width_;
         image_info.extent.height = height_;
         image_info.extent.depth  = 1;
-        image_info.mipLevels     = 1;
+        image_info.mipLevels     = mip_levels_;
         image_info.arrayLayers   = 1;
         image_info.format        = format_;
         image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
@@ -231,7 +249,7 @@ private:
         view_info.format                          = format_;
         view_info.subresourceRange.aspectMask     = aspect_mask;
         view_info.subresourceRange.baseMipLevel   = 0;
-        view_info.subresourceRange.levelCount     = 1;
+        view_info.subresourceRange.levelCount     = mip_levels_;
         view_info.subresourceRange.baseArrayLayer = 0;
         view_info.subresourceRange.layerCount     = 1;
 
@@ -245,6 +263,7 @@ private:
     VkImageView   view_      = VK_NULL_HANDLE;    /**< Image view covering the full image. */
     uint32_t      width_     = 0;                 /**< Image width in pixels. */
     uint32_t      height_    = 0;                 /**< Image height in pixels. */
+    uint32_t      mip_levels_ = 1;                /**< Mip chain length; 1 = no chain. */
     VkFormat      format_    = VK_FORMAT_UNDEFINED;/**< Pixel format. */
     TextureUsage  current_usage_ = TextureUsage::Undefined; /**< See current_usage(). */
 };

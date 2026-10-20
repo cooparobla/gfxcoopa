@@ -57,7 +57,8 @@ public:
             VkSamplerAddressMode address_mode = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
             float max_lod = 0.0f,
             VkSamplerMipmapMode mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-            VkCompareOp compare_op = VK_COMPARE_OP_NEVER)
+            VkCompareOp compare_op = VK_COMPARE_OP_NEVER,
+            float max_anisotropy = 0.0f)
         : device_(device)
     {
         VkSamplerCreateInfo info{};
@@ -69,7 +70,8 @@ public:
         info.addressModeV            = address_mode;
         info.addressModeW            = address_mode;
         info.mipLodBias              = 0.0f;
-        info.anisotropyEnable        = VK_FALSE;
+        info.anisotropyEnable        = max_anisotropy > 0.0f ? VK_TRUE : VK_FALSE;
+        info.maxAnisotropy           = max_anisotropy > 0.0f ? max_anisotropy : 1.0f;
         info.compareEnable           = compare_op != VK_COMPARE_OP_NEVER ? VK_TRUE : VK_FALSE;
         info.compareOp               = compare_op;
         info.minLod                  = 0.0f;
@@ -91,13 +93,17 @@ public:
     // The delegated ctor takes a single `filter` for both min and mag, so desc.min is
     // not forwarded. No SamplerDesc preset sets min != mag; a sampler that needs them to
     // differ has to use the raw constructor above.
-    Sampler(core::Device& device, const SamplerDesc& desc)
+    // max_lod is a separate parameter rather than a SamplerDesc field because only the code
+    // that created the image knows its mip count; a desc is authored where only the FILTERING
+    // intent is known (SamplerDesc::mipmapped).
+    Sampler(core::Device& device, const SamplerDesc& desc, float max_lod = 0.0f)
         : Sampler(device,
                   detail::to_vk(desc.mag),
                   detail::to_vk(desc.address),
-                  0.0f,
+                  max_lod,
                   detail::to_vk(desc.mipmap),
-                  detail::to_vk(desc.compare))
+                  detail::to_vk(desc.compare),
+                  desc.max_anisotropy)
     {}
 
     ~Sampler() {

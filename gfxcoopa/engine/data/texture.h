@@ -110,11 +110,16 @@ public:
                           const SamplerDesc& sampler_desc = SamplerDesc::linear_repeat())
     {
         uint32_t bytes_per_pixel = format_byte_size(format);
-        auto image = memory::upload_image_2d(device, allocator, cmd_pool, pixels, width, height,
-                                             detail::to_vk(format), bytes_per_pixel);
+        // sampler_desc.mipmapped: the image gets a generated full mip chain and a sampler whose
+        // LOD range covers it (see SamplerDesc::mipmapped); otherwise the single-mip upload
+        // every pre-existing texture uses, byte for byte.
+        auto image = sampler_desc.mipmapped
+            ? memory::upload_image_2d_mipped(device, allocator, cmd_pool, pixels, width, height,
+                                             format, bytes_per_pixel)
+            : memory::upload_image_2d(device, allocator, cmd_pool, pixels, width, height,
+                                      detail::to_vk(format), bytes_per_pixel);
         auto sampler = std::make_unique<util::Sampler>(
-            device, detail::to_vk(sampler_desc.min), detail::to_vk(sampler_desc.address),
-            0.0f, detail::to_vk(sampler_desc.mipmap), detail::to_vk(sampler_desc.compare));
+            device, sampler_desc, static_cast<float>(image->mip_levels()));
         return Texture(std::move(image), std::move(sampler));
     }
 
