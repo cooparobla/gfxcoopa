@@ -14,6 +14,7 @@
 #define COOPA_GFX_PRESENTATION_RENDERER_H
 
 #include <volk/volk.h>
+#include <chrono>
 #include <vector>
 #include <stdexcept>
 #include <functional>
@@ -102,6 +103,19 @@ public:
      * @return Current frame index.
      */
     uint32_t current_frame() const { return current_frame_; }
+
+    /**
+     * @brief Milliseconds the last frame's vkQueueSubmit call took.
+     *
+     * Together with last_present_ms() this splits the frame's submit half, which a profile
+     * otherwise shows as one number: a queue submit that blocks is the driver, while a present
+     * that blocks is the presentation engine not retiring images (a compositor that has stopped
+     * consuming the window's buffers, so the driver's present queue is full).
+     */
+    double last_submit_ms() const { return last_submit_ms_; }
+
+    /** @brief Milliseconds the last frame's vkQueuePresentKHR call took. See last_submit_ms(). */
+    double last_present_ms() const { return last_present_ms_; }
 
     /**
      * @brief Blocks until the command buffer previously submitted for the CURRENT frame slot
@@ -220,8 +234,12 @@ public:
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores    = signal_semaphores;
 
+        const auto submit_call_start = std::chrono::steady_clock::now();
         GFX_VK_CHECK(vkQueueSubmit(device_.graphics_queue(), 1, &submit_info,
                                    in_flight_fences_[current_frame_]->handle()));
+        const auto present_call_start = std::chrono::steady_clock::now();
+        last_submit_ms_ = std::chrono::duration<double, std::milli>(present_call_start -
+                                                                    submit_call_start).count();
 
         // Present.
         VkSwapchainKHR swapchains[] = { swapchain_.handle() };
@@ -234,6 +252,8 @@ public:
         present_info.pImageIndices      = &image_index;
 
         result = vkQueuePresentKHR(device_.present_queue(), &present_info);
+        last_present_ms_ = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - present_call_start).count();
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
             handle_resize(on_resize);
         } else if (result != VK_SUCCESS) {
@@ -419,6 +439,8 @@ private:
     std::vector<VkFence>                                images_in_flight_;                 /**< Non-owning: aliases the in_flight_fences_ handle that last wrote each swapchain image. Indexed by image_index. */
     std::vector<VkCommandBuffer>                        raw_cmd_buffers_;                  /**< Command buffers (allocated from cmd_pool_). */
     uint32_t                                            current_frame_ = 0;                /**< Current frame-in-flight index. */
+    double                                              last_submit_ms_ = 0.0;             /**< See last_submit_ms(). */
+    double                                              last_present_ms_ = 0.0;            /**< See last_present_ms(). */
     std::function<void()>                               resize_handler_;                   /**< See set_resize_handler(). */
 };
 

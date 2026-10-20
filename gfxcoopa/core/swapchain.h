@@ -15,8 +15,11 @@
 #include <volk/volk.h>
 #include <vector>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/core/surface.h>
@@ -174,6 +177,19 @@ private:
         image_format_ = surface_format.format;
         extent_       = extent;
 
+        // Once per process, not per resize: which mode a run got decides whether presenting can
+        // block the frame loop at all, and a run that hitches is the first thing to check.
+        static bool mode_logged = false;
+        if (!mode_logged) {
+            mode_logged = true;
+            const char* name = present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate"
+                             : present_mode == VK_PRESENT_MODE_MAILBOX_KHR   ? "mailbox"
+                             : present_mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "fifo_relaxed"
+                                                                               : "fifo";
+            std::printf("[gfxcoopa] present: %s, %u images (vsync %s)\n", name, actual_count,
+                        vsync_ ? "on" : "off");
+        }
+
         create_image_views();
     }
 
@@ -242,17 +258,38 @@ private:
     /**
      * @brief Selects the preferred present mode.
      *
-     * When vsync is false, prefers MAILBOX (no tearing, uncapped frame rate).
-     * Falls back to FIFO (guaranteed by spec to always be available).
+     * `vsync: false` means IMMEDIATE: frames go to the presentation engine as they finish,
+     * which is the only mode that neither paces the frame rate nor blocks the thread that
+     * presents. MAILBOX is the fallback where IMMEDIATE is unsupported -- it is tear-free but
+     * still vblank-synced, so it caps at the refresh rate, and on a compositing X11 desktop its
+     * `vkQueuePresentKHR` can block for several refreshes at a time (~60 ms here, once per
+     * mouse press; measured on an RTX 4070, driver-side, with the GPU 3 ms into a 16 ms frame).
+     * FIFO is vsync proper, guaranteed by the spec to exist, and shows the same blocking.
+     *
+     * `GFX_PRESENT_MODE=immediate|mailbox|fifo` forces one, for measuring what a given window
+     * system does with each: a present that blocks for tens of milliseconds while
+     * vkQueueSubmit returns instantly is the presentation engine, not the renderer (see
+     * presentation::Renderer::last_present_ms()).
      *
      * @param modes Available present modes.
      * @return The chosen VkPresentModeKHR.
      */
     VkPresentModeKHR choose_present_mode(const std::vector<VkPresentModeKHR>& modes) const {
+        const auto has = [&modes](VkPresentModeKHR m) {
+            return std::find(modes.begin(), modes.end(), m) != modes.end();
+        };
+        const char* forced = std::getenv("GFX_PRESENT_MODE");
+        const std::string want = forced != nullptr ? std::string(forced) : std::string();
+        if (want == "fifo") return VK_PRESENT_MODE_FIFO_KHR;
+        if (want == "immediate" && has(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
+            return VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
+        if (want == "mailbox" && has(VK_PRESENT_MODE_MAILBOX_KHR)) {
+            return VK_PRESENT_MODE_MAILBOX_KHR;
+        }
         if (!vsync_) {
-            for (auto mode : modes) {
-                if (mode == VK_PRESENT_MODE_MAILBOX_KHR) return mode;
-            }
+            if (has(VK_PRESENT_MODE_IMMEDIATE_KHR)) return VK_PRESENT_MODE_IMMEDIATE_KHR;
+            if (has(VK_PRESENT_MODE_MAILBOX_KHR)) return VK_PRESENT_MODE_MAILBOX_KHR;
         }
         return VK_PRESENT_MODE_FIFO_KHR;
     }
