@@ -89,8 +89,11 @@ public:
      *                       the low internal render resolution.
      * @param out_height     Output height in pixels.
      * @param source         The low-res image to read (e.g. post_target_'s color view).
-     * @param nearest_sampler Sampler the horizontal stage uses on `source` -- must be
-     *                       NEAREST to fold the upscale in for free (see the file doc).
+     * @param source_sampler Sampler the horizontal stage uses on `source`. That stage reads
+     *                       `source` at DESTINATION resolution, so it is the scene-to-display
+     *                       resample: pass NEAREST only when the destination is at least as
+     *                       large as the source (folding a crisp upscale in for free), and
+     *                       LINEAR when it is smaller, where NEAREST decimates and flickers.
      * @param vert_spv       Fullscreen-triangle vertex shader.
      * @param frag_spv       tilt_shift.frag.
      */
@@ -98,7 +101,7 @@ public:
                   coopa::gfx::memory::Allocator& allocator,
                   uint32_t out_width, uint32_t out_height,
                   coopa::gfx::TextureView source,
-                  const coopa::gfx::engine::util::Sampler& nearest_sampler,
+                  const coopa::gfx::engine::util::Sampler& source_sampler,
                   const std::string& vert_spv,
                   const std::string& frag_spv)
         : out_width_(out_width), out_height_(out_height),
@@ -122,12 +125,16 @@ public:
         sd.instances = 2;
         stage_ = std::make_unique<FullscreenStage>(device, h_target_.render_pass_object(), sd);
 
-        // Instance 0 samples the low-res source with NEAREST (the folded-upscale property);
+        // Instance 0 samples the SOURCE at destination UVs -- this stage IS the scene-to-
+        // display resample, so the caller's sampler choice decides how it is filtered. It is
+        // NEAREST for a magnifying fit (crisp blocks, the folded-upscale property) but must
+        // be LINEAR when the destination is SMALLER than the source, where nearest is a point
+        // decimation: see toyengine's ToyRenderConfig::upscale_filter.
         // Instance 1 samples h_target_'s already-full-resolution output with LINEAR, which is
         // exact (not an approximation) at coc == 0: a bilinear tap sampled precisely at a
         // texel centre returns that texel unchanged, so the sharp band survives both stages
         // bit-identical to a plain nearest upscale -- see tilt_shift.frag's early-out.
-        stage_->set(0, kHorizontal).bind_image(0, source, nearest_sampler);
+        stage_->set(0, kHorizontal).bind_image(0, source, source_sampler);
         stage_->set(0, kVertical).bind_image(0, h_target_.color_view_typed(), linear_sampler_);
     }
 
