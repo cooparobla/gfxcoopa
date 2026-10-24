@@ -33,11 +33,12 @@ namespace targets {
  * @brief Manages the directional shadow atlas, point light cubemap depth target,
  *        and spot light depth map.
  *
- * The directional map is an ATLAS of `dir_cascades` square tiles, each `dir_res` texels on
- * a side, laid out 1x1 / 2x1 / 2x2 (see grid_for()). Each tile holds one cascade -- an
- * independent ortho fit to one slice of the camera's depth range -- so near-camera geometry
- * gets a shadow box a few metres across while distant geometry keeps a coarse one. A
- * one-cascade target is bit-identical to a plain single shadow map.
+ * The directional map is an ATLAS of `dir_cascades` square tiles (up to 8), each `dir_res`
+ * texels on a side, laid out 1x1 / 2x1 / 2x2 / 3x2 / 4x2 (see grid_for()). Each tile holds
+ * one level -- an independent ortho fit, either to one slice of the camera's depth range
+ * (the frustum/focus fits) or to one concentric ring around the camera (the clipmap fit) --
+ * so near geometry gets a shadow box a few metres across while distant geometry keeps a
+ * coarse one. A one-tile target is bit-identical to a plain single shadow map.
  *
  * The tiles share one image, one VkRenderPass and one framebuffer: the cascade loop
  * (record_directional_shadow_() in toyengine's toy_render_pipeline.h) calls
@@ -53,7 +54,7 @@ public:
                     uint32_t dir_cascades = 1)
         : device_(device), allocator_(allocator),
           dir_res_(dir_res), cube_res_(cube_res), spot_res_(spot_res),
-          dir_cascades_(std::clamp(dir_cascades, 1u, 4u)),
+          dir_cascades_(std::clamp(dir_cascades, 1u, 8u)),
           dir_grid_(grid_for(dir_cascades))
     {
         create_resources_();
@@ -62,13 +63,15 @@ public:
     /**
      * @brief The atlas tile grid a cascade count uses: `.first` tiles per row, `.second` rows.
      *
-     * 1 -> 1x1, 2 -> 2x1, 3 and 4 -> 2x2. Never a square grid with an unused row: the image
-     * is allocated at `dir_res * grid`, so a wasted row is wasted VRAM. Mirrors
-     * toy::render::cascade_atlas_grid(), which the shader-side uv math is derived from.
+     * 1 -> 1x1, 2 -> 2x1, 3/4 -> 2x2, 5/6 -> 3x2, 7/8 -> 4x2. Widest-first and never a row
+     * that sits empty: the image is allocated at `dir_res * grid`, so a wasted row is wasted
+     * VRAM. Mirrors toy::render::cascade_atlas_grid(), which the shader-side uv math is
+     * derived from -- the two must agree or every tile lookup lands in the wrong place.
      */
     static std::pair<uint32_t, uint32_t> grid_for(uint32_t cascades) {
-        const uint32_t n = std::clamp(cascades, 1u, 4u);
-        return {std::min(n, 2u), (n + 1u) / 2u};
+        const uint32_t n = std::clamp(cascades, 1u, 8u);
+        const uint32_t columns = n <= 2u ? n : n <= 4u ? 2u : n <= 6u ? 3u : 4u;
+        return {columns, (n + columns - 1u) / columns};
     }
 
     ~ShadowMapTarget() {
@@ -336,6 +339,9 @@ public:
     uint32_t dir_atlas_height() const { return dir_res_ * dir_grid_.second; }
 
     VkImageView dir_shadow_view() const { return dir_depth_image_->view(); }
+    /// The directional atlas image itself -- for the static-caster cache, which copies tiles
+    /// into it (toyengine's DirShadowCache; see the TRANSFER_DST note in create_resources_()).
+    VkImage dir_shadow_image() const { return dir_depth_image_->handle(); }
     VkImageView cube_shadow_view() const { return cube_array_view_; }
     VkImageView spot_shadow_view() const { return spot_depth_image_->view(); }
 
@@ -351,10 +357,16 @@ private:
     void create_resources_() {
         // 1. Directional Depth Atlas (2D) -- dir_cascades_ tiles of dir_res_ in a
         //    dir_grid_ layout; one cascade makes this exactly a dir_res_ square map.
+        // TRANSFER_DST is for the static-caster cache: toyengine's DirShadowCache renders a
+        // level's unmoving depth once into its own image and copies the tile in each frame
+        // (vkCmdCopyImage), so the one image every shader samples stays the live atlas and no
+        // descriptor is ever rebound. Declared unconditionally -- a usage flag the cache
+        // happens not to exercise costs nothing.
         dir_depth_image_ = std::make_unique<memory::Image>(
             device_, allocator_, dir_atlas_width(), dir_atlas_height(),
             VK_FORMAT_D32_SFLOAT,
-            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             VK_IMAGE_ASPECT_DEPTH_BIT
         );
 

@@ -28,6 +28,16 @@ static constexpr uint32_t MAX_SPOT_LIGHTS  = 8;
 /** Cascades the directional shadow atlas can hold. 4 fills a 2x2 tile grid exactly;
  *  the limit is the grid, not the UBO -- see LightUBO::dir_cascade_matrix. */
 static constexpr uint32_t MAX_DIR_CASCADES = 4;
+/** @brief Directional shadow LEVELS the extended block carries (clipmap or cascade fit).
+ *
+ *  Distinct from MAX_DIR_CASCADES, which is frozen at 4: dir_cascade_matrix sits mid-struct
+ *  (LightUBO's local_shadows/sky/fog/cloud/toon blocks follow it, and VolumetricsUBO shares
+ *  the constant), so raising it would shift every later field in two UBOs and desync every
+ *  hand-written GLSL mirror. The full level set lives in the APPENDED dir_level_* block
+ *  instead, which costs nothing to grow. 8 is the ceiling because 8 tiles pack exactly into
+ *  the 4x2 atlas grid, 8 per-level scalars pack exactly into vec4[2], and at the default
+ *  growth ratio the outermost ring already covers 128x the finest one's radius. */
+static constexpr uint32_t MAX_DIR_SHADOW_LEVELS = 8;
 
 /** Point and spot lights that can hold a shadow at once, in the shared local-light shadow
  *  atlas (see LocalShadowBlock). A point light takes 6 views, a spot 1. */
@@ -286,6 +296,41 @@ struct alignas(16) LightUBO {
     glm::vec4 toon_params1 = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f); /**< rgb = shadow tint the darkest
                                                    bands are pulled toward (white = no tint),
                                                    w = 1 bands point/spot distance falloff too. */
+
+    // --- Extended directional shadow levels (appended last per the append-only rule) ---
+    //
+    // The FULL level set, 0..dir_level_info.x-1 -- not merely the levels past the fourth.
+    // Every toyengine shading path reads THESE; the dir_cascade_* block above keeps holding
+    // levels 0..min(count,4)-1 so a consumer compiled against the shorter std140 prefix
+    // (gfxcoopa's probe_capture.frag, blendy) still shades from the near levels rather than
+    // reading garbage. The CPU fills both every frame, so nothing needs a dual path.
+    //
+    // Per-level scalars are packed four to a vec4 -- level L is [L >> 2][L & 3] -- because
+    // std140 gives a float[] a 16-byte stride, which would waste 3/4 of each array.
+    glm::mat4 dir_level_matrix[MAX_DIR_SHADOW_LEVELS] = {
+        glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f),
+        glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f)
+    };                                                     /**< Per-level light projection * view.
+                                        Slots past the live count repeat the last live level. */
+    glm::vec4 dir_level_pcf_texels[MAX_DIR_SHADOW_LEVELS / 4]  = {glm::vec4(0.0f), glm::vec4(0.0f)};
+                                                           /**< Per-level PCF radius in atlas
+                                        texels (0 = hard compare); dir_cascade_pcf_texels' quantity. */
+    glm::vec4 dir_level_normal_bias[MAX_DIR_SHADOW_LEVELS / 4] = {glm::vec4(0.0f), glm::vec4(0.0f)};
+                                                           /**< Per-level normal offset, world units. */
+    glm::vec4 dir_level_pcss_scale[MAX_DIR_SHADOW_LEVELS / 4]  = {glm::vec4(0.0f), glm::vec4(0.0f)};
+                                                           /**< Per-level PCSS penumbra texels per
+                                        unit [0,1] light-space depth gap. */
+    glm::vec4 dir_level_depth_bias[MAX_DIR_SHADOW_LEVELS / 4]  = {glm::vec4(0.0f), glm::vec4(0.0f)};
+                                                           /**< Per-level size of one texel in that
+                                        level's [0,1] light depth. */
+    glm::vec4 dir_level_info = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f); /**< x = live level count,
+                                        y = tiles per atlas row (grid_x), z = selection inset in
+                                        TILE uv, w = transition band in tile uv. Supersedes
+                                        dir_cascade_info, which keeps the first four levels' copy. */
+    glm::vec4 dir_level_age[MAX_DIR_SHADOW_LEVELS / 4] = {glm::vec4(0.0f), glm::vec4(0.0f)};
+                                                           /**< Per-level frames since its tile was
+                                        last re-rendered (0 = this frame). Drives the ShadowCascades
+                                        debug view's staleness tint; ignored by shading. */
 };
 
 // Pins the offset of sky_zenith -- where a shader LightUBO prefix with no spot support
@@ -314,6 +359,14 @@ static_assert(offsetof(LightUBO, fog_color) == offsetof(LightUBO, sky_extra) + s
 static_assert(offsetof(LightUBO, cloud_shadow) == offsetof(LightUBO, fog_water) + sizeof(glm::vec4),
     "LightUBO's cloud shadow block must immediately follow the fog block (append-only rule).");
 static_assert(sizeof(LocalShadowBlock) % 16 == 0, "LocalShadowBlock must keep std140's 16-byte stride.");
+static_assert(offsetof(LightUBO, dir_level_matrix) == offsetof(LightUBO, toon_params1) + sizeof(glm::vec4),
+    "LightUBO's extended directional-level block must immediately follow toon_params1 -- appended "
+    "last per the append-only rule, so every shorter shader prefix still byte-matches.");
+static_assert(offsetof(LightUBO, dir_level_info) ==
+                  offsetof(LightUBO, dir_level_matrix) + sizeof(glm::mat4) * MAX_DIR_SHADOW_LEVELS +
+                      sizeof(glm::vec4) * (MAX_DIR_SHADOW_LEVELS / 4) * 4,
+    "LightUBO's extended level block is packed tighter or looser than the std140 GLSL block in "
+    "light_ubo_body.glsl expects (mat4[8] has a 64-byte stride there too).");
 
 /**
  * @class LightData
