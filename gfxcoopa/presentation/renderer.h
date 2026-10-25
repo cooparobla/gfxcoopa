@@ -151,6 +151,32 @@ public:
      *                  handoff instead of leaving it to chance.
      * @return True if the frame was presented successfully, false if the window was minimized.
      */
+    /**
+     * @brief Sealed overloads: the clear colour as gfxcoopa's own ClearColor, so a consumer
+     *        never names VkClearColorValue (see tools/check_no_vulkan.sh's layering rule).
+     */
+    bool draw_frame(std::function<void(command::CommandBuffer&)> record_fn,
+                    ClearColor clear_color,
+                    std::function<void()> on_resize = nullptr,
+                    std::function<void(command::CommandBuffer&)> pre_pass_fn = nullptr,
+                    std::function<void(command::CommandBuffer&)> post_pass_fn = nullptr)
+    {
+        return draw_frame(std::move(record_fn),
+                          VkClearColorValue{{clear_color.r, clear_color.g, clear_color.b, clear_color.a}},
+                          std::move(on_resize), std::move(pre_pass_fn), std::move(post_pass_fn));
+    }
+
+    /// @copydoc draw_frame(std::function<void(command::CommandBuffer&)>, ClearColor, std::function<void()>, std::function<void(command::CommandBuffer&)>, std::function<void(command::CommandBuffer&)>)
+    bool begin_frame(std::function<void(command::CommandBuffer&)> record_fn,
+                     ClearColor clear_color,
+                     std::function<void()> on_resize = nullptr,
+                     std::function<void(command::CommandBuffer&)> pre_pass_fn = nullptr,
+                     std::function<void(command::CommandBuffer&)> post_pass_fn = nullptr)
+    {
+        return draw_frame(std::move(record_fn), clear_color, std::move(on_resize),
+                          std::move(pre_pass_fn), std::move(post_pass_fn));
+    }
+
     bool draw_frame(std::function<void(command::CommandBuffer&)> record_fn,
                     VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}},
                     std::function<void()> on_resize = nullptr,

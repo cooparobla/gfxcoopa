@@ -22,6 +22,7 @@
 #include <string>
 
 #include <gfxcoopa/core/device.h>
+#include <gfxcoopa/types/clear.h>   // Extent2D
 #include <gfxcoopa/core/surface.h>
 #include <gfxcoopa/util/error.h>
 
@@ -78,6 +79,8 @@ public:
      * @return VkExtent2D with width and height.
      */
     VkExtent2D extent() const { return extent_; }
+    /// @brief Sealed sibling of extent(), so a consumer never names VkExtent2D.
+    Extent2D extent_typed() const { return Extent2D{extent_.width, extent_.height}; }
 
     /**
      * @brief Returns the number of swapchain images.

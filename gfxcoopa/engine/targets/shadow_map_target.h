@@ -17,6 +17,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <gfxcoopa/core/device.h>
+#include <gfxcoopa/detail/vk_convert.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/memory/image.h>
 #include <gfxcoopa/pipeline/render_pass.h>
@@ -348,6 +349,9 @@ public:
     /// TextureView identities of the same maps, for consumers whose binding API
     /// takes gfxcoopa's opaque handle (e.g. FullscreenStage's descriptor sets).
     coopa::gfx::TextureView dir_shadow_view_typed() const { return dir_depth_image_->view_typed(); }
+    /// The cube array view is built by hand here (not owned by an Image), so it is wrapped
+    /// directly rather than delegating to Image::view_typed().
+    coopa::gfx::TextureView cube_shadow_view_typed() const { return detail::wrap(cube_array_view_); }
     coopa::gfx::TextureView spot_shadow_view_typed() const { return spot_depth_image_->view_typed(); }
 
     pipeline::RenderPass& dir_render_pass() const { return *dir_render_pass_; }

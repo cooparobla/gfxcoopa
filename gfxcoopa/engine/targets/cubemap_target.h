@@ -15,6 +15,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <gfxcoopa/core/device.h>
+#include <gfxcoopa/detail/vk_convert.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/memory/image.h>
 #include <gfxcoopa/pipeline/render_pass.h>
@@ -121,6 +122,11 @@ public:
     /// subresource from the mips 1..N-1 the prefilter pass writes, so no
     /// feedback loop.
     VkImageView mip0_cube_view() const { return mip0_cube_view_; }
+
+    /// TextureView identities of the two views above, for consumers binding through
+    /// gfxcoopa's opaque handle rather than a raw Vulkan one.
+    TextureView cubemap_view_typed() const    { return detail::wrap(cubemap_view_); }
+    TextureView mip0_cube_view_typed() const  { return detail::wrap(mip0_cube_view_); }
     uint32_t resolution() const { return res_; }
     uint32_t mip_levels() const { return mip_levels_; }
 

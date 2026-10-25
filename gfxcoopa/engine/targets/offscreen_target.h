@@ -128,6 +128,14 @@ public:
      * @param cmd   Command buffer to record into.
      * @param clear Color attachment clear value.
      */
+    /**
+     * @brief Sealed overload: the clear colour as gfxcoopa's own ClearColor, so a consumer
+     *        never has to name VkClearColorValue (see tools/check_no_vulkan.sh).
+     */
+    void begin(command::CommandBuffer& cmd, ClearColor clear) const {
+        begin(cmd, VkClearColorValue{{clear.r, clear.g, clear.b, clear.a}});
+    }
+
     void begin(command::CommandBuffer& cmd, VkClearColorValue clear = {{0.05f, 0.05f, 0.05f, 1.0f}}) const {
         cmd.begin_render_pass(
             render_pass_->handle(),
