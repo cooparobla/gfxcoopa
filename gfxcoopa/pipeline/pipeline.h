@@ -40,6 +40,7 @@ enum class BlendMode {
     PremultipliedAlpha,   ///< src*1 + dst*(1-srcA). For premultiplied-alpha source data (e.g. a sprite atlas composited with coverage baked in).
     Additive,             ///< src*srcA + dst*1. Glow/particle-style accumulation.
     Multiply,             ///< src*dst (color), dst unchanged (alpha). Tinting/shadow-style darkening.
+    Max,                  ///< max(src, dst) per channel, alpha included; blend factors are ignored. For accumulating a COVERAGE or MASK buffer, where overlapping draws must union rather than sum. The alternatives both misbehave there: Additive scales rgb by the source alpha and then sums, so coverage saturates and any ramp carried in a channel double-counts, while None leaves the result dependent on draw order.
 };
 
 /**
@@ -552,6 +553,18 @@ private:
             blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
             blend_attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::Max:
+            // Factors are not consulted by VK_BLEND_OP_MAX, but leave them at ONE rather than
+            // uninitialized: a later edit switching this case's op back to ADD would otherwise
+            // silently inherit whatever was here.
+            blend_attachment.blendEnable         = VK_TRUE;
+            blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.colorBlendOp        = VK_BLEND_OP_MAX;
+            blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend_attachment.alphaBlendOp        = VK_BLEND_OP_MAX;
             break;
         case BlendMode::Multiply:
             blend_attachment.blendEnable         = VK_TRUE;
