@@ -81,12 +81,12 @@ built on it.
 ### 1. Clone
 
 gfxcoopa builds on [libcoopa](https://github.com/cooparobla/libcoopa) (scene graph, assets,
-input, glm, fkYAML). CMake expects libcoopa in a sibling directory named `libcoopa`. volk is a
-git submodule.
+input, glm, fkYAML). CMake expects libcoopa in a sibling directory named `libcoopa`. There are
+no submodules -- volk, VMA and stb_image are vendored in `includes/`.
 
 ```bash
 mkdir coopa && cd coopa
-git clone --recurse-submodules git@github.com:cooparobla/gfxcoopa.git
+git clone git@github.com:cooparobla/gfxcoopa.git
 git clone git@github.com:cooparobla/libcoopa.git
 ```
 
@@ -222,7 +222,7 @@ gfxcoopa/
     └── util/        samplers, instance batcher, texture cache, SMAA textures, SH math
 assets/shaders/  GI, SMAA and test shaders; gfx/ holds the shared GLSL headers
 cmake/           GfxShaders.cmake (gfx_add_shader_target)
-includes/        vendored volk (submodule), VMA, stb_image
+includes/        vendored volk, VMA, stb_image
 src/             gfx_impl.cpp: the single TU that compiles volk/VMA/stb implementations
 tools/           check_no_vulkan.sh
 tests/           test suites (<suite>_test.cpp) and the shared GPU fixture (support/)
@@ -242,6 +242,10 @@ tests/           test suites (<suite>_test.cpp) and the shared GPU fixture (supp
 - **SMAA.** `engine/util/smaa_textures.h` includes `SearchTex.h` and `AreaTex.h` from the
   [SMAA reference implementation](https://github.com/iryoku/smaa). They are not vendored.
   If you use `SmaaPass`, pass `-DSMAA_TEXTURES_DIR=/path/to/smaa/Textures`.
+- **Vendored headers.** `includes/volk/` holds `volk.h`, `volk.c` and volk's MIT licence,
+  copied unmodified from [volk](https://github.com/zeux/volk) at commit `8a2387af`. `volk.h`
+  pulls in `volk.c` itself when `VOLK_IMPLEMENTATION` is defined, so nothing else from the
+  upstream repo is needed. To update, drop in the two files from a newer upstream checkout.
 - **Implementation TU.** `gfxcoopa_impl` compiles the volk, VMA and stb implementations once.
   Do not define `VOLK_IMPLEMENTATION`, `VMA_IMPLEMENTATION` or `STB_IMAGE_IMPLEMENTATION` in
   your own code.
