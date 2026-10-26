@@ -210,6 +210,7 @@ inline void parse_pbr_material_(const fkyaml::node& mat_node, PBRMaterial& mater
         material.displacement_scale = d.is_integer() ? static_cast<float>(d.get_value<int64_t>()) : d.get_value<float>();
     }
     if (mat_node.contains("snow") && mat_node.at("snow").is_boolean()) material.snow = mat_node.at("snow").get_value<bool>();
+    if (mat_node.contains("wet") && mat_node.at("wet").is_boolean()) material.wet = mat_node.at("wet").get_value<bool>();
 
     // Toon (cel) shading, layered on this material's PBR inputs -- see PBRMaterial's own
     // toon_* docs for what each one means and gpu_toon_code() for how they reach the GPU.

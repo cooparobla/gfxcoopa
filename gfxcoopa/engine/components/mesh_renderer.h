@@ -136,6 +136,12 @@ struct PBRMaterial {
     /// panels, interiors the occlusion map misses, anything snow must never whiten.
     bool        snow                       = true;
 
+    /// Rain and local wet patches darken and gloss this material, and pool in its up-facing
+    /// parts (the backbone's wet layer, toyengine's gfx/surface/wetness.glsl). Opt **in**,
+    /// unlike `snow`: the stock weather conditions carry wetness (rain 0.8, storm 1.0,
+    /// overcast 0.25), so defaulting it on would restyle every scene that sees rain.
+    bool        wet                        = false;
+
     // --- Toon (cel) shading ---------------------------------------------------------------
     // Layered ON TOP of this material's PBR inputs rather than replacing them: albedo,
     // metallic, roughness, normal maps, the indirect/ambient term, screen-space AO and SSR all
