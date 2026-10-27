@@ -142,6 +142,13 @@ struct PBRMaterial {
     /// overcast 0.25), so defaulting it on would restyle every scene that sees rain.
     bool        wet                        = false;
 
+
+    /// Set by `toy::fire::FireSystem` while this material is BURNING, which switches on the
+    /// burn-front surface layer (`gfx/surface/burn.glsl`). Runtime state, not authoring: it is
+    /// not read from YAML and not written back out, and a material nobody has set alight never
+    /// pays for the layer.
+    bool burning = false;
+
     // --- Toon (cel) shading ---------------------------------------------------------------
     // Layered ON TOP of this material's PBR inputs rather than replacing them: albedo,
     // metallic, roughness, normal maps, the indirect/ambient term, screen-space AO and SSR all
