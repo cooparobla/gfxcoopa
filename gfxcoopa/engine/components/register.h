@@ -648,7 +648,9 @@ inline void register_render_components(core::Device& device,
 
             if (node.contains("shape")) {
                 std::string sh = node.at("shape").get_value<std::string>();
-                vol->shape = (sh == "sphere" || sh == "Sphere") ? VolumeShape::Sphere : VolumeShape::Box;
+                vol->shape = (sh == "sphere" || sh == "Sphere")
+                               ? VolumeShape::Sphere
+                               : (sh == "shell" || sh == "Shell") ? VolumeShape::Shell : VolumeShape::Box;
             }
             if (node.contains("extent")) {
                 const auto& e = node.at("extent");

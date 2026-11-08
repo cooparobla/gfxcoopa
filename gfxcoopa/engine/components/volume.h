@@ -24,10 +24,16 @@ enum class VolumeKind {
 };
 
 /// Shape a VolumeComponent is bounded by. Matches VolumeGPU::extent_shape.w
-/// (0 = Box, 1 = Sphere).
+/// (0 = Box, 1 = Sphere, 2 = Shell).
 enum class VolumeShape {
     Box,
     Sphere,
+    /// A sphere that is dense near an INNER radius and fades OUTWARD toward `extent.x`, the
+    /// opposite sense from Sphere (which peaks at its own centre and fades toward its surface).
+    /// `height_base`/`height_falloff` are reused as the inner radius and the altitude decay
+    /// scale rather than a world-Z height -- the one shape meant for something that sits ON a
+    /// sphere's surface (a planet's atmosphere) rather than floating free in world space.
+    Shell,
 };
 
 /**
